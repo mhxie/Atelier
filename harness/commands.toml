@@ -119,6 +119,8 @@ category = "knowledge"
 status = "portable-adapted"
 description = "Promote L2 working notes into a schema-compliant L4 wiki entry."
 codex_prompt = "Execute the $promote skill in this Codex thread using `.claude/commands/promote.md` as the authoritative spec."
+# Reflection workflows default to fresh sessions (a reused session pollutes
+# the new reflection); resume_friendly marks the continuation-safe exceptions.
 resume_friendly = true
 
 [commands.lint]

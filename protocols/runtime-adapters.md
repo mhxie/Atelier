@@ -86,6 +86,41 @@ chain: `scripts/routine_runner.sh` fixes them to Codex because their sandbox,
 plugin loading, sanitized environment, and approval policy are implemented and
 tested at that runtime edge.
 
+## Plugins and Permissions
+
+The canonical write path is local: the runtime writes files under `$OV/`, and
+a filesystem sync client (such as Google Drive) handles persistence. When
+`$OV/` is outside the workspace, add it as a writable root while keeping the
+sandbox at workspace-write:
+
+```bash
+codex -C . --add-dir "$OV" --sandbox workspace-write --ask-for-approval on-request '$hi'
+```
+
+Write access being technically possible does not bypass domain rules: ordinary
+`$OV/` writes still require approval, and daily notes remain user-authored
+except for verbatim Scribe capture. Beyond repo + `$OV` read/write and local
+shell (`uv`, `rg`, `git`, `jq`), everything is optional: live web search for
+the research agents (`--search`), outbound shell network for the Readwise CLI.
+
+No plugin is required; plugins only add access to cloud data not already on
+disk:
+
+| Integration | Authorization | Supported use |
+|---|---|---|
+| Gmail plugin | plugin enabled + Google OAuth | mail search/read for user-requested context |
+| Google Drive plugin | plugin enabled + Google OAuth | cloud-only Drive files; Drive-writing routines need the connector on their hosting runtime |
+| Readwise CLI | `readwise login` or token | Reader search, saved documents, inbox curation, anchor snapshots |
+| GitHub plugin | connector auth | remote issues/PRs; local `git` works without it |
+| Google Calendar plugin | Google OAuth | fork-added calendar workflows; no core command depends on it |
+
+Plugin readiness has four gates (installed, enabled, OAuth completed, tools
+loaded in a fresh session), and each runtime manages its own connections:
+authorizing a service on Claude.ai does not configure the Codex plugin, or
+vice versa. References: [Codex plugins](https://learn.chatgpt.com/docs/plugins.md),
+[sandbox and approvals](https://learn.chatgpt.com/docs/agent-approvals-security.md),
+[MCP configuration](https://learn.chatgpt.com/docs/extend/mcp).
+
 ## Session replay
 
 When replay is enabled through the machine-local preference or process
