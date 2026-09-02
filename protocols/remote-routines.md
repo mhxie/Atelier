@@ -63,6 +63,16 @@ Routine prompts implement this by calling Google Drive MCP `create_file` with a 
 
 **Conflict-resolution rule (multi-channel routines).** When a routine uses more than one output channel (any combination of Drive, email, Calendar, or future MCP backends), the Drive file is the canonical output. Every secondary channel MUST point at the Drive file (`see $OV/<path>/<file>.md`) and cap its own content at 5 lines of summary. The user reads one source of truth, not parallel summaries.
 
+**Presentation channels (exception to the 5-line cap).** The cap exists to prevent *parallel summaries*: a second, independently-worded account of the same run that the user must reconcile against the canonical file. A channel that delivers the canonical artifact itself is not a parallel summary and is not capped. A channel qualifies as a presentation channel only when all of these hold:
+
+- Its content is generated from the canonical artifact, not written separately. One render, two destinations.
+- It adds no claim absent from the artifact.
+- The artifact is still written to `$OV` first, and the run still completes on artifact attestation, so cues, ack, and audit behave exactly as for any other routine.
+
+Delivery failure on a presentation channel is a secondary-channel failure: it is recorded on the claim and does not fail the cycle, because the source of truth was already persisted. A routine whose *only* output is the presentation channel does not qualify under any reading; the `$OV` write is what makes the channel a presentation of something rather than the thing itself.
+
+The daily digest is the first such routine: it renders one HTML document into its declared `$OV` output directory and mails that same document. Reading it in a mail client is the point, so a 5-line pointer to a local file the user cannot open from a phone would defeat the routine while satisfying the letter of the cap.
+
 **Enforcement.** Three cues in `scripts/cues.py`:
 
 1. `check_routine_policy`: fires a soft cue listing routines that declare neither `drive_write_enforced = true` nor `needs_drive_write_update = true`. Surfaces non-compliance at session start.

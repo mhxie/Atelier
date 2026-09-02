@@ -110,6 +110,54 @@ required_connectors = ["google-drive"]
 optional_connectors = []
 
 [profiles.cloud-drive-synthesis]
+# Digest mail: render a document from other routines' outputs and mail it.
+#
+# `shell_network = "enabled"` is the narrowest setting that works. The digest's
+# article picks are its only bridge into Readwise, and reading the Reader inbox
+# needs the `readwise` CLI, which needs egress. Under `workspace-write` this
+# maps to `sandbox_workspace_write.network_access=true`: the shell reaches the
+# network, the filesystem fence stays. `unrestricted` would have forced
+# `danger-full-access`, which is a different order of exposure for one CLI call.
+# `web_search` stays off: the model needs the CLI, not a browser.
+#
+# Delivery is SMTP through `routine_digest.py mail`, not a connector. That was
+# forced rather than chosen: the Codex Gmail plugin marks `send_email` as
+# requiring approval, and an unattended routine runs under
+# `approval_policy = "never"`, so the send fails outright (verified 2026-08-31
+# by the gmail:send-self smoke). The only way past it would be
+# `--dangerously-bypass-approvals-and-sandbox`, which drops the filesystem fence
+# for one API call.
+#
+# Doing it deterministically turned out to be the stronger design anyway. No
+# plugin means `user_config = "ignore"` comes back, and that was this profile's
+# largest exposure: loading user config also readmits user hooks and user MCP
+# servers into an unattended run. The recipient now lives in private config that
+# the model never reads, so the verb is a description rather than the only
+# enforcement.
+[profiles.local-digest-mail]
+surface = "local"
+sandbox = "workspace-write"
+atelier_access = "read"
+web_search = "disabled"
+shell_network = "enabled"
+user_config = "ignore"
+timeout_seconds = 1800
+reasoning_effort = "medium"
+permissions = [
+  "atelier:read",
+  "vault:read-write",
+  # Read-only, and the reason the digest has a Readwise section at all. Without
+  # it the first run self-vetoed the article picks and reported
+  # `skipped_inputs: Readwise new-article feed (permission not allowlisted)`,
+  # which was the prompt allowlist working correctly on an incomplete profile.
+  "readwise:read",
+  "mail:send-self",
+]
+required_clis = ["python3", "readwise", "security"]
+required_plugins = []
+optional_plugins = []
+allowed_commands = ["/run-routine"]
+
 surface = "cloud"
 web_search = "disabled"
 reasoning_effort = "low"

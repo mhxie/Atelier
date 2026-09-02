@@ -106,6 +106,13 @@ status = "portable-adapted"
 description = "Goal-aware content curation and inbox triage."
 codex_prompt = "Execute the $curate skill in this Codex thread using `.claude/commands/curate.md` as the authoritative spec."
 
+[commands.digest]
+source = ".claude/commands/digest.md"
+category = "knowledge"
+status = "portable-adapted"
+description = "Daily and weekly digest: action surface, mandatory configured status updates, and routine intel, written to $OV and mailed."
+codex_prompt = "Execute the $digest skill in this Codex thread using `.claude/commands/digest.md` as the authoritative spec."
+
 [commands.sync]
 source = ".claude/commands/sync.md"
 category = "knowledge"

@@ -389,6 +389,46 @@ pattern = "solo"
 expected_subagent_count = 1
 parallel = false
 
+# Daily / weekly digest: action surface above the fold, routine intel below,
+# written to $OV and mailed. Procedure: .claude/commands/digest.md. The
+# orchestrator does the judgment inline (overview, decisions, article scoring)
+# and the deterministic work belongs to routine_digest.py / daily_brief.py, so
+# `agents = []` and no subagent is dispatched.
+#
+# Priority 26: above curate (23) because a digest run also reads the Readwise
+# inbox, and below sync (28) so sync keeps its explicit "digest zettelm" /
+# "digest mobile" phrases. Bare "digest" is deliberately not a pattern: it is a
+# short generic substring that would swallow "digest this article". Note that
+# "日报" has the same defect and is still listed: it matched "read wip的日报周报
+# 开发" on 2026-08-31, a request to read this feature's source rather than run
+# it. Narrowing it needs a routing decision, not just an edit here.
+#
+# "周报" routes here rather than to intents.weekly (45). Weekly review keeps its
+# own explicit English patterns plus the /weekly command name; move this pattern
+# if the Chinese term should mean the reflection review instead.
+[intents.digest]
+patterns = [
+    "日报",
+    "周报",
+    "今日简报",
+    "routine digest",
+    "daily digest",
+    "weekly digest",
+    "汇总 routine",
+    "routine 汇总",
+    "digest 邮件",
+    "邮件 digest",
+]
+mode = "digest"
+procedure = ".claude/commands/digest.md"
+context_budget_bytes = 8192
+agents = []
+profile_reads = ["identity.md", "directions.md"]
+priority = 26
+pattern = "solo"
+expected_subagent_count = 0
+parallel = false
+
 # Promote L2 notes into a schema-compliant L4 wiki entry. Procedure:
 # .claude/commands/promote.md. Researcher (Phase 1 candidate gather) then
 # Curator (Phase 2 draft); sequential, so parallel = false.
