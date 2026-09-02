@@ -198,3 +198,30 @@ class CodexParseRobustnessTests(unittest.TestCase):
         self.assertEqual(entry["window"], "plus · 300m")
         self.assertEqual(entry["left_percent"], 40)
         self.assertEqual(entry["level"], "low")
+
+
+class ConfigPlaceTests(unittest.TestCase):
+    def test_place_falls_back_to_the_private_digest_config(self):
+        seen = []
+
+        def fake(place, day):
+            seen.append(place)
+            return {"place": place, "tmin": 1, "tmax": 2, "summary": "晴", "precip_probability": 0, "hours": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ov = Path(tmp)
+            (ov / "_meta").mkdir()
+            (ov / "_meta" / "digest.toml").write_text('[weather]\nplace = "Lisbon"\n', encoding="utf-8")
+            context = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov, weather_fetcher=fake, ov=ov)
+            self.assertEqual(seen, ["Lisbon"])
+            self.assertEqual(context["weather"]["place_source"], "config")
+            explicit = dc.build(date(2026, 9, 2), place="Porto", now=NOW, claude_cache=ov, codex_sessions=ov, weather_fetcher=fake, ov=ov)
+            self.assertEqual(seen[-1], "Porto")
+            self.assertEqual(explicit["weather"]["place_source"], "argument")
+
+    def test_no_place_anywhere_means_no_weather_and_no_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ov = Path(tmp)
+            context = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov, ov=ov)
+        self.assertIsNone(context["weather"])
+        self.assertFalse(any("weather" in w for w in context["warnings"]))

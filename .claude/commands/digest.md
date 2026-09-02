@@ -61,14 +61,15 @@ fi
 ```
 
 `PLACE` is where the day is spent, and it is the one input here that needs
-judgment: read today's calendar first, take the city of the first located
-event, and fall back to the home city when nothing is located. Pass it as a
-city name (`"Lisbon"`), not an address. `daily_context.py` geocodes it and
-fetches the day's forecast from Open-Meteo, the only network call it makes; the
-harness quota half reads the claude-hud usage snapshot and the newest Codex
-session log from disk, so both numbers carry their snapshot age into the
-document. Leave `PLACE` unset when the calendar is unavailable; the masthead
-then shows no weather and the context still carries the quota.
+judgment: interactively, read today's calendar, take the city of the first
+located event, and pass it as a city name (`"Lisbon"`), not an address. Leave
+it unset when the calendar is unavailable, which is always the case for the
+scheduled run: `daily_context.py` then falls back to `[weather] place` in the
+private `$OV/_meta/digest.toml`, and with neither it renders no weather and
+still carries the quota. It geocodes the place and fetches the day's forecast
+from Open-Meteo, the only network call it makes; the harness quota half reads
+the claude-hud usage snapshot and the newest Codex session log from disk, so
+both numbers carry their snapshot age into the document.
 
 `PY` is the interpreter for every script call in this procedure, and it is
 never `uv run`. The scheduled routine exports `$ATELIER_PYTHON` because inside
@@ -238,8 +239,19 @@ Section order for **daily**:
    and the day after; later days collapse to the heading counts on their own,
    so always fill the object when a sweep exists.
 
+6. **社会** (conditional): only when a PRM audit under `<paths.reflections>/`
+   named `YYYY-MM-DD-prm-audit.md` is dated inside the window, or a daily note
+   in the window records a birthday, a long-silent contact, or a support
+   interaction. One to three bullets, each citing the audit or note path. No
+   audit and no note means no section; never pad it with the roster.
+
+Concerts and anime already reach the first screen through the brief's tracking
+cache (concerts tier 1, anime tier 3), so there is no 文娱 section. News about
+followed people needs a routine with web access and is not part of this
+procedure yet.
+
 For **weekly**, drop 新产品 and 新文章 and lead with 信号 across the seven days,
-then 需要的决策. 前沿实验室 stays.
+then 需要的决策. 前沿实验室 and the conditional 社会 stay.
 
 ### 4b. Curate the depth
 

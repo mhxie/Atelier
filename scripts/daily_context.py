@@ -19,10 +19,11 @@ A passive snapshot can be a day old. That is acceptable for a weekly window,
 which is why the digest shows the snapshot time rather than hiding it, and why
 this script never opens a network connection for quota.
 
-Weather is the one network call, and only when ``--place`` is given: the digest
-procedure reads the calendar, names the place the day is spent in, and passes
-it here. Open-Meteo needs no key. A failed fetch becomes a warning, never a
-missing document.
+Weather is the one network call. The place comes from ``--place`` when the
+digest procedure could read the calendar, otherwise from the private
+``$OV/_meta/digest.toml`` (``[weather] place = "..."``), which is what an
+unattended run uses. No place, no weather. Open-Meteo needs no key. A failed
+fetch becomes a warning, never a missing document.
 
 Usage:
     daily_context.py [--place "Lisbon"] [--date YYYY-MM-DD] --json [--out F]
@@ -43,7 +44,11 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import PathsError, vault_root  # noqa: E402
+
 CONTEXT_SCHEMA = 1  # must match routine_digest.CONTEXT_SCHEMA
+DIGEST_CONFIG = "_meta/digest.toml"
 
 HTTP_TIMEOUT = 12
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -298,6 +303,26 @@ def fetch_weather(place: str, day: date) -> dict[str, Any]:
     return summary
 
 
+def place_from_config(ov: Path | None) -> str | None:
+    """`[weather] place` from the private digest config, or None."""
+    if ov is None:
+        try:
+            ov = vault_root()
+        except PathsError:
+            return None
+    path = ov / DIGEST_CONFIG
+    if not path.is_file():
+        return None
+    try:
+        import tomllib
+
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    place = (data.get("weather") or {}).get("place") if isinstance(data, dict) else None
+    return str(place).strip() or None if place else None
+
+
 # ---------------------------------------------------------------- build
 
 
@@ -309,6 +334,7 @@ def build(
     claude_cache: Path | None = None,
     codex_sessions: Path | None = None,
     weather_fetcher=fetch_weather,
+    ov: Path | None = None,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     home = Path.home()
@@ -329,9 +355,15 @@ def build(
         warnings.append("codex quota: no rate_limits event found in recent sessions")
 
     weather: dict[str, Any] | None = None
+    place_source = "argument" if place else ""
+    if not place:
+        place = place_from_config(ov)
+        place_source = "config" if place else ""
     if place:
         try:
             weather = weather_fetcher(place, day)
+            if weather is not None:
+                weather["place_source"] = place_source
         except Exception as exc:  # network, geocoding, shape: all one outcome
             warnings.append(f"weather unavailable for {place!r}: {exc!r}")
 

@@ -1478,7 +1478,10 @@ def render(
     context = context or {}
     counts = manifest.get("counts", {})
     parts: list[str] = []
-    parts.append(f'<div style="{_S_WRAP}">')
+    # lang lets mail clients pick CJK fallbacks and hyphenation rules for the
+    # mixed Chinese and English body; overflow-wrap keeps a long URL from
+    # widening the column on a phone.
+    parts.append(f'<div lang="zh-CN" style="{_S_WRAP}overflow-wrap:anywhere;">')
     parts.append(_render_masthead(manifest, context))
 
     # Provenance counts are bookkeeping, not news: they move to the colophon
