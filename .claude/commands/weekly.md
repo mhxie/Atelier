@@ -148,6 +148,29 @@ Where did your attention actually go vs. where you wanted it to go?
 - Apply Pareto: What 20% of activities produced 80% of your week's value?
 - What consumed time but produced little?
 
+### 6b. Interest Pulse
+
+Consumption is the signal, not intention. Run
+`uv run scripts/interests.py ingest --days 10` so AniList, the live-events
+log, and Readwise are current, then `uv run scripts/interests.py evidence
+--days 10 --json`. The script only curates: it lists attended games nobody
+has attributed and diary lines that might describe consumption. Read them and
+judge; do not parse them. For each item that is about an interest, say what
+you concluded and ask only when the reason is not evident (a game names two
+sides; the person the user came for may not have played). Record each
+conclusion with `scripts/interests.py add --name ... --kind ... --event ...
+--date ...` and clear judged rows with `resolve <id>`. A line that was about a
+restaurant or an errand is simply left alone.
+
+Then three questions, one at a time, each answer recorded the same way:
+
+1. 这周看了、听了、读了、玩了什么新的东西?
+2. 有哪个旧兴趣该停了? (`scripts/interests.py decline <slug>`; silence is not a decline)
+3. 未来 30 天有想去的现场或想追的发售吗? (`--event declared`; the routines pick it up next fire)
+
+Show `scripts/interests.py list` afterwards so the user sees what the routines
+will search next week. Protocol: `protocols/interest-discovery.md`.
+
 ### 7. Next Week's Intention
 Based on the review:
 - **One thing to continue:** [What's working]
@@ -210,6 +233,12 @@ Based on the review:
 - Time well spent: [activities]
 - Time wasted: [activities]
 - Pareto insight: [the 20% that mattered]
+
+## Interest Pulse
+- New this week: <name (kind, event)> or (none)
+- Declined: <slug> or (none)
+- Declared for the next 30 days: <name> or (none)
+- Ledger after pulse: <N active / N watch>
 
 ## Next Week
 - Continue: [what's working]
