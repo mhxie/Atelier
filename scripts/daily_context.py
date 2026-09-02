@@ -249,14 +249,32 @@ def _get_json(url: str, params: dict[str, Any]) -> Any:
         return json.loads(response.read().decode("utf-8"))
 
 
-def geocode(place: str) -> dict[str, Any]:
-    data = _get_json(GEOCODE_URL, {"name": place, "count": 1, "language": "en"})
-    results = data.get("results") or []
-    if not results:
-        raise LookupError(f"no geocoding result for {place!r}")
-    top = results[0]
+def pick_location(results: list[dict[str, Any]], region: str | None, country: str | None) -> dict[str, Any] | None:
+    """The most populous candidate that matches the optional region and
+    country. The geocoder's own first result is not population-ordered: a
+    bare "Mountain View" comes back as the Arkansas town ahead of the
+    California city, and the forecast for the wrong one is worse than none."""
+    def ok(item: dict[str, Any]) -> bool:
+        if region and str(item.get("admin1") or "").lower() != region.lower():
+            return False
+        if country and str(item.get("country_code") or "").lower() != country.lower():
+            return False
+        return True
+
+    candidates = [r for r in results if isinstance(r, dict) and ok(r)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda r: int(r.get("population") or 0))
+
+
+def geocode(place: str, region: str | None = None, country: str | None = None) -> dict[str, Any]:
+    data = _get_json(GEOCODE_URL, {"name": place, "count": 10, "language": "en"})
+    top = pick_location(data.get("results") or [], region, country)
+    if top is None:
+        raise LookupError(f"no geocoding result for {place!r} (region={region!r}, country={country!r})")
     return {
         "name": str(top.get("name") or place),
+        "region": str(top.get("admin1") or ""),
         "latitude": float(top["latitude"]),
         "longitude": float(top["longitude"]),
         "timezone": str(top.get("timezone") or "auto"),
@@ -284,8 +302,8 @@ def summarize_forecast(daily: dict[str, Any], hourly: dict[str, Any], place: str
     }
 
 
-def fetch_weather(place: str, day: date) -> dict[str, Any]:
-    location = geocode(place)
+def fetch_weather(place: str, day: date, region: str | None = None, country: str | None = None) -> dict[str, Any]:
+    location = geocode(place, region, country)
     data = _get_json(
         FORECAST_URL,
         {
@@ -300,11 +318,13 @@ def fetch_weather(place: str, day: date) -> dict[str, Any]:
     )
     summary = summarize_forecast(data.get("daily") or {}, data.get("hourly") or {}, location["name"])
     summary["date"] = day.isoformat()
+    summary["region"] = location["region"]
     return summary
 
 
-def place_from_config(ov: Path | None) -> str | None:
-    """`[weather] place` from the private digest config, or None."""
+def place_from_config(ov: Path | None) -> dict[str, str] | None:
+    """`[weather] place`, with optional `region` and `country`, from the
+    private digest config; None when unset."""
     if ov is None:
         try:
             ov = vault_root()
@@ -319,8 +339,14 @@ def place_from_config(ov: Path | None) -> str | None:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    place = (data.get("weather") or {}).get("place") if isinstance(data, dict) else None
-    return str(place).strip() or None if place else None
+    weather = data.get("weather") if isinstance(data, dict) else None
+    if not isinstance(weather, dict) or not str(weather.get("place") or "").strip():
+        return None
+    out = {"place": str(weather["place"]).strip()}
+    for key in ("region", "country"):
+        if str(weather.get(key) or "").strip():
+            out[key] = str(weather[key]).strip()
+    return out
 
 
 # ---------------------------------------------------------------- build
@@ -330,6 +356,8 @@ def build(
     day: date,
     *,
     place: str | None,
+    region: str | None = None,
+    country: str | None = None,
     now: float | None = None,
     claude_cache: Path | None = None,
     codex_sessions: Path | None = None,
@@ -356,12 +384,17 @@ def build(
 
     weather: dict[str, Any] | None = None
     place_source = "argument" if place else ""
+    region_arg, country_arg = region, country
     if not place:
-        place = place_from_config(ov)
-        place_source = "config" if place else ""
+        configured = place_from_config(ov)
+        if configured:
+            place = configured["place"]
+            region_arg = region_arg or configured.get("region")
+            country_arg = country_arg or configured.get("country")
+            place_source = "config"
     if place:
         try:
-            weather = weather_fetcher(place, day)
+            weather = weather_fetcher(place, day, region_arg, country_arg)
             if weather is not None:
                 weather["place_source"] = place_source
         except Exception as exc:  # network, geocoding, shape: all one outcome
@@ -398,13 +431,15 @@ def text_view(context: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--place", help="Where the day is spent; enables the weather fetch.")
+    parser.add_argument("--region", help="State or province to disambiguate the place.")
+    parser.add_argument("--country", help="Two-letter country code to disambiguate the place.")
     parser.add_argument("--date", help="Forecast date YYYY-MM-DD (default today).")
     parser.add_argument("--json", action="store_true", help="JSON instead of a text report.")
     parser.add_argument("--out", help="Write to a file instead of stdout.")
     args = parser.parse_args(argv)
 
     day = date.fromisoformat(args.date) if args.date else datetime.now().date()
-    context = build(day, place=args.place)
+    context = build(day, place=args.place, region=args.region, country=args.country)
     payload = json.dumps(context, ensure_ascii=False, indent=2) if args.json else text_view(context)
     if args.out:
         Path(args.out).write_text(payload + "\n", encoding="utf-8")

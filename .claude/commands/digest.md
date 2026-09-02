@@ -65,8 +65,9 @@ judgment: interactively, read today's calendar, take the city of the first
 located event, and pass it as a city name (`"Lisbon"`), not an address. Leave
 it unset when the calendar is unavailable, which is always the case for the
 scheduled run: `daily_context.py` then falls back to `[weather] place` in the
-private `$OV/_meta/digest.toml`, and with neither it renders no weather and
-still carries the quota. It geocodes the place and fetches the day's forecast
+private `$OV/_meta/digest.toml` (add `region` there when the name is
+ambiguous; the geocoder otherwise takes the most populous match), and with
+neither it renders no weather and still carries the quota. It geocodes the place and fetches the day's forecast
 from Open-Meteo, the only network call it makes; the harness quota half reads
 the claude-hud usage snapshot and the newest Codex session log from disk, so
 both numbers carry their snapshot age into the document.

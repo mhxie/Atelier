@@ -112,6 +112,7 @@ class BuildTests(unittest.TestCase):
                 now=NOW,
                 claude_cache=Path(tmp) / "nope",
                 codex_sessions=Path(tmp) / "nope",
+                ov=Path(tmp),
             )
         self.assertEqual(context["schema"], dc.CONTEXT_SCHEMA)
         self.assertEqual(context["quota"], [])
@@ -119,7 +120,7 @@ class BuildTests(unittest.TestCase):
         self.assertEqual(len(context["warnings"]), 2)
 
     def test_weather_failure_is_a_warning_not_an_error(self):
-        def boom(place, day):
+        def boom(place, day, region=None, country=None):
             raise OSError("offline")
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -135,7 +136,7 @@ class BuildTests(unittest.TestCase):
         self.assertTrue(any("weather unavailable" in w for w in context["warnings"]))
 
     def test_weather_is_passed_through(self):
-        def fake(place, day):
+        def fake(place, day, region=None, country=None):
             return {"place": place, "tmin": 13, "tmax": 25, "summary": "少云", "precip_probability": 2, "hours": [], "date": day.isoformat()}
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -204,19 +205,19 @@ class ConfigPlaceTests(unittest.TestCase):
     def test_place_falls_back_to_the_private_digest_config(self):
         seen = []
 
-        def fake(place, day):
-            seen.append(place)
+        def fake(place, day, region=None, country=None):
+            seen.append((place, region))
             return {"place": place, "tmin": 1, "tmax": 2, "summary": "晴", "precip_probability": 0, "hours": []}
 
         with tempfile.TemporaryDirectory() as tmp:
             ov = Path(tmp)
             (ov / "_meta").mkdir()
-            (ov / "_meta" / "digest.toml").write_text('[weather]\nplace = "Lisbon"\n', encoding="utf-8")
+            (ov / "_meta" / "digest.toml").write_text('[weather]\nplace = "Lisbon"\nregion = "Lisboa"\n', encoding="utf-8")
             context = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov, weather_fetcher=fake, ov=ov)
-            self.assertEqual(seen, ["Lisbon"])
+            self.assertEqual(seen, [("Lisbon", "Lisboa")])
             self.assertEqual(context["weather"]["place_source"], "config")
             explicit = dc.build(date(2026, 9, 2), place="Porto", now=NOW, claude_cache=ov, codex_sessions=ov, weather_fetcher=fake, ov=ov)
-            self.assertEqual(seen[-1], "Porto")
+            self.assertEqual(seen[-1], ("Porto", None))
             self.assertEqual(explicit["weather"]["place_source"], "argument")
 
     def test_no_place_anywhere_means_no_weather_and_no_error(self):
@@ -225,3 +226,22 @@ class ConfigPlaceTests(unittest.TestCase):
             context = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov, ov=ov)
         self.assertIsNone(context["weather"])
         self.assertFalse(any("weather" in w for w in context["warnings"]))
+
+
+class GeocodePickTests(unittest.TestCase):
+    RESULTS = [
+        {"name": "Mountain View", "admin1": "Arkansas", "country_code": "US", "population": 2837},
+        {"name": "Mountain View", "admin1": "California", "country_code": "US", "population": 80435},
+        {"name": "Mountain View", "admin1": "Hawaii", "country_code": "US", "population": 3924},
+    ]
+
+    def test_most_populous_wins_without_a_region(self):
+        self.assertEqual(dc.pick_location(self.RESULTS, None, None)["admin1"], "California")
+
+    def test_region_filters_case_insensitively(self):
+        self.assertEqual(dc.pick_location(self.RESULTS, "hawaii", None)["admin1"], "Hawaii")
+        self.assertIsNone(dc.pick_location(self.RESULTS, "Nevada", None))
+
+    def test_country_filters(self):
+        self.assertIsNone(dc.pick_location(self.RESULTS, None, "CA"))
+        self.assertEqual(dc.pick_location(self.RESULTS, None, "us")["population"], 80435)
