@@ -121,6 +121,32 @@ class IntentAgentsInProcedureGuardTest(unittest.TestCase):
             self.assertEqual(out[0][2], "ERROR")
 
 
+class DecisionRecordPathGuardTest(unittest.TestCase):
+    def test_dated_reflection_output_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-decision-path-") as tmp:
+            root = Path(tmp)
+            (root / ".claude" / "commands").mkdir(parents=True)
+            (root / "protocols").mkdir()
+            (root / ".claude" / "commands" / "decision.md").write_text(
+                "<paths.reflections>/YYYY-MM-DD-decision-<slugified-topic>.md\n",
+                encoding="utf-8",
+            )
+            (root / "protocols" / "session-continuity.md").write_text(
+                "<paths.gtd>/decisions/*.md\n",
+                encoding="utf-8",
+            )
+            out = _run_py(
+                f"""
+                h.ROOT = Path({str(root)!r})
+                findings = h.check_decision_record_contract()
+                print(json.dumps([(f.code, f.where) for f in findings]))
+                """
+            )
+            self.assertIn(
+                ["decision-record-path", ".claude/commands/decision.md"], out
+            )
+
+
 class SessionReplayConfigShapeGuardTest(unittest.TestCase):
     def test_bad_example_shape_is_flagged(self) -> None:
         import shutil
@@ -213,4 +239,3 @@ class BotTrailerBanGuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

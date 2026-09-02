@@ -4,7 +4,7 @@ shadow.py: cross-provider shadow-log correlation + reporting.
 
 Companion to `scripts/chat_completion.py`. Mechanism:
 
-  - A multi-leg call site (e.g., /system-review Step 1c, /decision,
+  - A multi-leg call site (e.g., /system-review Step 1c, an escalated /decision,
     scripts/review.sh) opens a shadow group via `shadow.py group-start`,
     which writes a witness file under `~/.cache/atelier/shadow_groups/`
     and emits a UUID + env-export line to stdout. The site MUST also call

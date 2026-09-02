@@ -212,5 +212,25 @@ class ResolutionTest(unittest.TestCase):
             self.assertEqual([d["id"] for d in out["auto_dismissed"]], ["a"])
 
 
+
+class AutoDismissDryRunTest(unittest.TestCase):
+    def test_dry_run_lists_candidates_without_writing(self) -> None:
+        """/triage shows the housekeeping candidates before approving them."""
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            queue = vault / "_meta" / "autoevo_pending.toml"
+            _run(vault, queue, "append", "--entries", "-", stdin=json.dumps([
+                _entry("old", ["wip/a.md"], proposed_at="2099-01-01"),
+                _entry("fresh", ["wip/b.md"], proposed_at="2099-02-04"),
+            ]))
+            before = queue.read_text(encoding="utf-8")
+            out = _run(vault, queue, "auto-dismiss", "--today", "2099-02-05", "--dry-run")
+            self.assertTrue(out["dry_run"])
+            self.assertEqual([d["id"] for d in out["auto_dismissed"]], ["old"])
+            self.assertEqual(queue.read_text(encoding="utf-8"), before)
+            statuses = {e["id"]: e["status"] for e in tomllib.loads(before)["pending"]}
+            self.assertEqual(statuses["old"], "pending")
+
+
 if __name__ == "__main__":
     unittest.main()

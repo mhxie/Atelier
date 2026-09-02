@@ -60,7 +60,7 @@ from pathlib import Path
 
 import sys as _s
 _s.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier_segments  # noqa: E402
+from _paths import retry_transient, tier_segments  # noqa: E402
 from routine_owner import OwnershipError, coordination_backend, ownership_status
 
 TABLE_NAME = "atelier-routine-locks"
@@ -163,7 +163,10 @@ def _reserve_local_cycle(
     claim_path.parent.mkdir(parents=True, exist_ok=True)
     mutex_path = _cycle_mutex_path(claim_path)
     with mutex_path.open("a+b") as mutex:
-        fcntl.flock(mutex.fileno(), fcntl.LOCK_EX)
+        retry_transient(
+            lambda: fcntl.flock(mutex.fileno(), fcntl.LOCK_EX),
+            what=f"lock {mutex_path.name}",
+        )
         existing_status = _claim_status(claim_path)
         if existing_status not in (None, "deferred", "retry-approved"):
             return False, existing_status
@@ -187,7 +190,10 @@ def _recover_local_claim(routine: str, cycle: str, outcome: str) -> Path:
     claim_path.parent.mkdir(parents=True, exist_ok=True)
     mutex_path = _cycle_mutex_path(claim_path)
     with mutex_path.open("a+b") as mutex:
-        fcntl.flock(mutex.fileno(), fcntl.LOCK_EX)
+        retry_transient(
+            lambda: fcntl.flock(mutex.fileno(), fcntl.LOCK_EX),
+            what=f"lock {mutex_path.name}",
+        )
         try:
             content = claim_path.read_text(encoding="utf-8")
         except FileNotFoundError:

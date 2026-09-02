@@ -130,3 +130,58 @@ class BucketedReadersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Glitch (2026-08-27/28): the nightly sweep aborted mid-plan reading a tracked
+# `_meta/*.toml` with `OSError: [Errno 11] Resource deadlock avoided`, and two
+# routine cycles failed lock acquisition with the same errno. The vault sits on
+# a Google Drive File Provider mount that invents EDEADLK while it materializes
+# a file; the same path reads cleanly moments later.
+
+import errno as _errno  # noqa: E402
+import sys as _sys  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "scripts"))
+import _paths  # noqa: E402
+
+
+def test_transient_mount_error_is_retried_then_succeeds():
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) < 3:
+            raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+        return "materialized"
+
+    assert _paths.retry_transient(flaky, delay=0, what="test read") == "materialized"
+    assert len(calls) == 3
+
+
+def test_persistent_transient_error_still_raises():
+    def always():
+        raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+
+    try:
+        _paths.retry_transient(always, attempts=2, delay=0, what="test read")
+    except OSError as exc:
+        assert exc.errno == _errno.EDEADLK
+    else:
+        raise AssertionError("a permanently failing operation must still raise")
+
+
+def test_unrelated_oserror_is_not_retried():
+    calls = []
+
+    def missing():
+        calls.append(1)
+        raise FileNotFoundError(_errno.ENOENT, "No such file")
+
+    try:
+        _paths.retry_transient(missing, delay=0, what="test read")
+    except FileNotFoundError:
+        pass
+    else:
+        raise AssertionError("ENOENT must surface immediately")
+    assert len(calls) == 1, "widening the retry beyond the mount's errno hides real bugs"

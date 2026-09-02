@@ -17,7 +17,7 @@ Review progress on near/mid/long-term goals. Surface what's progressing, what's 
 | **Light pulse** | Monthly | 5-min check inside `/weekly` or standalone: any goal materially advanced? Any neglected? Any newly born? No file write required if nothing surfaced. |
 | **Annual reset** | Yearly (Jan or birthday) | Full rebuild anchored to `<year>小目标`. Touches `directions.md` directly. Often paired with `/introspect`. |
 
-Inspect the last full review and the last pulse-equivalent so the monthly cadence does not produce duplicate pulses within 30 days. A pulse-equivalent is either a standalone `*-review-pulse.md` OR a `*-weekly.md` (because `/weekly` §6 Honest Assessment doubles as the monthly pulse — see Cadence table). Take whichever is most recent:
+Inspect the last full review and the last pulse-equivalent so the monthly cadence does not produce duplicate pulses within 30 days. A pulse-equivalent is either a standalone `*-review-pulse.md` OR a `*-weekly.md` (because `/weekly`'s Honest Assessment section doubles as the monthly pulse — see Cadence table). Take whichever is most recent:
 
 ```
 Bash: last_full=$(find "$OV/reflections" -name '*-review.md' ! -name '*-review-pulse.md' 2>/dev/null | sort | tail -1)
@@ -36,7 +36,7 @@ Decision rules align with the cadence table above (full = quarterly = 90 days, l
 - **90-120 days since last full review (on cadence)** → full quarterly form. The canonical quarterly review.
 - **>120 days since last full review (overdue)** → full quarterly form with an honest gap note ("last full review was N days ago, X days past the quarterly cadence").
 
-Stale-goal floor: if `directions.md` lists goals older than 1 year with no progress evidence (currently the 3 "Stale Goals" listed there), every full review must explicitly resolve them (retire or re-commit). Do not let stale goals roll over silently.
+Stale-goal floor: every full review must explicitly resolve each item under `## Goals requiring an explicit decision` in `directions.md` (retire, redefine, or re-commit) and any goal older than 1 year with no progress evidence. Do not let stale goals roll over silently.
 
 ## Prerequisites
 
@@ -65,7 +65,12 @@ Stale-goal floor: if `directions.md` lists goals older than 1 year with no progr
 
 ## Analysis
 
-For each goal category (#capacity, #learning, #identity, #energy — or whatever categories exist in directions.md):
+Walk `directions.md` in its current shape: one pass per H3 under `## Mid-term
+direction`, then every row of the commitments table (full review) or the rows
+due since the last pulse (monthly), then `## Long-term direction` on full
+reviews only: does each mid-term heading still ladder into a long-term line,
+and does any long-term line have no mid-term carrier? The category names come
+from the file at runtime, never from this page.
 
 ### Progressing
 Which goals have evidence of recent activity? Look for:
@@ -102,25 +107,32 @@ After discussing, write a review file:
 
 ## By Category
 
-### #capacity (Financial / Resources)
+### Mastery and impact
 - **Progressing:** [goals with evidence] — Source: [[Note Title]]
 - **Neglected:** [goals with no recent activity] — Source: [[Note Title]]
 - **Shifted:** [any changes in direction]
 
-### #learning (Skills / Knowledge)
+### Learning
 - **Progressing:** ...
 - **Neglected:** ...
 - **Shifted:** ...
 
-### #identity (Career / Role)
+### Energy and family
 - **Progressing:** ...
 - **Neglected:** ...
 - **Shifted:** ...
 
-### #energy (Health / Relationships / Wellbeing)
+### Capacity and optionality
 - **Progressing:** ...
 - **Neglected:** ...
 - **Shifted:** ...
+
+## Commitments
+| Commitment | Observable next evidence | State | Source |
+|---|---|---|---|
+
+## Long-term ladder (full review only)
+- [long-term line] ← [mid-term carrier or `(none)`]
 
 ## Emerging Interests
 [Topics appearing in recent notes that aren't captured in any goal — potential new directions]

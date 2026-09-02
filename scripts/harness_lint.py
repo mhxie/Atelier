@@ -2642,6 +2642,28 @@ def check_commands_intent_coverage() -> list[Finding]:
     return findings
 
 
+def check_decision_record_contract() -> list[Finding]:
+    """Keep durable decisions on stable, topic-addressed paths."""
+    contracts = {
+        ".claude/commands/decision.md": "<paths.gtd>/decisions/<slugified-topic>.md",
+        "protocols/session-continuity.md": "<paths.gtd>/decisions/*.md",
+    }
+    forbidden = "<paths.reflections>/YYYY-MM-DD-decision-"
+    findings: list[Finding] = []
+    for rel, required in contracts.items():
+        text = _read(ROOT / rel)
+        if required not in text or forbidden in text:
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "decision-record-path",
+                    rel,
+                    f"decision records must use stable `{required}` paths, never dated reflection filenames",
+                )
+            )
+    return findings
+
+
 def check_shadow_group_start() -> list[Finding]:
     """Known multi-leg call sites MUST invoke `shadow.py group-start` so the
     shadow-log correlation pipeline has data to aggregate. Without the call,
@@ -3110,6 +3132,7 @@ def run_lints() -> list[Finding]:
     intents, intent_findings = load_intents()
     findings.extend(intent_findings)
     findings.extend(check_commands_intent_coverage())
+    findings.extend(check_decision_record_contract())
     # Resolve intent agent references against both registries:
     #   - `agents` is from load_claude_agents() (.claude/agents/*.md filesystem
     #     walk); canonical for Claude Code subagent dispatch.

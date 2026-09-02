@@ -1,8 +1,15 @@
 #!/bin/bash
 # Verify one explicitly authorized external permission through launchd and the
 # routine's exact Codex capability profile. The supported probes are narrow:
-# Gmail account metadata (read-only) and an idempotent Readwise test-document
-# upsert. No mailbox content is read and no user-authored content is written.
+# Gmail account metadata (read-only), an idempotent Readwise test-document
+# upsert, and a single self-addressed Gmail send. No mailbox content is read and
+# no user-authored content is written or transmitted.
+#
+# The three probes are three mutation classes, ordered by what bounds them:
+# read-only (nothing to undo), idempotent-test-write (re-running changes
+# nothing), and self-directed-write (irreversible, so bounded by destination
+# instead: one message, to the authenticated account itself). A capability that
+# fits none of these classes does not belong in an unattended routine.
 
 set -euo pipefail
 
@@ -13,7 +20,7 @@ if [[ ! "$SMOKE_ROUTINE" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
     exit 2
 fi
 case "$SMOKE_PERMISSION" in
-    gmail:read|readwise:create-document) ;;
+    gmail:read|readwise:create-document|readwise:read|gmail:send-self|mail:send-self) ;;
     *)
         echo "ERROR: unsupported permission smoke: $SMOKE_PERMISSION" >&2
         exit 2
@@ -55,7 +62,8 @@ if ! "${TIMEOUT_CMD[@]}" python3 "$SCRIPTS_DIR/routine_owner.py" check >/dev/nul
 fi
 if ! PROFILE_RECORD=$("${TIMEOUT_CMD[@]}" python3 "$SCRIPTS_DIR/routine_audit.py" \
     resolve "$SMOKE_ROUTINE" --surface local --check-system --runtime codex \
-    --command "/run-routine $SMOKE_ROUTINE" --format tsv); then
+    --command "/run-routine $SMOKE_ROUTINE" --format tsv \
+    --smoke-permission "$SMOKE_PERMISSION"); then
     echo "ERROR: routine profile preflight failed: $SMOKE_ROUTINE" >&2
     exit 2
 fi
@@ -114,6 +122,47 @@ case "$SMOKE_PERMISSION" in
         EXPECTED_MARKER="ATELIER_PERMISSION_SMOKE_READWISE_OK"
         MUTATION_MODE="idempotent-test-write"
         SMOKE_PROMPT="This is an explicitly authorized Atelier Readwise permission smoke. Run exactly one shell command: readwise --json reader-create-document --url https://atelier.local/routine-permission-smoke/2026-07-17 --markdown 'Atelier routine permission smoke. Created with explicit user authorization on 2026-07-17. This document contains no user content.' --title 'Atelier routine permission smoke 2026-07-17' --category article --tags 'atelier-smoke,routine-permission-test'. This is an idempotent upsert of the already-created test URL. Do not access any other Readwise document or user content. Parse the JSON without printing it. If and only if the command succeeds and its document id equals $READWISE_DOCUMENT_ID, return exactly $EXPECTED_MARKER and nothing else."
+        ;;
+    readwise:read)
+        # The digest reads the Reader inbox through the `readwise` CLI, so what
+        # needs verifying is the stored token plus egress under
+        # `shell_network = "enabled"`. `reader-list-tags` is the narrowest call
+        # that proves both: it returns the tag vocabulary and no document,
+        # highlight, or note content.
+        EXPECTED_MARKER="ATELIER_PERMISSION_SMOKE_READWISE_READ_OK"
+        MUTATION_MODE="read-only"
+        SMOKE_PROMPT="This is an explicitly authorized, read-only Atelier Readwise permission smoke. Run exactly one shell command: readwise --json reader-list-tags. Do not run any other command. Do not list, search, open, create, or modify any document or highlight. Do not print, quote, or summarize the tag names the command returns. If and only if the command exits 0, return exactly $EXPECTED_MARKER and nothing else."
+        ;;
+    gmail:send-self)
+        # Sending is neither read-only nor idempotent, so this probe is bounded
+        # by destination instead: exactly one message, addressed to the
+        # authenticated account itself, with a greppable subject so the user can
+        # find and delete it. This is the only way to verify a send capability
+        # before an unattended routine first exercises it on real content.
+        EXPECTED_MARKER="ATELIER_PERMISSION_SMOKE_GMAIL_SEND_OK"
+        MUTATION_MODE="self-directed-write"
+        SMOKE_SUBJECT="Atelier routine permission smoke $(date +%Y-%m-%dT%H:%M:%S)"
+        SMOKE_PROMPT="This is an explicitly authorized Atelier Gmail send permission smoke. Use only the connected Gmail app. First read the authenticated account profile to obtain its own email address. Then send exactly one plain-text message to that same address and to no other recipient, with subject '$SMOKE_SUBJECT' and a body stating that this is an Atelier permission smoke containing no user content. Do not add any CC or BCC recipient. Do not search messages, read mailbox content, create drafts, archive, delete, or change labels. Do not read or include any file, note, or vault content in the message. If and only if the send succeeds, return exactly $EXPECTED_MARKER and nothing else."
+        ;;
+    mail:send-self)
+        # python3, not `uv run`: under workspace-write the sandbox does not
+        # grant ~/.cache/uv, and uv fails before the script starts. These
+        # scripts are stdlib-only, so the interpreter is all they need.
+        # Same bounded class as gmail:send-self, but the send is deterministic:
+        # the model runs one shell command and the recipient comes from
+        # $OV/_meta/mail.toml, which the model never reads. What is being
+        # verified here is the SMTP credential and egress, not the model's
+        # willingness to obey a recipient constraint.
+        EXPECTED_MARKER="ATELIER_PERMISSION_SMOKE_MAIL_SEND_OK"
+        MUTATION_MODE="self-directed-write"
+        if ! SMOKE_PYTHON=$("$SCRIPTS_DIR/find_python.sh"); then
+            echo "ERROR: no python3 >= 3.11 available for the mail smoke" >&2
+            exit 2
+        fi
+        SMOKE_BODY=$(mktemp "${TMPDIR:-/tmp}/atelier-mail-smoke.XXXXXX")
+        printf '<p>Atelier permission smoke. No user content.</p>\n' > "$SMOKE_BODY"
+        SMOKE_SUBJECT="Atelier routine permission smoke $(date +%Y-%m-%dT%H:%M:%S)"
+        SMOKE_PROMPT="This is an explicitly authorized Atelier mail permission smoke. Run exactly one shell command: $SMOKE_PYTHON $ATELIER_DIR/scripts/routine_digest.py mail --html $SMOKE_BODY --subject '$SMOKE_SUBJECT'. Do not read or send any other file. Do not modify any file. If and only if that command exits 0, return exactly $EXPECTED_MARKER and nothing else."
         ;;
 esac
 

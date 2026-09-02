@@ -46,13 +46,14 @@ import os
 import sys
 import tomllib
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
 # Allow running as `uv run scripts/cues.py` from atelier root.
 sys.path.insert(0, str(Path(__file__).parent))
 from _paths import tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
+import cron_spec  # noqa: E402
 from routine_claim import validate_claim  # noqa: E402
 
 
@@ -386,7 +387,7 @@ def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
         except (json.JSONDecodeError, OSError):
             acks = {}
 
-    new_findings: list[str] = []
+    new_findings: list[tuple[str, str]] = []
     debug_parts: list[str] = []
     for r in routines:
         output_dir = r.get("output_dir")
@@ -406,7 +407,7 @@ def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
         latest = files[-1]
         last_ack = acks.get(output_dir, "")
         if latest.name > last_ack:
-            new_findings.append(f"{label} ({latest.name})")
+            new_findings.append((latest.name, f"{label} ({latest.name})"))
             debug_parts.append(f"{label}: new={latest.name} > ack={last_ack or '∅'}")
         else:
             debug_parts.append(f"{label}: acked")
@@ -415,7 +416,10 @@ def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
     if not new_findings:
         return None, debug
 
-    listing = "; ".join(new_findings[:3])
+    # Show the oldest review debt first so early registry rows cannot pin the
+    # three visible slots and hide later routines indefinitely.
+    new_findings.sort(key=lambda finding: finding[0])
+    listing = "; ".join(finding[1] for finding in new_findings[:3])
     if len(new_findings) > 3:
         listing += f", +{len(new_findings) - 3} more"
 
@@ -516,13 +520,53 @@ def _local_owner_start_date(ov: Path, config: dict) -> date | None:
     return value.date()
 
 
+def _local_owner_label(ov: Path, config: dict) -> str | None:
+    """Return the machine label that owns local routines, when configured."""
+    coordination = config.get("coordination", {})
+    if not isinstance(coordination, dict) or coordination.get("backend") != "owner":
+        return None
+    owner_path = _meta_dir(ov) / "routine_owner.toml"
+    try:
+        owner = tomllib.loads(owner_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    label = owner.get("owner_label")
+    if not isinstance(label, str) or not label:
+        return None
+    # owner_label is a snapshot of the hostname taken once at claim time and
+    # never refreshed, while the claim writer records the live hostname. If the
+    # two ever diverge, filtering on the label would drop every record and
+    # report the whole fleet as missed. Only filter on a label the records
+    # actually use; otherwise fail open to the pre-filter behavior.
+    runs = _meta_dir(ov) / "routine_runs"
+    if not runs.is_dir():
+        return None
+    for routine_dir in runs.iterdir():
+        if not routine_dir.is_dir():
+            continue
+        for path in routine_dir.glob("*.toml"):
+            try:
+                claim = tomllib.loads(path.read_text(encoding="utf-8"))
+            except (OSError, tomllib.TOMLDecodeError):
+                continue
+            if claim.get("machine") == label:
+                return label
+    return None
+
+
 def _latest_local_claim(
     ov: Path,
     routine: str,
     *,
     not_before: date | None = None,
+    machine: str | None = None,
 ) -> tuple[date, dict, Path] | None:
-    """Load the latest dated claim for one local routine."""
+    """Load the latest dated claim for one local routine.
+
+    Under the owner backend a machine that lost ownership can still write run
+    records from a stale checkout. Those are not evidence that the routine ran,
+    so `machine` restricts the search to the owning label.
+    """
     routine_dir = _meta_dir(ov) / "routine_runs" / routine
     if not routine_dir.is_dir():
         return None
@@ -539,6 +583,10 @@ def _latest_local_claim(
             claim = tomllib.loads(path.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             continue
+        claim_machine = claim.get("machine")
+        if machine is not None and claim_machine is not None:
+            if not isinstance(claim_machine, str) or claim_machine != machine:
+                continue
         if claim.get("contract_version") == 2:
             try:
                 validate_claim(
@@ -553,84 +601,9 @@ def _latest_local_claim(
     return None
 
 
-def _cron_fields(cron: str) -> tuple[str, str, str, str, str] | None:
-    """Extract the five scheduling fields from an annotated cron string."""
-    import re as _re
-
-    cron_clean = _re.split(r"\s+UTC\b|\s+\(", cron, maxsplit=1)[0].strip()
-    parts = cron_clean.split()
-    if len(parts) < 5:
-        return None
-    return tuple(parts[:5])  # type: ignore[return-value]
-
-
-def _cron_field_matches(
-    value: int, field: str, *, one_based_step: bool = False
-) -> bool:
-    if field == "*":
-        return True
-    if field.startswith("*/"):
-        try:
-            step = int(field[2:])
-        except ValueError:
-            return False
-        origin = 1 if one_based_step else 0
-        return step > 0 and (value - origin) % step == 0
-    values: set[int] = set()
-    try:
-        for item in field.split(","):
-            values.add(int(item))
-    except ValueError:
-        return False
-    return value in values
-
-
-def _scheduled_dates(
-    cron: str,
-    start: date,
-    now: datetime,
-) -> list[date]:
-    """Return local dates whose declared cron occurrence is already due."""
-    fields = _cron_fields(cron)
-    if fields is None:
-        return []
-    minute_field, hour_field, dom, month, dow = fields
-    try:
-        minute = int(minute_field)
-        hour = int(hour_field)
-    except ValueError:
-        return []
-
-    local_now = now.astimezone()
-    local_zone = local_now.tzinfo
-    schedule_zone = timezone.utc if " UTC" in cron else local_zone
-    schedule_now = local_now.astimezone(schedule_zone)
-    earliest = start - timedelta(days=1)
-    results: set[date] = set()
-    cursor = schedule_now.date()
-
-    while cursor >= earliest:
-        candidate = datetime(
-            cursor.year,
-            cursor.month,
-            cursor.day,
-            hour,
-            minute,
-            tzinfo=schedule_zone,
-        )
-        cron_dow = (cursor.weekday() + 1) % 7
-        if (
-            candidate <= schedule_now
-            and _cron_field_matches(cursor.day, dom, one_based_step=True)
-            and _cron_field_matches(cursor.month, month)
-            and _cron_field_matches(cron_dow, dow)
-        ):
-            local_date = candidate.astimezone(local_zone).date()
-            if local_date >= start:
-                results.add(local_date)
-        cursor -= timedelta(days=1)
-
-    return sorted(results)
+_cron_fields = cron_spec.cron_fields
+_cron_field_matches = cron_spec.cron_field_matches
+_scheduled_dates = cron_spec.scheduled_dates
 
 
 def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
@@ -656,6 +629,7 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
         return None, "no routines declared"
 
     owner_start = _local_owner_start_date(ov, config)
+    owner_label = _local_owner_label(ov, config)
     stale: list[str] = []
     debug_parts: list[str] = []
 
@@ -678,7 +652,9 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
         tolerance = max(2, cadence_days)
         threshold = cadence_days + tolerance
         latest_claim = (
-            _latest_local_claim(ov, str(name), not_before=owner_start)
+            _latest_local_claim(
+                ov, str(name), not_before=owner_start, machine=owner_label
+            )
             if is_local
             else None
         )
@@ -891,45 +867,7 @@ def check_routine_hitrate(
     )
 
 
-def _estimate_cadence_days(cron: str) -> int | None:
-    """Estimate cadence in days from a cron-like expression.
-
-    Handles common patterns from routine_watch.toml cron fields:
-      "0 13 * * *"       -> daily (1)
-      "0 10 * * 3"       -> weekly (7)
-      "0 12 */3 * *"     -> every 3 days (3)
-      "0 9 15 2,5,8,11 *" -> quarterly (~90)
-    """
-    # Strip annotations like "UTC (5 AM PT every 3 days)"
-    import re as _re
-
-    cron_clean = _re.split(r"\s+UTC\b", cron)[0].strip()
-    parts = cron_clean.split()
-    if len(parts) < 5:
-        return None
-
-    _minute, _hour, dom, month, dow = parts[:5]
-
-    if month != "*":
-        # Monthly subset: count the months listed
-        months = month.split(",")
-        if len(months) >= 2:
-            return 365 // len(months)
-        return 30
-
-    if dom.startswith("*/"):
-        try:
-            return int(dom[2:])
-        except ValueError:
-            return None
-
-    if dom == "*" and dow == "*":
-        return 1
-
-    if dom == "*" and dow != "*":
-        return 7
-
-    return 30
+_estimate_cadence_days = cron_spec.estimate_cadence_days
 
 
 def _extract_date_from_filename(name: str) -> date | None:
@@ -1226,9 +1164,9 @@ def check_autoevo_ran(
     # Keys MUST match the `gate` strings `autoevo_preflight.py` emits;
     # tests/test_cues.py pins every key against that file's source.
     gate_fixes = {
-        "dirty_vault_worktree": (
-            "commit or stash user edits under the sweep scopes, or check "
-            "`uv run scripts/autoevo_preflight.py --dirty-scope`"
+        "dirty_autoevo_state": (
+            "uncommitted `_meta/autoevo_*.toml`; commit or restore the queue "
+            "state, then check `uv run scripts/autoevo_preflight.py --dirty-scope`"
         ),
         "dirty_zettelm_worktree": "finish or commit the mobile-capture digest in `<paths.zettelm>/`",
         "session_lock_unreadable": "the session-lock file's metadata cannot be read; check `<paths.cache>/atelier-session-lock` permissions and disk health",
@@ -1381,6 +1319,22 @@ def _extract_audit_summary(ov: Path, routine_name: str, run_date: date) -> str:
     return ", ".join(parts)
 
 
+def _claim_failure_reason(claim_data: dict) -> str:
+    """The claim's own account of why a cycle failed.
+
+    Worth surfacing because the fuller transcript is already gone by the time
+    anyone reads the cue: every routine plist sends the runner's output to
+    /tmp, which macOS purges. `error` is the coarse phase; `error_detail` is the
+    screened tail of what actually happened. Prefer the detail, fall back to the
+    phase, and say nothing rather than guess.
+    """
+    detail = str(claim_data.get("error_detail") or "").strip()
+    error = str(claim_data.get("error") or "").strip()
+    if detail and error and not detail.startswith(error):
+        return f"{error}: {detail}"
+    return detail or error
+
+
 def check_local_routine_missed(
     ov: Path,
     today: date,
@@ -1418,6 +1372,7 @@ def check_local_routine_missed(
         return None, "no local routines declared"
 
     owner_start = _local_owner_start_date(ov, config)
+    owner_label = _local_owner_label(ov, config)
     runs_dir = _meta_dir(ov) / "routine_runs"
     if not runs_dir.is_dir():
         return None, "routine_runs/ absent; never installed"
@@ -1435,9 +1390,20 @@ def check_local_routine_missed(
             debug_parts.append(f"{label}: unparseable cron")
             continue
 
+        # One day of grace after an ownership transfer.
+        #
+        # Claims are filtered to the owning machine, so on the day ownership
+        # moves, every cycle the *previous* owner already completed looks like a
+        # cycle this machine never ran. Measured on 2026-08-31: a transfer at
+        # 21:11 local made five routines report "no claim" for occurrences the
+        # previous owner had completed fifteen hours earlier. Blaming the new
+        # owner for those is worse than staying quiet for a day, because a cue
+        # that cries wolf on every transfer stops being read.
         schedule_start = owner_start or (
             today - timedelta(days=max(366, 3 * cadence_days))
         )
+        if owner_start is not None:
+            schedule_start = max(schedule_start, owner_start + timedelta(days=1))
         due_dates = _scheduled_dates(cron, schedule_start, now)
         if not due_dates:
             debug_parts.append(
@@ -1454,7 +1420,9 @@ def check_local_routine_missed(
                 debug_parts.append(f"{label}: no runs dir; installation unknown")
             continue
 
-        latest = _latest_local_claim(ov, str(name), not_before=owner_start)
+        latest = _latest_local_claim(
+            ov, str(name), not_before=owner_start, machine=owner_label
+        )
         if latest is None:
             any_past = list(routine_dir.glob("*.toml"))
             if any_past or owner_start is not None:
@@ -1504,8 +1472,10 @@ def check_local_routine_missed(
             missed.append(f"{label} (deferred on {claim_date}; retry scheduled)")
             debug_parts.append(f"{label}: {claim_date} deferred")
         elif status in {"failed", "completion-uncertain", "retry-approved"}:
-            missed.append(f"{label} ({status} on {claim_date})")
-            debug_parts.append(f"{label}: {claim_date} {status}")
+            reason = _claim_failure_reason(claim_data)
+            suffix = f": {reason[:120]}" if reason else ""
+            missed.append(f"{label} ({status} on {claim_date}{suffix})")
+            debug_parts.append(f"{label}: {claim_date} {status} {reason[:200]}")
         else:
             missed.append(f"{label} (unknown claim status on {claim_date})")
             debug_parts.append(f"{label}: {claim_date} unknown status={status}")
@@ -1725,6 +1695,75 @@ def check_meta_reflection_due(ov: Path, today: date) -> tuple[Cue | None, str]:
     )
 
 
+def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Surface pre-claim failures, which no other cue can see.
+
+    `routine_runner.sh` writes a diagnostic into
+    `$OV/_meta/routine_failures/<routine>/` when a cycle dies *before* the claim
+    exists: the owner probe errored, capability preflight failed, the lock could
+    not be acquired. Every other routine cue reads claims, so this entire class
+    of failure was written to disk and never read by anything. A routine can
+    fail this way indefinitely while looking merely stale.
+
+    Only counts diagnostics from the last 7 days: an old one is history, not a
+    live condition, and `routine_audit.py health` shows the full record.
+    """
+    failures_root = _meta_dir(ov) / "routine_failures"
+    if not failures_root.is_dir():
+        return None, "routine_failures/ absent; skip"
+
+    cutoff = today - timedelta(days=7)
+    recent: list[tuple[str, str, str]] = []
+    debug_parts: list[str] = []
+    for routine_dir in sorted(failures_root.iterdir()):
+        if not routine_dir.is_dir():
+            continue
+        newest: tuple[str, str] | None = None
+        for path in routine_dir.glob("*.toml"):
+            try:
+                record = tomllib.loads(path.read_text())
+            except (tomllib.TOMLDecodeError, OSError):
+                continue
+            recorded = str(record.get("recorded_at") or "")[:10]
+            if not recorded:
+                continue
+            if newest is None or recorded > newest[0]:
+                newest = (recorded, str(record.get("phase") or "unknown"))
+        if newest is None:
+            continue
+        try:
+            when = date.fromisoformat(newest[0])
+        except ValueError:
+            continue
+        if when < cutoff:
+            debug_parts.append(f"{routine_dir.name}: {newest[0]} (older than 7d)")
+            continue
+        recent.append((routine_dir.name, newest[0], newest[1]))
+
+    debug = "; ".join(debug_parts)
+    if not recent:
+        return None, debug or "no recent pre-claim failures"
+
+    recent.sort(key=lambda item: item[1], reverse=True)
+    listing = "; ".join(f"{name} ({phase} on {when})" for name, when, phase in recent[:3])
+    if len(recent) > 3:
+        listing += f", +{len(recent) - 3} more"
+
+    return (
+        Cue(
+            key="routine_failures",
+            severity="soft",
+            command_path="scripts/launchd/README.md",
+            message=(
+                f"{len(recent)} routine(s) failed before writing a claim: {listing}. "
+                "这类失败只留在 routine_failures/ 里, 其他 cue 看不到. "
+                "`uv run scripts/routine_audit.py health` 看全表."
+            ),
+        ),
+        debug,
+    )
+
+
 CHECKS = [
     ("weekly", check_weekly),
     ("intent_misses", check_intent_misses),
@@ -1740,6 +1779,7 @@ CHECKS = [
     ("autoevo_pending", check_autoevo_pending),
     ("autoevo_ran", check_autoevo_ran),
     ("local_routine_missed", check_local_routine_missed),
+    ("routine_failures", check_routine_failures),
     ("career_growth", check_career_growth),
 ]
 

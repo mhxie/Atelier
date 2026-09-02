@@ -294,13 +294,19 @@ def cmd_auto_dismiss(args: argparse.Namespace) -> int:
         by_count = int(entry.get("surface_count", 0)) >= 3
         by_age = proposed is not None and proposed < cutoff
         if by_count or by_age:
+            reason = "surface_count>=3" if by_count else f"older than {args.max_age_days}d"
+            dismissed.append({"id": entry.get("id"), "category": entry.get("category"), "reason": reason})
+            if args.dry_run:
+                continue
             entry["status"] = "auto-dismissed"
-            entry["dismiss_reason"] = "surface_count>=3" if by_count else f"older than {args.max_age_days}d"
+            entry["dismiss_reason"] = reason
             entry["resolved_at"] = today.isoformat()
-            dismissed.append({"id": entry.get("id"), "category": entry.get("category"), "reason": entry["dismiss_reason"]})
-    if dismissed:
+    if dismissed and not args.dry_run:
         atomic_write(path, render(data))
-    print(json.dumps({"queue": str(path), "auto_dismissed": dismissed}, sort_keys=True))
+    payload = {"queue": str(path), "auto_dismissed": dismissed}
+    if args.dry_run:
+        payload["dry_run"] = True
+    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
@@ -371,6 +377,11 @@ def main(argv: list[str] | None = None) -> int:
     p_ad = sub.add_parser("auto-dismiss")
     p_ad.add_argument("--max-age-days", type=int, default=30)
     p_ad.add_argument("--today", default=None)
+    p_ad.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List the entries the housekeeping would dismiss without writing the queue.",
+    )
     p_ad.set_defaults(func=cmd_auto_dismiss)
 
     p_res = sub.add_parser("resolve")

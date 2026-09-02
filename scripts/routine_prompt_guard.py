@@ -41,6 +41,17 @@ SECRET_PATTERNS = (
 ORIGINAL_PROMPT_MARKER = re.compile(
     r"(?m)^--- ORIGINAL ROUTINE PROMPT .* ---\s*$"
 )
+# Archived bodies were authored against a Drive MCP that supplied input and
+# output. The local adapter overrides output only, so a body that still reads
+# input from Drive needs the override to name a local input path.
+DRIVE_MENTION = re.compile(
+    r"(?i)\bgoogle[-\s]?drive\b|\bg?drive\s+mcp\b|\bmy\s+drive\b|\bgdrive\b"
+)
+# Two independent tokens searched across the whole override, not one ordered
+# line: the directive is a long sentence, and a line-anchored match would fail
+# the entire fleet closed on a single editor reflow.
+LOCAL_INPUT_LOCATION = re.compile(r"(?i)\blocal\s+(?:file\s*system|filesystem|disk)\b")
+LOCAL_INPUT_ROOT = re.compile(r"\$\{?OV\}?")
 
 
 def check(path: Path) -> list[int]:
@@ -52,13 +63,28 @@ def check(path: Path) -> list[int]:
     return sorted(lines)
 
 
-def structure_error(path: Path) -> str | None:
+def structure_error(path: Path, *, require_local_input: bool = False) -> str | None:
+    """Validate the local-adapter preamble.
+
+    `require_local_input` is off by default because the cloud bundle and the
+    registry audit share this check, and a cloud run reads from Drive
+    correctly. Only the local `/run-routine` path enables it.
+    """
     text = path.read_text(encoding="utf-8")
     first_line = text.splitlines()[0] if text.splitlines() else ""
     if not first_line.startswith("LOCAL EXECUTION OVERRIDE"):
         return "first line must begin with LOCAL EXECUTION OVERRIDE"
-    if ORIGINAL_PROMPT_MARKER.search(text) is None:
+    marker = ORIGINAL_PROMPT_MARKER.search(text)
+    if marker is None:
         return "missing ORIGINAL ROUTINE PROMPT boundary marker"
+    override, body = text[: marker.start()], text[marker.end() :]
+    if require_local_input and DRIVE_MENTION.search(body) and not (
+        LOCAL_INPUT_LOCATION.search(override) and LOCAL_INPUT_ROOT.search(override)
+    ):
+        return (
+            "archived body references Google Drive but the override declares "
+            "no local filesystem input path rooted at $OV"
+        )
     return None
 
 
@@ -71,7 +97,7 @@ def main() -> int:
         print(f"ERROR: routine prompt missing: {args.path}", file=sys.stderr)
         return 2
     try:
-        invalid_structure = structure_error(args.path)
+        invalid_structure = structure_error(args.path, require_local_input=True)
         findings = check(args.path)
     except OSError as exc:
         print(f"ERROR: cannot read routine prompt: {exc}", file=sys.stderr)

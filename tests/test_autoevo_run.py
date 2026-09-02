@@ -108,14 +108,33 @@ class PlanTest(unittest.TestCase):
             skipped_file = Path(out["quarantine_skipped_file"])
             self.assertIn("scope_quarantined:", skipped_file.read_text(encoding="utf-8"))
 
-    def test_dirty_scope_blocks(self) -> None:
+    def test_dirty_content_protects_and_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-run-") as tmp:
             vault = _make_vault(tmp)
             (vault / "wip" / "dirty.md").write_text("x\n", encoding="utf-8")
             proc = _run(vault, "plan", "--run-ts", "t3", "--run-date", "2099-06-03")
             out = json.loads(proc.stdout)
             gates = [b["gate"] for b in out["gate"]["blockers"]]
-            self.assertIn("dirty_in_scope", gates)
+            self.assertNotIn("dirty_autoevo_state", gates)
+            self.assertIn("wip/dirty.md", out["protected_paths"])
+            written = Path(out["protected_file"]).read_text(encoding="utf-8")
+            self.assertIn("wip/dirty.md", written)
+
+    def test_dirty_autoevo_state_still_blocks(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-run-") as tmp:
+            vault = _make_vault(tmp)
+            state = vault / "_meta" / "autoevo_pending.toml"
+            state.parent.mkdir(parents=True, exist_ok=True)
+            state.write_text("# base\n", encoding="utf-8")
+            subprocess.run(["git", "add", "-f", "--", "_meta/autoevo_pending.toml"],
+                           cwd=vault, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-q", "-m", "state"],
+                           cwd=vault, check=True, capture_output=True)
+            state.write_text("# dirty\n", encoding="utf-8")
+            proc = _run(vault, "plan", "--run-ts", "t4", "--run-date", "2099-06-04")
+            out = json.loads(proc.stdout)
+            gates = [b["gate"] for b in out["gate"]["blockers"]]
+            self.assertIn("dirty_autoevo_state", gates)
 
 
 class OutcomeTest(unittest.TestCase):

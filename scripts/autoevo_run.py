@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import tier, vault_root  # noqa: E402
 from autoevo_commit import cluster_hash  # noqa: E402
 from autoevo_preflight import (  # noqa: E402
-    _in_scope,
+    partition_dirty_scope,
     _inside_worktree,
     _status_entries,
     autoevo_scope_prefixes,
@@ -124,14 +124,16 @@ def _gate_blockers(vault: Path, cache: Path, now: float) -> list[dict[str, str]]
         return blockers
 
     prefixes = autoevo_scope_prefixes(vault)
-    dirty = [path for _, path in _status_entries(vault) if _in_scope(path, prefixes)]
-    if dirty:
+    blocking, _protected = partition_dirty_scope(
+        [path for _, path in _status_entries(vault)], prefixes
+    )
+    if blocking:
         blockers.append(
             {
-                "gate": "dirty_in_scope",
+                "gate": "dirty_autoevo_state",
                 "detail": (
-                    f"{len(dirty)} Git status entries inside autoevo scopes "
-                    "(wip, research, reflections, agent-findings, _meta/autoevo_*.toml)"
+                    f"{len(blocking)} Git status entries in autoevo state "
+                    "(_meta/autoevo_*.toml); the queue condition is unknown"
                 ),
             }
         )
@@ -268,8 +270,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
         "".join(line + "\n" for line in skipped_lines), encoding="utf-8"
     )
 
+    _, protected = partition_dirty_scope(
+        [path for _, path in _status_entries(vault)], autoevo_scope_prefixes(vault)
+    )
+    protected_file = cache / f"autoevo-{args.run_ts}-protected.txt"
+    protected_file.write_text(
+        "".join(line + "\n" for line in protected), encoding="utf-8"
+    )
+    if protected:
+        notes.append(
+            f"protected_dirty: {len(protected)} in-scope paths carry uncommitted "
+            "user edits and are untouchable this run"
+        )
+
     payload.update(
         {
+            "protected_paths": protected,
+            "protected_file": str(protected_file),
             "dispatches": dispatches,
             "quarantine_skipped": skipped_lines,
             "quarantine_skipped_file": str(skipped_file),

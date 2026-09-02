@@ -12,6 +12,10 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
+import sys as _s
+_s.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import retry_transient  # noqa: E402
+
 QUARANTINE_EXPIRY_DAYS = 30
 QUARANTINE_THRESHOLD = 3
 VALID_OUTCOMES = {"envelope_returned", "forgetter_no_envelope"}
@@ -34,7 +38,12 @@ def _atomic_write(path: Path, text: str) -> None:
 def _load_active_entries(path: Path, today: date) -> dict[str, dict[str, Any]]:
     if not path.exists():
         return {}
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
+    data = tomllib.loads(
+        retry_transient(
+            lambda: path.read_text(encoding="utf-8"),
+            what=f"read {path.name}",
+        )
+    )
     rows = data.get("quarantine", [])
     if not isinstance(rows, list):
         raise QuarantineError("quarantine state must contain an array of tables")

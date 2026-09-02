@@ -124,7 +124,15 @@ def main(argv: list[str] | None = None) -> int:
             except ValueError:
                 continue
         avg_recent = round(sum(ratings) / len(ratings), 2) if ratings else None
-        last_again = str(last.get("再去", "")).strip() or None
+        # 再去 goes unfilled once a restaurant is settled (profile/diet.md
+        # "Capture tiers"), so carry the most recent decided value forward
+        # instead of reading only the newest row.
+        last_again = None
+        for row in reversed(visits):
+            candidate = str(row.get("再去", "")).strip()
+            if candidate and candidate not in da.UNKNOWN:
+                last_again = candidate
+                break
         score, parts = _score(avg_recent, last_again, days_since)
         entry = {
             "visits": len(visits),

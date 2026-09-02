@@ -39,12 +39,19 @@ EXPECTED_COLUMNS = (
     "Credit",
     "必点·备注",
 )
+ESTABLISHMENT_COLUMNS = ("餐厅", "分店", "地址", "状态", "核验日", "来源")
+LIFECYCLE_STATUSES = {"active", "closed", "moved", "unknown"}
 UNKNOWN = {"", "—", "-"}
 DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 MONEY_RE = re.compile(r"^(~)?([$¥])([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)$")
 PROFILE_ROLE_RE = re.compile(r"^[A-Za-z][A-Za-z -]+$")
 LINK_RE = re.compile(r"\[[^\]]+\]\((?:<([^>]+)>|([^)]+))\)")
 PENDING_MARKERS = ("待确认", "TBD", "UNKNOWN")
+# profile/diet.md "Capture tiers" owns when 再去 is required. It is asked only
+# while the log cannot already answer it: a 正餐 row with fewer than
+# REVISIT_SETTLED_AFTER prior visits. Returning again IS the revisit answer.
+BEVERAGE_TYPES = {"奶茶", "咖啡"}
+REVISIT_SETTLED_AFTER = 2
 
 
 @dataclass(frozen=True)
@@ -323,6 +330,7 @@ def _audit_meal_history(
 
     previous_date: date | None = None
     seen: set[tuple[date, str]] = set()
+    prior_visits: dict[str, int] = {}
     for line_number, cells in table_rows[2:]:
         if not cells or all(set(cell) <= {"-", ":", " "} for cell in cells):
             continue
@@ -379,7 +387,16 @@ def _audit_meal_history(
                     line_number,
                 )
             )
-        capture_fields_missing = score_text in UNKNOWN or row["再去"] in UNKNOWN
+        restaurant_key = _plain_restaurant(row["Restaurant"]).strip()
+        seen_before = prior_visits.get(restaurant_key, 0)
+        prior_visits[restaurant_key] = seen_before + 1
+        revisit_required = (
+            row["类型"].strip() not in BEVERAGE_TYPES
+            and seen_before < REVISIT_SETTLED_AFTER
+        )
+        capture_fields_missing = score_text in UNKNOWN or (
+            revisit_required and row["再去"] in UNKNOWN
+        )
         if capture_fields_missing and any(
             marker.casefold() in row["必点·备注"].casefold()
             for marker in PENDING_MARKERS
@@ -551,6 +568,155 @@ def _audit_meal_history(
     return findings, stats
 
 
+def _audit_establishment_registry(
+    path: Path, vault: Path
+) -> tuple[list[Finding], list[dict[str, str]]]:
+    findings: list[Finding] = []
+    establishments: list[dict[str, str]] = []
+    display = _display_path(path, vault)
+    if not path.is_file():
+        return findings, establishments
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if tuple(_split_markdown_row(line)) == ESTABLISHMENT_COLUMNS
+    ]
+    if not header_indexes:
+        return [
+            Finding(
+                "warning",
+                "establishment_registry_missing",
+                display,
+                "regional dining catalog has no canonical establishment registry",
+            )
+        ], establishments
+    if len(header_indexes) > 1:
+        return [
+            Finding(
+                "error",
+                "establishment_registry_ambiguous",
+                display,
+                "regional dining catalog has more than one establishment registry",
+            )
+        ], establishments
+
+    seen: set[tuple[str, str]] = set()
+    for index in range(header_indexes[0] + 2, len(lines)):
+        cells = _split_markdown_row(lines[index])
+        if not cells:
+            break
+        line_number = index + 1
+        if len(cells) != len(ESTABLISHMENT_COLUMNS):
+            findings.append(
+                Finding(
+                    "error",
+                    "establishment_row_width",
+                    display,
+                    f"expected {len(ESTABLISHMENT_COLUMNS)} columns, got {len(cells)}",
+                    line_number,
+                )
+            )
+            continue
+        row = dict(zip(ESTABLISHMENT_COLUMNS, cells, strict=True))
+        identity = (row["餐厅"].casefold(), row["分店"].casefold())
+        if any(value in UNKNOWN for value in identity) or row["地址"] in UNKNOWN:
+            findings.append(
+                Finding(
+                    "error",
+                    "establishment_identity_missing",
+                    display,
+                    "restaurant, branch, and address are required",
+                    line_number,
+                )
+            )
+        if identity in seen:
+            findings.append(
+                Finding(
+                    "error",
+                    "establishment_duplicate",
+                    display,
+                    f"duplicate restaurant branch: {row['餐厅']} / {row['分店']}",
+                    line_number,
+                )
+            )
+        seen.add(identity)
+        if row["状态"] not in LIFECYCLE_STATUSES:
+            findings.append(
+                Finding(
+                    "error",
+                    "establishment_status_invalid",
+                    display,
+                    f"status must be one of {sorted(LIFECYCLE_STATUSES)}: {row['状态']!r}",
+                    line_number,
+                )
+            )
+        try:
+            date.fromisoformat(row["核验日"])
+        except ValueError:
+            findings.append(
+                Finding(
+                    "error",
+                    "establishment_verified_invalid",
+                    display,
+                    f"verification date must be YYYY-MM-DD: {row['核验日']!r}",
+                    line_number,
+                )
+            )
+        establishments.append(row)
+    return findings, establishments
+
+
+def _audit_branch_resolution(
+    path: Path, establishments: list[dict[str, str]], vault: Path
+) -> list[Finding]:
+    if not path.is_file() or not establishments:
+        return []
+    branches: dict[str, set[str]] = {}
+    for row in establishments:
+        branches.setdefault(row["餐厅"].casefold(), set()).add(row["分店"].casefold())
+    ambiguous = {name: values for name, values in branches.items() if len(values) > 1}
+    if not ambiguous:
+        return []
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    header_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if tuple(_split_markdown_row(line)) == EXPECTED_COLUMNS
+        ),
+        None,
+    )
+    if header_index is None:
+        return []
+
+    findings: list[Finding] = []
+    display = _display_path(path, vault)
+    for index in range(header_index + 2, len(lines)):
+        cells = _split_markdown_row(lines[index])
+        if not cells:
+            break
+        if len(cells) != len(EXPECTED_COLUMNS):
+            continue
+        restaurant = _plain_restaurant(cells[1]).strip()
+        candidate_branches = ambiguous.get(restaurant.casefold())
+        if candidate_branches and not any(
+            branch in cells[1].casefold() for branch in candidate_branches
+        ):
+            findings.append(
+                Finding(
+                    "warning",
+                    "establishment_branch_ambiguous",
+                    display,
+                    f"visit does not identify one of {sorted(candidate_branches)}: {restaurant}",
+                    index + 1,
+                )
+            )
+    return findings
+
+
 def _audit_local_links(paths: set[Path], vault: Path) -> list[Finding]:
     findings: list[Finding] = []
     for path in sorted(paths):
@@ -712,13 +878,25 @@ def audit(vault: Path, recent_count: int = 0) -> dict[str, Any]:
         "rows": 0,
         "dated_rows": 0,
         "health_flags": 0,
+        "establishments": 0,
     }
+    regional_catalog = mappings.get("Regional dining catalog")
+    establishments: list[dict[str, str]] = []
+    if regional_catalog is not None and regional_catalog.is_file():
+        registry_findings, establishments = _audit_establishment_registry(
+            regional_catalog, vault
+        )
+        findings.extend(registry_findings)
+        stats["establishments"] = len(establishments)
     meal_history = mappings.get("Meal-history tracker")
     if meal_history is not None and meal_history.is_file():
         table_findings, table_stats = _audit_meal_history(
             meal_history, profile_path, vault
         )
         findings.extend(table_findings)
+        findings.extend(
+            _audit_branch_resolution(meal_history, establishments, vault)
+        )
         stats.update(table_stats)
     findings.extend(
         _audit_local_links(
@@ -748,6 +926,7 @@ def audit(vault: Path, recent_count: int = 0) -> dict[str, Any]:
         "stats": stats,
         "errors": errors,
         "warnings": warnings,
+        "establishments": establishments,
         "recent": recent,
         "per_person_trend": per_person_trend,
     }

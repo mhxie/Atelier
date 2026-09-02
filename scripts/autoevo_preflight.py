@@ -66,9 +66,31 @@ def autoevo_scope_prefixes(vault: Path) -> list[str]:
 
 
 def _in_scope(path: str, prefixes: list[str]) -> bool:
-    if path.startswith(AUTOEVO_SCOPE_FILE_PREFIX) and path.endswith(AUTOEVO_SCOPE_FILE_SUFFIX):
+    if _is_autoevo_state(path):
         return True
     return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
+
+
+def _is_autoevo_state(path: str) -> bool:
+    """True for autoevo's own queue and quarantine state under _meta/."""
+    return path.startswith(AUTOEVO_SCOPE_FILE_PREFIX) and path.endswith(
+        AUTOEVO_SCOPE_FILE_SUFFIX
+    )
+
+
+def partition_dirty_scope(status_paths: list[str], prefixes: list[str]) -> tuple[list[str], list[str]]:
+    """Split dirty in-scope paths into blocking state and protected content.
+
+    Dirty autoevo state means the queue is in an unknown condition, so the run
+    cannot start. A dirty content file only means the user was editing it: the
+    sweep runs and treats that file as untouchable. Blocking the whole sweep on
+    it guaranteed the bot never ran on a vault the user actually works in.
+    """
+    blocking = sorted({p for p in status_paths if _is_autoevo_state(p)})
+    protected = sorted(
+        {p for p in status_paths if _in_scope(p, prefixes) and not _is_autoevo_state(p)}
+    )
+    return blocking, protected
 
 
 def _normalized_detail(detail: str) -> str:
@@ -443,16 +465,19 @@ def inspect_preflight(
             health["worktree_entries"] = entries
             health["worktree_status_codes"] = codes
             prefixes = autoevo_scope_prefixes(vault)
-            in_scope = [path for _, path in status_entries if _in_scope(path, prefixes)]
-            health["worktree_entries_in_scope"] = len(in_scope)
-            if in_scope:
-                sample = ", ".join(sorted(in_scope)[:3])
+            blocking, protected = partition_dirty_scope(
+                [path for _, path in status_entries], prefixes
+            )
+            health["worktree_entries_in_scope"] = len(blocking) + len(protected)
+            health["protected_paths"] = protected
+            if blocking:
+                sample = ", ".join(blocking[:3])
                 blockers.append(
                     {
-                        "gate": "dirty_vault_worktree",
+                        "gate": "dirty_autoevo_state",
                         "detail": (
-                            f"$OV has {len(in_scope)} changed paths inside autoevo "
-                            f"scopes (of {entries} total; a rename counts both ends), e.g. {sample}"
+                            f"$OV has {len(blocking)} changed autoevo state files "
+                            f"(of {entries} total; a rename counts both ends), e.g. {sample}"
                         ),
                     }
                 )

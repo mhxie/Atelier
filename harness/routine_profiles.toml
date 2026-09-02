@@ -2,6 +2,15 @@ version = 1
 
 # Public, routine-agnostic capability profiles. Private routine names and
 # output paths stay in $OV/_meta/routine_watch.toml and reference these rows.
+#
+# `fallback_runtime = "claude"` lets routine_runner.sh re-execute a cycle
+# through headless Claude Code when Codex fails before delivering (usage
+# limit, auth, crash). Never on a timeout, and never on a runner preflight
+# failure. routine_audit.py refuses the key on profiles whose effects are not
+# idempotent vault writes: Codex plugins, danger-full-access, Atelier
+# read-write, or any send / commit permission. The key is deliberately outside
+# the profile fingerprint; the claim records `runtime`, `fallback_from`, and
+# `fallback_reason`, and only Codex claims count as profile verification.
 
 [profiles.local-maintenance]
 surface = "local"
@@ -25,6 +34,7 @@ allowed_commands = ["/autoevo-nightly"]
 
 [profiles.local-research]
 surface = "local"
+fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "live"
@@ -44,6 +54,7 @@ allowed_commands = ["/run-routine"]
 
 [profiles.local-synthesis]
 surface = "local"
+fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "disabled"
@@ -81,6 +92,7 @@ allowed_commands = ["/run-routine"]
 
 [profiles.local-digest]
 surface = "local"
+fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "live"
@@ -98,18 +110,6 @@ required_plugins = []
 optional_plugins = []
 allowed_commands = ["/run-routine"]
 
-[profiles.cloud-drive-research]
-surface = "cloud"
-web_search = "live"
-reasoning_effort = "medium"
-permissions = [
-  "google-drive:read-write",
-  "web:live",
-]
-required_connectors = ["google-drive"]
-optional_connectors = []
-
-[profiles.cloud-drive-synthesis]
 # Digest mail: render a document from other routines' outputs and mail it.
 #
 # `shell_network = "enabled"` is the narrowest setting that works. The digest's
@@ -158,6 +158,18 @@ required_plugins = []
 optional_plugins = []
 allowed_commands = ["/run-routine"]
 
+[profiles.cloud-drive-research]
+surface = "cloud"
+web_search = "live"
+reasoning_effort = "medium"
+permissions = [
+  "google-drive:read-write",
+  "web:live",
+]
+required_connectors = ["google-drive"]
+optional_connectors = []
+
+[profiles.cloud-drive-synthesis]
 surface = "cloud"
 web_search = "disabled"
 reasoning_effort = "low"

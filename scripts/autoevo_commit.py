@@ -64,7 +64,38 @@ def _git(
     )
 
 
+def _protected_paths() -> frozenset[str]:
+    """Vault-relative paths this run must not stage.
+
+    The dirty-tree gate no longer stops a sweep because the user was editing a
+    note, so the protection moved here: the plan records the in-scope paths that
+    carried uncommitted edits at claim time, and no autoevo commit may touch
+    them. Deterministic, at the one choke point every autoevo commit goes
+    through, rather than a rule the model is asked to remember.
+    """
+    raw = os.environ.get("AUTOEVO_PROTECTED_FILE", "").strip()
+    if not raw:
+        return frozenset()
+    try:
+        content = Path(raw).read_text(encoding="utf-8")
+    except OSError:
+        # Fail closed: a declared protection list that cannot be read must not
+        # silently degrade into no protection at all.
+        raise SystemExit(f"ERROR: cannot read AUTOEVO_PROTECTED_FILE: {raw}")
+    return frozenset(line.strip() for line in content.splitlines() if line.strip())
+
+
 def _commit(vault: Path, message: str, paths: list[str], *, force_add: list[str] | None = None) -> dict:
+    protected = _protected_paths()
+    if protected:
+        collisions = sorted(protected.intersection(paths + list(force_add or [])))
+        if collisions:
+            return {
+                "error": (
+                    "refusing to stage paths with uncommitted user edits: "
+                    + ", ".join(collisions[:5])
+                )
+            }
     add = _git(vault, "add", "--", *paths)
     if add.returncode != 0:
         return {"error": f"git add failed: {add.stderr.strip()[:300]}"}

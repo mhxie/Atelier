@@ -59,7 +59,7 @@ class AutoevoCueTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = Path(tmp)
             for day in ("2099-01-03", "2099-01-04", "2099-01-05"):
-                _audit(vault, day, "dirty_vault_worktree", bucket=True)
+                _audit(vault, day, "dirty_autoevo_state", bucket=True)
             out = _run_py(
                 vault,
                 """
@@ -120,8 +120,8 @@ class AutoevoCueTest(unittest.TestCase):
     def test_two_days_stays_soft(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = Path(tmp)
-            _audit(vault, "2099-01-04", "dirty_vault_worktree", bucket=False)
-            _audit(vault, "2099-01-05", "dirty_vault_worktree", bucket=False)
+            _audit(vault, "2099-01-04", "dirty_autoevo_state", bucket=False)
+            _audit(vault, "2099-01-05", "dirty_autoevo_state", bucket=False)
             out = _run_py(
                 vault,
                 """
@@ -149,5 +149,269 @@ class AutoevoCueTest(unittest.TestCase):
             self.assertIn("failed", out["message"])
 
 
+class RoutineCueTest(unittest.TestCase):
+    def test_oldest_unreviewed_output_gets_a_visible_slot(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = Path(tmp)
+            meta = vault / "_meta"
+            meta.mkdir()
+            rows = []
+            for index, day in enumerate(("28", "27", "26", "01"), start=1):
+                output_dir = f"reports/{index}"
+                rows.append(
+                    f'[[routine]]\noutput_dir = "{output_dir}"\n'
+                    f'file_pattern = "report-*.md"\nlabel = "routine {index}"\n'
+                )
+                report_dir = vault / output_dir
+                report_dir.mkdir(parents=True)
+                (report_dir / f"report-2026-08-{day}.md").write_text("ok\n")
+            (meta / "routine_watch.toml").write_text("\n".join(rows))
+
+            out = _run_py(
+                vault,
+                """
+                cue, _ = cues.check_routine_outputs(vault, date(2026, 8, 28))
+                print(json.dumps({"message": cue.message if cue else ""}))
+                """,
+            )
+
+            self.assertIn("routine 4 (report-2026-08-01.md)", out["message"])
+            self.assertNotIn("routine 1 (report-2026-08-28.md)", out["message"])
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+sys.path.insert(0, str(REPO_ROOT / "scripts"))
+import cues  # noqa: E402
+
+
+def _write_claim(root, routine, cycle, machine, status="completed"):
+    d = root / "_meta" / "routine_runs" / routine
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{cycle}.toml").write_text(
+        f'routine = "{routine}"\ncycle_id = "{cycle}"\n'
+        f'machine = "{machine}"\nstatus = "{status}"\n',
+        encoding="utf-8",
+    )
+
+
+def _owner(root, label):
+    meta = root / "_meta"
+    meta.mkdir(parents=True, exist_ok=True)
+    (meta / "routine_owner.toml").write_text(
+        f'version = 1\nowner_id = "abc"\nowner_label = "{label}"\n'
+        'transferred_at = "2026-07-17T08:09:18+00:00"\n',
+        encoding="utf-8",
+    )
+    return {"coordination": {"backend": "owner"}}
+
+
+def test_machine_filter_ignores_foreign_records(tmp_path):
+    config = _owner(tmp_path, "Devbox")
+    _write_claim(tmp_path, "sample", "2026-08-01", "Devbox", status="failed")
+    _write_claim(tmp_path, "sample", "2026-08-05", "Foreign-Host.local", status="failed")
+
+    label = cues._local_owner_label(tmp_path, config)
+    assert label == "Devbox"
+    found = cues._latest_local_claim(tmp_path, "sample", machine=label)
+    assert found is not None
+    claim_date, claim, _ = found
+    assert claim_date.isoformat() == "2026-08-01"
+    assert claim["machine"] == "Devbox"
+
+
+def test_diverged_owner_label_fails_open_instead_of_wiping_the_fleet(tmp_path):
+    # owner_label froze at claim time; the writer now records the live hostname
+    config = _owner(tmp_path, "Devbox")
+    _write_claim(tmp_path, "sample", "2026-08-20", "Devbox.local")
+
+    # the stale label would drop every record and report the fleet as missed
+    assert cues._latest_local_claim(tmp_path, "sample", machine="Devbox") is None
+    # so the helper must decline to hand that label to the filter
+    label = cues._local_owner_label(tmp_path, config)
+    assert label is None
+    found = cues._latest_local_claim(tmp_path, "sample", machine=label)
+    assert found is not None and found[1]["machine"] == "Devbox.local"
+
+
+def test_corrupt_machine_value_cannot_win_latest_claim(tmp_path):
+    config = _owner(tmp_path, "Devbox")
+    _write_claim(tmp_path, "sample", "2026-08-01", "Devbox")
+    d = tmp_path / "_meta" / "routine_runs" / "sample"
+    (d / "2026-08-09.toml").write_text(
+        'routine = "sample"\nmachine = ["Devbox"]\nstatus = "completed"\n',
+        encoding="utf-8",
+    )
+
+    label = cues._local_owner_label(tmp_path, config)
+    found = cues._latest_local_claim(tmp_path, "sample", machine=label)
+    assert found is not None
+    assert found[0].isoformat() == "2026-08-01"
+
+
+class RoutineFailureCueTests(unittest.TestCase):
+    """Pre-claim failures were written to disk and read by nothing.
+
+    Every other routine cue reads claim files, but the runner writes a
+    diagnostic precisely when it dies *before* a claim exists, so a routine
+    could fail this way indefinitely while looking merely stale.
+    """
+
+    def _vault(self, tmp: str, routine: str, recorded_at: str, phase: str) -> Path:
+        vault = Path(tmp)
+        directory = vault / "_meta" / "routine_failures" / routine
+        directory.mkdir(parents=True)
+        (directory / "20260831T000000-host-1.toml").write_text(
+            textwrap.dedent(f"""
+                routine = "{routine}"
+                cycle_id = "2026-08-31"
+                machine = "host"
+                recorded_at = "{recorded_at}"
+                phase = "{phase}"
+                status = "failed"
+                error = "boom"
+            """).strip(),
+            encoding="utf-8",
+        )
+        return vault
+
+    def test_a_recent_diagnostic_fires(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import cues
+        from datetime import date
+
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp, "some-routine", "2026-08-30T02:00:00-07:00", "lock-acquire")
+            cue, _debug = cues.check_routine_failures(vault, date(2026, 8, 31))
+            self.assertIsNotNone(cue)
+            self.assertIn("some-routine", cue.message)
+            self.assertIn("lock-acquire", cue.message)
+
+    def test_an_old_diagnostic_is_history_not_a_cue(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import cues
+        from datetime import date
+
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp, "some-routine", "2026-07-01T02:00:00-07:00", "lock-acquire")
+            cue, debug = cues.check_routine_failures(vault, date(2026, 8, 31))
+            self.assertIsNone(cue)
+            self.assertIn("older than 7d", debug)
+
+    def test_a_missing_directory_is_silent(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import cues
+        from datetime import date
+
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            cue, _debug = cues.check_routine_failures(Path(tmp), date(2026, 8, 31))
+            self.assertIsNone(cue)
+
+
+class ClaimFailureReasonTests(unittest.TestCase):
+    """The cue has to carry the reason, because the transcript will not.
+
+    Every routine plist sends the runner's output to /tmp, which macOS purges,
+    so by the time a human reads "failed" the evidence is usually gone. The
+    claim's own fields are what survive.
+    """
+
+    def setUp(self):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import cues
+
+        self.reason = cues._claim_failure_reason
+
+    def test_phase_and_detail_are_combined(self):
+        self.assertEqual(
+            self.reason(
+                {"error": "model-execution-failed", "error_detail": "codex stream died"}
+            ),
+            "model-execution-failed: codex stream died",
+        )
+
+    def test_phase_alone_survives(self):
+        self.assertEqual(
+            self.reason({"error": "model-execution-failed"}), "model-execution-failed"
+        )
+
+    def test_detail_alone_survives(self):
+        self.assertEqual(self.reason({"error_detail": "boom"}), "boom")
+
+    def test_a_claim_with_neither_says_nothing_rather_than_guessing(self):
+        self.assertEqual(self.reason({}), "")
+
+    def test_a_detail_that_already_repeats_the_phase_is_not_doubled(self):
+        self.assertEqual(
+            self.reason(
+                {"error": "lock-acquire-failed", "error_detail": "lock-acquire-failed: no profile"}
+            ),
+            "lock-acquire-failed: no profile",
+        )
+
+
+class OwnershipTransferGraceTests(unittest.TestCase):
+    """A transfer must not make every routine look missed.
+
+    Claims are filtered to the owning machine, so the day ownership moves, every
+    cycle the previous owner completed reads as a cycle this machine never ran.
+    Observed on 2026-08-31: a transfer at 21:11 local produced five false
+    "no claim" reports for work finished fifteen hours earlier.
+    """
+
+    WATCH = textwrap.dedent("""
+        [coordination]
+        backend = "owner"
+
+        [[routine]]
+        name = "r"
+        label = "demo routine"
+        execution = "local"
+        output_dir = "x"
+        cron = "0 6 * * *"
+    """).strip()
+
+    def _vault(self, tmp: str, transferred: str) -> Path:
+        vault = Path(tmp)
+        meta = vault / "_meta"
+        meta.mkdir(parents=True)
+        (meta / "routine_watch.toml").write_text(self.WATCH, encoding="utf-8")
+        (meta / "routine_owner.toml").write_text(
+            textwrap.dedent(f"""
+                version = 2
+                owner_id = "00000000-0000-0000-0000-000000000000"
+                owner_label = "ThisMachine"
+                generation = 2
+                transferred_at = "{transferred}"
+            """).strip(),
+            encoding="utf-8",
+        )
+        (meta / "routine_runs" / "r").mkdir(parents=True)
+        (vault / "x").mkdir()
+        return vault
+
+    def _run(self, vault: Path):
+        sys.path.insert(0, str(REPO_ROOT / "scripts"))
+        import cues
+        from datetime import date, datetime
+
+        return cues.check_local_routine_missed(
+            vault,
+            date(2026, 8, 31),
+            now=datetime(2026, 8, 31, 22, 0).astimezone(),
+        )
+
+    def test_a_transfer_today_silences_the_cue(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp, "2026-08-31T21:11:57+00:00")
+            cue, _debug = self._run(vault)
+            self.assertIsNone(cue)
+
+    def test_an_old_transfer_still_reports_a_real_miss(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp, "2026-06-01T00:00:00+00:00")
+            cue, _debug = self._run(vault)
+            self.assertIsNotNone(cue)
+            self.assertIn("demo routine", cue.message)

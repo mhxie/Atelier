@@ -109,9 +109,14 @@ invoke a reviewed script directly, without an LLM, while retaining the same
 machine-owner gate. The default coordination shape assigns all local work to
 one explicitly claimed machine; DynamoDB remains available for intentional
 active-active scheduling. Claude remains supported for interactive Atelier
-workflows, but unattended model-driven routines are Codex-only so their
+workflows. Unattended model-driven routines run through Codex, whose
 sandbox, sanitized environment, plugin loading, and approval policy are
-enforceable.
+enforceable. A profile may declare `fallback_runtime = "claude"`: when Codex
+fails before delivering (usage limit, auth, crash; never a timeout), the
+runner re-executes the cycle through headless Claude Code under its own
+fences (`dontAsk` permissions, vault-only edit rules, no user settings, no
+MCP). `routine_audit.py` refuses the key on profiles with plugins, shell
+escape, external sends, or repo commits. The claim records both runtimes.
 
 ### Architecture
 
@@ -119,7 +124,7 @@ enforceable.
 |---|---|
 | Scheduler | macOS `launchd` plist per routine, fires at configured time |
 | Wrapper | `scripts/routine_runner.sh` handles model-driven routines; reviewed deterministic jobs use a purpose-specific wrapper such as `scripts/semantic_index_runner.sh` |
-| Runtime | Headless Codex for model-driven local routines; deterministic derived-cache jobs run directly; interactive selection remains in `harness/runtimes.toml` plus the gitignored local preference |
+| Runtime | Headless Codex for model-driven local routines, with an optional per-profile Claude Code fallback decided by `scripts/routine_fallback.py`; deterministic derived-cache jobs run directly; interactive selection remains in `harness/runtimes.toml` plus the gitignored local preference |
 | Capability profile | `harness/routine_profiles.toml` plus each private routine's `local_profile` / `cloud_profile` mapping |
 | Machine ownership | Gitignored per-machine identity plus shared `$OV/_meta/routine_owner.toml`; enforced by `scripts/routine_owner.py` |
 | Optional cross-machine lock | DynamoDB conditional put (`attribute_not_exists(pk)`) via `scripts/routine_lock.py` |
@@ -427,6 +432,8 @@ SessionStart hook → uv run scripts/cues.py --hook
                                glob output_dir for file_pattern
                                compare latest filename vs acks[output_dir]
                                if newer: collect for cue message
+                           sort pending outputs by oldest latest filename
+                           so registry order cannot hide review debt
                        → emit cue line if any new files found
                        → check_routine_staleness:
                            for each routine entry:

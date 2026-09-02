@@ -3,10 +3,11 @@ description: Restaurant recommendation flow using local context and credit-burn 
 ---
 ## Purpose
 
-Three intents (auto-detected from args):
+Four intents (auto-detected from args):
 - **A. Restaurant Recommendation** (default): pick 3 restaurant candidates based on user-supplied context, historical preferences, and credit-burn opportunities. Read-only on catalog docs under this intent.
 - **B. Workplace Catering Tracker**: parse a weekly catering PDF from the folder mapped to a workplace slug in `profile/diet.md`, choose health-aware picks for the user's attendance days, and surface a confirmed table for the user to record themselves (the system does not write to daily notes).
 - **C. Meal Log Capture** (ad-hoc): log a meal the user just ate. Parses receipt images (HEIC/JPG/PNG/PDF) when provided, cross-references catalogs for missing slots, asks ONE compact question for what cannot be derived, shows a draft row + side-effect plan, and appends to the private meal-history tracker on confirm. An explicitly trip-associated capture may also add a date-only meal-history reference to that trip note. Co-equal capture path with `/hi` Dining Pulse.
+- **D. Establishment Update**: update one physical branch's address or lifecycle without creating a meal-history row.
 
 ## Quick start
 
@@ -28,15 +29,21 @@ Intent C examples (logging a meal you just ate):
 - `/dine 昨天 <restaurant> dinner $<amount>` → dated free text (respects late-sleep rule)
 - `/dine log /path/to/receipt.pdf` → receipt PDF outside any catering folder
 
+Intent D examples (maintaining a physical branch):
+- `/dine status <restaurant> <branch> closed`
+- `/dine status <restaurant> <branch> moved <new-address>`
+
 If args present, parse them as initial filters; only ask for slots not derivable.
 
 ## Step 0: Intent detection
 
-Parse args. Precedence: **B → C → A** (most specific match wins; ambiguous → ask user one line before routing).
+Parse args. Precedence: **D → B → C → A** (most specific match wins; ambiguous → ask user one line before routing).
 
 Read `profile/diet.md` once, if present, to resolve workplace slugs, catering folders, and `## Catalog files`. Do not assume the private mappings from examples in this command.
 
-Route to **Intent B** if any of:
+Route to **Intent D** when the leading subcommand is `status`.
+
+Else route to **Intent B** if any of:
 - First arg matches a workplace `Slug` declared in `profile/diet.md`
 - Any arg is a `.pdf` path under a catering `Folder` declared in `profile/diet.md`
 - Args contain the literal token `catering`
@@ -54,6 +61,7 @@ Otherwise route to **Intent A** (continue to Step 1 below).
 
 For Intent B, jump to the "Intent B: Workplace Catering Tracker" section near the bottom and skip Steps 1-5.
 For Intent C, jump to the "Intent C: Meal Log Capture" section near the bottom and skip Steps 1-5.
+For Intent D, jump to the "Intent D: Establishment Update" section near the bottom and skip Steps 1-5.
 
 ## Step 1: Gather context
 
@@ -74,7 +82,7 @@ For missing slots, ask via `AskUserQuestion` or sequential 1-line prompts (which
 
 Resolve the following roles through `profile/diet.md § Catalog files`. Paths are relative to `$OV` unless absolute. If the profile or a mapping is absent, use structural discovery under `<paths.travel>/` and `<paths.finance>/` as a fallback and disclose the gap.
 
-- Regional dining catalog (rotation + Michelin wishlist + 场景索引), under `<paths.travel>/`
+- Regional dining catalog (rotation + Michelin wishlist + 场景索引 + `门店索引`), under `<paths.travel>/`
 - Meal-history tracker (history with 评分 + 再去 + recency), under `<paths.travel>/`
 - Credit-perks dining catalog (eligibility + city catalogs), under `<paths.travel>/`
 - Benefits tracker (current cycle credit status, for burn signal), under `<paths.finance>/`
@@ -90,7 +98,7 @@ state, the log-derived score component, and the avoid-window exclusions.
 Do not re-read the meal-history tracker row by row; combine the returned
 `log_score` with the catalog-side factors below.
 
-**Integrity preflight:** when running from the Atelier repo, execute `python3 scripts/dining_audit.py --json`. If it reports errors, exclude the affected rows or source from scoring and disclose the degraded input. Warnings such as missing legacy values do not block recommendations.
+**Integrity preflight:** when running from the Atelier repo, execute `python3 scripts/dining_audit.py --json`. Use its `establishments` rows as the address/lifecycle source. If it reports errors, exclude the affected rows or source from scoring and disclose the degraded input. Warnings such as missing legacy values do not block recommendations.
 
 ## Step 3: Filter + score
 
@@ -102,6 +110,9 @@ Do not re-read the meal-history tracker row by row; combine the returned
 - For Quick lunch: ⌛ ≤ 1
 - For "Special occasion": Michelin OR Exclusive Tables only
 - Skip restaurants visited within `avoid recent` window (from the meal-history tracker)
+- Skip physical branches whose lifecycle is `closed` or `moved`; allow `unknown` only with an explicit lifecycle warning
+
+Treat `(餐厅, 分店)` as establishment identity. Join visit ratings only to an exact branch-specific restaurant name; never assign a chain-wide or legacy ambiguous score to a branch by inference.
 
 **Soft scoring** (rank candidates):
 | Factor | Score |
@@ -213,7 +224,7 @@ For images / PDFs, extract: restaurant name, items + spicy markers, subtotal / t
 
 Read `profile/diet.md` § Catalog files first to resolve the five roles below; if `profile/diet.md` is missing or the section is empty, use structural discovery and note that in the closing line.
 
-- `Grep` the city catalog file under `<paths.travel>/` for the restaurant → derive `类型`, `City`, `⭐` if listed.
+- `Grep` the city catalog file under `<paths.travel>/` for the restaurant → derive `类型`, `City`, `⭐` if listed. Match its `门店索引` by exact `(餐厅, 分店)` or receipt address; do not collapse branches.
 - `Grep` the meal-history file under `<paths.travel>/` for the restaurant → first-time-or-not flag (used in 必点·备注 line if first time).
 - Read the credit-perks catalog only for restaurant eligibility; never treat it as live cycle state.
 - Read the benefits tracker for current availability, completed visits, and confirmed/reconciliation claim state.
@@ -236,23 +247,30 @@ Before offering the side effect, search the resolved compatible section for the 
 
 ### C.3 Auto-derive what you can
 
+Before prompting, apply any `Capture defaults` declared in `profile/diet.md` to missing fields. Explicit per-visit user input wins; never ask for a slot covered by a private default.
+
 | Slot | Derivation |
 |---|---|
 | **Date** | Default today; respect CLAUDE.md late-sleep rule (before 03:00 → previous calendar day). User free text override wins. |
+| **Restaurant** | Use the catalog's canonical name. When the chain has multiple registered branches, store `<餐厅>（<分店>）` so ratings remain branch-specific. |
+| **门店地址** | Exact receipt address → use; else exact branch match in `门店索引`; else ask only when a first/new physical branch must be registered. |
+| **生命周期** | Existing exact branch value → preserve; explicit user statement wins; first observed branch defaults to `active`. Never infer closure or movement from silence. |
 | **City** | Catalog match → use; else infer from restaurant address on receipt; else ask. |
 | **类型** | Catalog match → use; else infer from restaurant name (湘菜/川菜/etc.); else ask. |
 | **⭐** | Catalog match only; else blank. |
-| **人数** | User report or receipt party-size field only; else `—`. |
+| **人数** | Explicit user report → private capture default → receipt party-size field; else `—`. |
 | **总额** | Receipt final total or explicit user report, including tip when the source says so; else `—`. |
 | **人均** | If 人数 and 总额 are known, compute `总额 ÷ 人数` to cents. If only a sourced per-person amount exists, preserve it and leave 总额 blank. |
 | **Platform** | Infer dine-in, pickup, delivery, or a visible booking source; preserve the source label when present; else ask. |
 | **Credit** | Map the visible payment method through the private benefit profile. If no mapping exists, record the method without inferring a card or rewards program. |
 | **健康 flags** | Apply the taxonomy and dish mappings in `profile/diet.md`. If the profile is absent, use only generic visible attributes and label them as inferred. Always show the derivation in the confirm prompt so the user can correct it. |
 
-Required slots that cannot be derived: ask the user in **ONE compact prompt** (not a 6-question waterfall). Required = 评分 (1-10), 再去 (Y/N/Maybe), and any of {City / 类型 / Platform} that the auto-derive could not fill. 人数 and 总额 are optional but ask in the same prompt when neither receipt nor text provides them. Optional 1-line note at the end.
+Required slots that cannot be derived: ask the user in **ONE compact prompt** (not a 6-question waterfall). Required = the capture fields its tier demands in `profile/diet.md` ("Capture tiers"), plus any of {City / 类型 / Platform} that the auto-derive could not fill. 人数 and 总额 are optional but ask in the same prompt when neither receipt nor text provides them. Optional 1-line note at the end.
 
 Example compact prompt:
 > `City? · 评分 1-10? · 再去 Y/N/Maybe? · 人数/总额? · Platform? · 1 句备注?`
+
+Drop the `再去` slot whenever `profile/diet.md` does not require it: a `日常饮品` stop, or a restaurant already logged twice. Check the visit count before composing the prompt so a settled favourite is never asked again.
 
 ### C.4 Side-effect plan
 
@@ -261,6 +279,7 @@ Before writing, plan side effects. Each is opt-in via the confirm prompt (see C.
 | Side effect | Trigger | Action |
 |---|---|---|
 | Meal log append | Always | Append row to the meal log file (under `<paths.travel>/`, filename per `profile/diet.md`); bump `Last updated:` to today. |
+| Establishment registry upsert | First/new physical branch, or explicit address/lifecycle change | Insert or update the regional catalog's `门店索引` row with exact branch, address, lifecycle, verification date, and source. Ratings stay in the meal log. |
 | Gift card update | Receipt shows gift-card balance line OR user volunteers balance | Update existing row in the gift-card catalog file (under `<paths.finance>/`, filename per `profile/diet.md`): Balance + Last updated + Source; or insert new row if first time. |
 | Benefits-tracker nudge | Credit slot maps to a tracked benefit cycle in the private profile | Suggest an update and cite the affected row without copying program policy into this command. Do NOT auto-write; surface as a one-liner for the user to apply manually. |
 | Catalog promotion flag | 评分 ≥ 8 AND 再去 = Y AND restaurant not currently in the relevant city catalog file (per `profile/diet.md`) | One-line suggestion at the end: `→ 考虑 promote 到 <city catalog name> (评分 N + 再去 Y, 还没在 catalog)`. Do NOT write. |
@@ -279,6 +298,7 @@ Draft row (meal log):
 
 Side effects:
   1. Append row to meal log + bump Last updated
+  <next number>. <establishment registry upsert if applicable>
   <next number>. <gift card update if applicable>
   <next number>. <benefits-tracker nudge if applicable>
   <next number>. <catalog promotion flag if applicable>
@@ -291,7 +311,7 @@ User says `yes` → apply all. Partial → apply only the listed numbers. A part
 
 ### C.6 Write
 
-For the meal log: use `Edit` to insert the new row in ascending event-date order. Insert before the next-newer-date row, or append after the last row when it is newest. Never append a backfill at the end merely because it was captured today. Bump `Last updated:` line. For the gift-card catalog: same `Edit` pattern.
+For the meal log: use `Edit` to insert the new row in ascending event-date order. Insert before the next-newer-date row, or append after the last row when it is newest. Never append a backfill at the end merely because it was captured today. Bump `Last updated:` line. For an establishment upsert, edit only the exact `(餐厅, 分店)` row in `门店索引`, or append a new row when no exact identity exists; bump the regional catalog's `Last updated:` line. For the gift-card catalog: same `Edit` pattern.
 
 After writing the meal row, run `python3 scripts/dining_audit.py --json` when available. If the audit fails, repair only the row or invariant introduced by this capture before reporting success. If the audit cannot pass, or the repair removes or rolls back the new meal row, do not write the trip reference.
 
@@ -319,6 +339,18 @@ One line:
 > `Logged: <Restaurant> <Date> 评 <N>/10. <one optional flag, e.g., "prepaid balance updated", "trip reference added", "trip reference skipped after meal log", "promote candidate", or "benefits tracker update to apply manually">.`
 
 If the meal row was not written successfully, or was removed or rolled back because its audit could not pass, report: `Not logged: <Restaurant> <Date>. Neither the meal row nor trip reference was written.` If a successfully audited meal row remains but the helper returns a non-`inserted` status, report: `Logged: <Restaurant> <Date>. Trip reference skipped: <reason>.`
+
+## Intent D: Establishment Update
+
+Use this path for address or lifecycle maintenance without inventing a visit.
+
+1. Resolve the regional catalog from `profile/diet.md`, then find an exact `(餐厅, 分店)` row in `门店索引`.
+2. Accept only lifecycle values `active`, `closed`, `moved`, or `unknown`. Require a complete street address for a new row. Preserve an existing address unless the user explicitly changes it.
+3. Show the current row and proposed row, then ask one confirmation: `Apply establishment update? (yes / no / edit)`.
+4. On `yes`, update or append exactly one registry row, set `核验日` to the local effective date, record the source without copying private prose, and bump the catalog's `Last updated:` line.
+5. Run `python3 scripts/dining_audit.py --json`. Repair only the introduced row if validation fails; otherwise report one line: `Updated: <restaurant> (<branch>) → <status>.`
+
+Do not add a meal-history row, change ratings, or infer that another branch shares this lifecycle.
 
 ## Rules
 

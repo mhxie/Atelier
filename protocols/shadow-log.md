@@ -8,7 +8,7 @@ This system instruments the multi-leg verification workloads the atelier already
 
 - `/system-review` Step 1c (privacy 2-leg: selected runtime native + direct DeepSeek)
 - `scripts/review.sh` (external-reviewer 2-leg: direct DeepSeek + codex)
-- `/decision` (Thinker 2-leg)
+- `/decision` when a high-stakes choice is escalated to Thinker 2-leg
 
 Deferred: the quantitative-claim fact-check gate is not yet instrumented; `harness/shadow_tasks.toml` reserves a `fact-check` task type for when it is.
 
@@ -163,7 +163,7 @@ flow exit:            shadow.py group-close --group <uuid>
                        → removes the witness (default) OR writes closed_at (--mark-closed)
 ```
 
-For Pattern A (persistent shell), the `flow exit` step is wired via an `EXIT trap` in the call site. For Pattern B (Claude Code command markdown), traps do not persist across isolated Bash subprocesses; the call site invokes `group-close` as an explicit final Bash step. The orchestrator at every multi-leg site MUST invoke `group-close`. Without it, a witness lingers for the full 30-min recency window and the hook (if wired) can mis-correlate a later, unrelated `Agent` dispatch into the stale group (e.g., a `/decision` witness with `expected_dispatches=[{model:opus,leg:native}]` staying open while the user runs an unrelated `/hi` that fans out to the Thinker on opus). The `subagent_type` filter (Design decision 3) is the secondary defense.
+For Pattern A (persistent shell), the `flow exit` step is wired via an `EXIT trap` in the call site. For Pattern B (Claude Code command markdown), traps do not persist across isolated Bash subprocesses; the call site invokes `group-close` as an explicit final Bash step. The orchestrator at every multi-leg site MUST invoke `group-close`. Without it, a witness lingers for the full 30-min recency window and the hook (if wired) can mis-correlate a later, unrelated agent dispatch into the stale group. The `subagent_type` filter (Design decision 3) is the secondary defense.
 
 ### Design decisions
 

@@ -111,7 +111,7 @@ class DirtyGateScopeTest(unittest.TestCase):
             self.assertEqual(out["entries"], 1)
             self.assertEqual(out["in_scope"], 0)
 
-    def test_in_scope_dirt_blocks_with_sample(self) -> None:
+    def test_in_scope_content_dirt_protects_instead_of_blocking(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
             (vault / "wip" / "note.md").write_text("edited\n", encoding="utf-8")
@@ -122,14 +122,17 @@ class DirtyGateScopeTest(unittest.TestCase):
                 r = ap.inspect_preflight(vault=vault, lock_path=vault/'cache'/'lock', now=1000,
                                          privacy_probe=ok_probe, semantic_probe=sem_probe)
                 print(json.dumps({"ready": r["ready"], "gate": r.get("gate"), "detail": r.get("detail"),
-                                  "in_scope": r["health"]["worktree_entries_in_scope"]}))
+                                  "in_scope": r["health"]["worktree_entries_in_scope"],
+                                  "protected": r["health"].get("protected_paths", [])}))
                 """,
             )
-            self.assertFalse(out["ready"])
-            self.assertEqual(out["gate"], "dirty_vault_worktree")
+            # A note the user is editing makes the file untouchable for the
+            # run; it no longer stops the sweep. Blocking on it meant the bot
+            # never ran after a work day.
+            self.assertTrue(out["ready"], out)
+            self.assertIsNone(out["gate"])
             self.assertEqual(out["in_scope"], 1)
-            self.assertIn("wip/note.md", out["detail"])
-            self.assertIn("of 2 total", out["detail"])
+            self.assertEqual(out["protected"], ["wip/note.md"])
 
     def test_dirty_scope_cli_counts_only_scoped_paths(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
@@ -148,7 +151,7 @@ class DirtyGateScopeTest(unittest.TestCase):
             self.assertEqual(proc.stdout.strip(), "1")
 
 
-    def test_rename_out_of_scope_still_counts_source(self) -> None:
+    def test_rename_out_of_scope_still_protects_source(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
             _git(vault, "mv", "wip/note.md", "personal/note.md")
@@ -161,9 +164,8 @@ class DirtyGateScopeTest(unittest.TestCase):
                                   "in_scope": r["health"]["worktree_entries_in_scope"]}))
                 """,
             )
-            self.assertFalse(out["ready"], out)
-            self.assertEqual(out["gate"], "dirty_vault_worktree")
-            self.assertIn("wip/note.md", out["detail"])
+            self.assertTrue(out["ready"], out)
+            self.assertEqual(out["in_scope"], 1)
 
 
 class TransientErrorsDeferTest(unittest.TestCase):

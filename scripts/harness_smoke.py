@@ -18,7 +18,6 @@ import tempfile
 import tomllib
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import cues
 import _paths
@@ -630,6 +629,68 @@ def check_semantic_maintenance() -> None:
             "lazy rebuild" not in path.read_text(encoding="utf-8").lower(),
             f"{path.relative_to(ROOT)} still claims query refreshes the index",
         )
+
+
+def check_tracking_refresh_routine() -> None:
+    runner = (ROOT / "scripts" / "tracking_refresh_runner.sh").read_text(
+        encoding="utf-8"
+    )
+    for fragment in (
+        'routine_owner.py" check --json',
+        "find_python.sh",
+        "command_timeout.py",
+        "/usr/bin/caffeinate",
+        'refresh_tracking.py" --json',
+    ):
+        expect(
+            fragment in runner,
+            f"tracking refresh runner missing contract fragment: {fragment}",
+        )
+    expect(
+        "codex" not in runner.lower(),
+        "deterministic tracking refresh invokes Codex",
+    )
+
+    plist_path = ROOT / "scripts" / "launchd" / "com.atelier.tracking-refresh.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+    expect(
+        plist.get("Label") == "com.atelier.tracking-refresh"
+        and plist.get("RunAtLoad") is True
+        and plist.get("StartCalendarInterval")
+        == [
+            {"Hour": 5, "Minute": 30},
+            {"Hour": 17, "Minute": 30},
+        ],
+        "tracking refresh launchd schedule drift",
+    )
+    arguments = plist.get("ProgramArguments", [])
+    expect(
+        any("tracking_refresh_runner.sh" in str(value) for value in arguments),
+        "tracking refresh plist does not invoke its deterministic runner",
+    )
+
+
+def check_vault_job_runner() -> None:
+    runner = (ROOT / "scripts" / "vault_job_runner.sh").read_text(encoding="utf-8")
+    for fragment in (
+        'routine_owner.py" check --json',
+        "find_python.sh",
+        "command_timeout.py",
+        "/usr/bin/caffeinate",
+        "ATELIER_VAULT_JOB_TIMEOUT_SECONDS",
+        "uv run --quiet",
+        # A vault-relative path only: absolute paths and parent traversal are
+        # refused before ownership is even checked.
+        "/*|*..*)",
+    ):
+        expect(
+            fragment in runner,
+            f"vault job runner missing contract fragment: {fragment}",
+        )
+    expect(
+        "codex" not in runner.lower() and "claude" not in runner.lower(),
+        "deterministic vault job runner invokes a model runtime",
+    )
 
 
 def check_semantic_corpus_policy() -> None:
@@ -1719,12 +1780,38 @@ def check_autoevo_reliability() -> None:
                 privacy_probe=privacy_probe,
                 semantic_probe=semantic_probe,
             )
+            # A dirty note the user is editing no longer stops the sweep; it
+            # becomes untouchable for the run and is refused at commit time.
+            # (2026-08-29: the scope gate blocked every run after a work day.)
             expect(
-                dirty["gate"] == "dirty_vault_worktree"
+                dirty["ready"] is True
                 and dirty["health"]["worktree_entries"] == 1
-                and dirty["health"]["worktree_entries_in_scope"] == 1,
-                "autoevo dirty-tree classification drift",
+                and dirty["health"]["worktree_entries_in_scope"] == 1
+                and dirty["health"]["protected_paths"],
+                f"in-scope content dirt must protect, not block: {dirty.get('gate')}",
             )
+            # Autoevo's own queue state is different: dirty there means the
+            # queue condition is unknown, so the run must not start.
+            # Production tracks `_meta/autoevo_*.toml`; this fixture ignores
+            # `_meta/`, so force-track it or the state gate can never fire here.
+            state_file = vault / "_meta" / "autoevo_pending.toml"
+            state_file.parent.mkdir(parents=True, exist_ok=True)
+            state_file.write_text("# base\n", encoding="utf-8")
+            git("add", "-f", "--", "_meta/autoevo_pending.toml")
+            git("commit", "-q", "-m", "track autoevo state")
+            state_file.write_text("# smoke\n", encoding="utf-8")
+            state_dirty = autoevo_preflight.inspect_preflight(
+                vault=vault,
+                lock_path=session_lock,
+                now=1_000,
+                privacy_probe=privacy_probe,
+                semantic_probe=semantic_probe,
+            )
+            expect(
+                state_dirty["gate"] == "dirty_autoevo_state",
+                f"dirty autoevo state must block: {state_dirty.get('gate')}",
+            )
+            state_file.write_text("# base\n", encoding="utf-8")
             # Dirt outside the sweep scopes must not block: the bot stages
             # explicit paths, so user edits elsewhere cannot leak into its
             # commits. (2026-08-22: a vault-wide gate blocked 73 of 103 runs.)
@@ -1746,7 +1833,8 @@ def check_autoevo_reliability() -> None:
                 f"out-of-scope dirt must not block autoevo: {out_of_scope.get('gate')}",
             )
             stray.unlink()
-            note.write_text("dirty\n", encoding="utf-8")
+            note.write_text("base\n", encoding="utf-8")
+            state_file.write_text("# dirty\n", encoding="utf-8")
             dirty = autoevo_preflight.inspect_preflight(
                 vault=vault,
                 lock_path=session_lock,
@@ -1808,6 +1896,7 @@ def check_autoevo_reliability() -> None:
             )
             blocker_audit.write_text(blocker_text, encoding="utf-8")
             note.write_text("base\n", encoding="utf-8")
+            state_file.write_text("# base\n", encoding="utf-8")
 
             session_lock.touch()
             active = autoevo_preflight.inspect_preflight(
@@ -2296,6 +2385,13 @@ def check_codex_routine_runner() -> None:
         "harness/commands.toml",
         "LOCK_CMD=(uv run",
         'command_timeout.py" --seconds "$ROUTINE_TIMEOUT_SECONDS"',
+        # Host-readiness gate: wake-triggered catch-up runs used to hang for the
+        # whole budget instead of failing, so the gate must stay ahead of the
+        # model launch and must defer rather than proceed.
+        'READINESS_TIMEOUT_SECONDS="${ATELIER_READINESS_TIMEOUT_SECONDS:-120}"',
+        "READINESS_BLOCKER=\"vault-unreadable\"",
+        'READINESS_BLOCKER="network-unreachable"',
+        'status = "deferred"',
         "--ask-for-approval never exec",
         "--ignore-user-config",
         '--sandbox "$CODEX_SANDBOX"',
@@ -2312,6 +2408,23 @@ def check_codex_routine_runner() -> None:
         '"ZDOTDIR=$ATELIER_DIR/harness/routine-shell"',
         "finalize_unexpected_exit",
         'RUNTIME="codex"',
+        # Runtime fallback: declared per profile, decided deterministically,
+        # never on a timeout, executed under Claude Code's own fences.
+        "FALLBACK_RUNTIME",
+        'routine_fallback.py" decide',
+        'routine_fallback.py" extract',
+        "run_claude()",
+        "--permission-mode dontAsk",
+        '--setting-sources ""',
+        "--strict-mcp-config",
+        '"Edit(/$OV/**)"',
+        # Claude's --json-schema validator rejects the draft `$schema` URI the
+        # shared result schema carries; the first e2e fallback run died on it.
+        'd.pop("$schema", None)',
+        'fallback_from = "%s"',
+        # Successful transcripts are kept too; a delivered-but-wrong report
+        # was unauditable when only failures were preserved.
+        'KEPT_LOG=$(preserve_model_log "$MODEL_LOG")',
         '--skip-git-repo-check --add-dir "$OV" -C "$ROUTINE_CWD"',
         "atelier-routine-cwd.XXXXXX",
         "ATELIER_ACCESS_MODE",
@@ -2726,7 +2839,11 @@ label = "sample"
             "local profile TSV contract drift",
         )
         expect(
-            len(fields) == 10 and len(fields[8]) == 64, "profile fingerprint missing"
+            len(fields) == 11 and len(fields[8]) == 64, "profile fingerprint missing"
+        )
+        expect(
+            fields[10] == "claude",
+            "local-research must declare the claude fallback runtime in TSV column 11",
         )
         expect(
             fields[9] == "atelier:read,vault:read-write,web:live",
@@ -3214,6 +3331,45 @@ def check_routine_owner() -> None:
         expect(
             malformed.returncode == 1,
             "routine prompt guard accepted a missing preamble",
+        )
+
+        drive_input_prompt = temp / "drive-input.md"
+        drive_body = (
+            "--- ORIGINAL ROUTINE PROMPT (verbatim) ---\n\n"
+            "Use Google-Drive MCP search_files to load the sample queue.\n"
+        )
+        drive_input_prompt.write_text(
+            "LOCAL EXECUTION OVERRIDE\n"
+            "- Write your final report DIRECTLY to the filesystem.\n\n" + drive_body,
+            encoding="utf-8",
+        )
+        drive_input = subprocess.run(
+            [PYTHON, str(guard_script), str(drive_input_prompt)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        expect(
+            drive_input.returncode == 1,
+            "routine prompt guard accepted a Drive-only input path",
+        )
+
+        drive_input_prompt.write_text(
+            "LOCAL EXECUTION OVERRIDE\n"
+            "- Read every input the original prompt names from the local\n"
+            "  filesystem under $OV, NOT through Drive.\n"
+            "- Write your final report DIRECTLY to the filesystem.\n\n" + drive_body,
+            encoding="utf-8",
+        )
+        drive_fixed = subprocess.run(
+            [PYTHON, str(guard_script), str(drive_input_prompt)],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        )
+        expect(
+            drive_fixed.returncode == 0,
+            f"local input directive was rejected: {drive_fixed.stderr}",
         )
 
         unsafe_fixtures = (
@@ -4552,6 +4708,10 @@ def check_public_regression_tests() -> None:
             "tests.test_session_stats",
             "tests.test_decay_scan",
             "tests.test_dine_rank",
+            "tests.test_dining_audit",
+            "tests.test_daily_brief",
+            "tests.test_refresh_tracking",
+            "tests.test_triage_command",
         ],
         cwd=ROOT,
         capture_output=True,
@@ -4602,6 +4762,8 @@ def main() -> int:
         ("dining audit", check_dining_audit),
         ("semantic cache-first", check_semantic_cache_first),
         ("semantic maintenance", check_semantic_maintenance),
+        ("tracking refresh routine", check_tracking_refresh_routine),
+        ("vault job runner", check_vault_job_runner),
         ("semantic corpus policy", check_semantic_corpus_policy),
         ("autoevo reliability", check_autoevo_reliability),
         ("runtime selector", check_runtime_selector),

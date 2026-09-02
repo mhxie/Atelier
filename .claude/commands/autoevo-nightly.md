@@ -107,8 +107,9 @@ One JSON object. Bind for the rest of the run: `paths.cache` → `$PATHS_CACHE`,
 `paths.archive` → `$PATHS_ARCHIVE`, `paths.findings` → `$PATHS_FINDINGS`,
 `paths.findings_rel` → `$FINDINGS_REL`, `paths.audit_rel` → `$AUDIT_REL`,
 `outcomes_file` → `$OUTCOMES_FILE`, `quarantine_skipped_file` →
-`$QUARANTINE_SKIPPED`. Initialize `DECAY_REPORT_RELS=()` as the register of
-persisted reports. Never hardcode vault segments; the plan output is the
+`$QUARANTINE_SKIPPED`, `protected_file` → `$AUTOEVO_PROTECTED_FILE` and
+`export` it, so every `autoevo_commit.py` call inherits it. Initialize
+`DECAY_REPORT_RELS=()` as the register of persisted reports. Never hardcode vault segments; the plan output is the
 canonical resolution.
 
 - **`gate.status: "blocked"`** — write the audit log (step 7 format) with one
@@ -120,7 +121,9 @@ canonical resolution.
   (wip, one research subdir by day-of-month rotation, reflections — already
   quarantine-filtered), `quarantine_skipped` carries the `scope_quarantined:`
   lines for step 7, and `notes` carries rotation/empty-tier observations for
-  audit § Notes.
+  audit § Notes. `protected_paths` lists in-scope files carrying uncommitted
+  user edits: never propose, merge, archive, or delete one. They are refused at
+  the commit choke point regardless, so proposing one only wastes a dispatch.
 
 ## Step 2: Forgetter sweep + persist reports
 

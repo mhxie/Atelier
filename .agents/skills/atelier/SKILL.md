@@ -14,7 +14,7 @@ agents, or harness portability.
 2. Read `protocols/runtime-adapters.md` only when changing or debugging
    cross-runtime behavior.
 3. Invoke known commands through their explicit repo skills (`$hi`, `$weekly`,
-   `$review`, `$lint`, and so on).
+   `$review`, `$triage`, `$lint`, and so on).
 4. Read the command skill's declared `.claude/commands/<command>.md` source
    directly and execute it in the current thread.
    For `$hi`, use the injected route packet and read only its registry-owned
@@ -35,7 +35,10 @@ agents, or harness portability.
     profiles in `harness/routine_profiles.toml`, and run
     `python3 scripts/routine_audit.py audit --check-system --json` before
     enabling or handing off launchd jobs.
-11. Keep private skill sources under `<paths.private_features>/`. Link the same
+11. Keep private digest ledger declarations in `$OV/_meta/digest_updates.toml`.
+    `routine_digest.py` renders new append-only rows into the next daily digest
+    and the current weekly digest without exposing their paths in public config.
+12. Keep private skill sources under `<paths.private_features>/`. Link the same
     source directory into Claude and Codex user skill discovery; do not copy
     the skill body or add its name to committed registries.
 

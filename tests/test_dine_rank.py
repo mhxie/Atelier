@@ -54,6 +54,39 @@ class DineRankTest(unittest.TestCase):
             self.assertNotIn("Great Place", out["excluded"])
             self.assertEqual(out["sourced_rows"], 5)
 
+    def test_carries_the_last_decided_revisit_forward(self) -> None:
+        # profile/diet.md "Capture tiers": 再去 goes unfilled once a restaurant is
+        # settled, so a dashed newest row must not erase the earlier verdict.
+        with tempfile.TemporaryDirectory(prefix="atelier-dine-") as tmp:
+            vault = Path(tmp) / "vault"
+            vault.mkdir()
+            tracker = vault / "tracker.md"
+            tracker.write_text(
+                "\n".join([
+                    HEADER, SEP,
+                    _row("2099-01-01", "Settled Favourite", "9", "Y"),
+                    _row("2099-02-01", "Settled Favourite", "9", "Y"),
+                    _row("2099-03-01", "Settled Favourite", "9", "—"),
+                    _row("2099-01-01", "Settled Avoid", "4", "N"),
+                    _row("2099-02-01", "Settled Avoid", "4", "N"),
+                    _row("2099-03-01", "Settled Avoid", "4", "—"),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+            proc = subprocess.run(
+                [sys.executable, "scripts/dine_rank.py", "--tracker", str(tracker), "--today", "2099-06-01"],
+                cwd=REPO_ROOT, env={**os.environ, "OV": str(vault)},
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = json.loads(proc.stdout)
+            fav = out["restaurants"]["Settled Favourite"]
+            self.assertEqual(fav["last_again"], "Y")
+            self.assertIn("再去 Y: +2", fav["log_score_parts"])
+            avoid = out["restaurants"]["Settled Avoid"]
+            self.assertEqual(avoid["last_again"], "N")
+            self.assertIn("再去 N: -5", avoid["log_score_parts"])
+
 
 if __name__ == "__main__":
     unittest.main()

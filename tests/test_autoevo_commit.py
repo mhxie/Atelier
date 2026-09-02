@@ -27,12 +27,13 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run(vault: Path, *argv: str) -> dict:
+def _run(vault: Path, *argv: str, protected_file: str | None = None) -> dict:
     proc = subprocess.run(
         [sys.executable, "scripts/autoevo_commit.py", *argv],
         cwd=REPO_ROOT,
         env={
             **os.environ,
+            **({"AUTOEVO_PROTECTED_FILE": protected_file} if protected_file else {}),
             "OV": str(vault),
             "GIT_AUTHOR_NAME": "Local User",
             "GIT_AUTHOR_EMAIL": "local@example.com",
@@ -165,3 +166,70 @@ class QueueExtraPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# Glitch (2026-08-29): the dirty-tree gate blocked every sweep that followed a
+# work day, so it was narrowed to autoevo's own state. The protection for the
+# user's in-progress notes moved to this choke point, and must hold here or a
+# sweep can delete uncommitted work that git cannot recover.
+
+
+class ProtectedPathTest(unittest.TestCase):
+    def _vault(self, tmp: str) -> Path:
+        vault = Path(tmp) / "vault"
+        (vault / "wip").mkdir(parents=True)
+        (vault / "wip" / "a.md").write_text("a\n", encoding="utf-8")
+        (vault / "wip" / "target.md").write_text("t\n", encoding="utf-8")
+        _git(vault, "init", "-q")
+        _git(vault, "add", "-A")
+        _git(vault, "commit", "-q", "-m", "base")
+        return vault
+
+    def test_protected_path_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self._vault(tmp)
+            protected = Path(tmp) / "protected.txt"
+            protected.write_text("wip/a.md\n", encoding="utf-8")
+            head = _git(vault, "rev-parse", "HEAD").stdout.strip()
+            out = _run(
+                vault, "audit", "--run-date", "2099-01-01", "--auto", "0",
+                "--pending", "0", "--errors", "0", "--quarantined", "0",
+                "--paths", "wip/a.md",
+                protected_file=str(protected),
+            )
+            self.assertIn("error", out)
+            self.assertIn("uncommitted user edits", out["error"])
+            self.assertEqual(
+                _git(vault, "rev-parse", "HEAD").stdout.strip(), head,
+                "a refused commit must not advance HEAD",
+            )
+
+    def test_unprotected_path_still_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self._vault(tmp)
+            protected = Path(tmp) / "protected.txt"
+            protected.write_text("wip/other.md\n", encoding="utf-8")
+            (vault / "wip" / "a.md").write_text("changed\n", encoding="utf-8")
+            out = _run(
+                vault, "audit", "--run-date", "2099-01-01", "--auto", "0",
+                "--pending", "0", "--errors", "0", "--quarantined", "0",
+                "--paths", "wip/a.md",
+                protected_file=str(protected),
+            )
+            self.assertIn("sha", out, out)
+
+    def test_unreadable_protection_list_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = self._vault(tmp)
+            (vault / "wip" / "a.md").write_text("changed\n", encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, "scripts/autoevo_commit.py", "audit",
+                 "--run-date", "2099-01-01", "--auto", "0", "--pending", "0",
+                 "--errors", "0", "--quarantined", "0", "--paths", "wip/a.md"],
+                cwd=REPO_ROOT,
+                env={**os.environ, "OV": str(vault),
+                     "AUTOEVO_PROTECTED_FILE": str(Path(tmp) / "missing.txt")},
+                capture_output=True, text=True, timeout=120,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("cannot read AUTOEVO_PROTECTED_FILE", proc.stderr)

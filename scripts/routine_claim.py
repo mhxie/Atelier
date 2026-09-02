@@ -14,6 +14,10 @@ import tomllib
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import cron_spec  # noqa: E402
+
 SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 VALID_STATUSES = {
     "running",
@@ -177,6 +181,106 @@ def schedule_decision(
     }
 
 
+MAX_CATCHUP_DAYS = 7
+
+
+def _declared_cron(routine: str) -> str:
+    """The routine's declared cron from routine_watch.toml, or "" if none."""
+    raw_ov = os.environ.get("OV", "")
+    if not raw_ov:
+        raise ValueError("OV is not set")
+    path = Path(raw_ov).expanduser().resolve() / "_meta" / "routine_watch.toml"
+    if not path.is_file():
+        return ""
+    try:
+        document = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return ""
+    for row in document.get("routine", []):
+        if isinstance(row, dict) and row.get("name") == routine:
+            cron = row.get("cron")
+            return cron if isinstance(cron, str) else ""
+    return ""
+
+
+def _claim_status(routine: str, cycle: str) -> str | None:
+    """Validated status of one claim, or None when no claim exists."""
+    path = _claim_path(routine, cycle)
+    if not path.exists():
+        return None
+    try:
+        claim = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"claim for {cycle} is unreadable or invalid TOML: {exc}") from exc
+    return validate_claim(
+        claim,
+        routine=routine,
+        cycle=cycle,
+        allow_legacy_owner_generation=True,
+    )
+
+
+def _select_by_cron(routine: str, cron: str, now: datetime) -> dict[str, object]:
+    """Pick the cycle a cron-scheduled routine owes, from an arbitrary invocation.
+
+    This is what lets a plist fire hourly without turning a weekly routine into
+    a daily one. The plist becomes a recovery mechanism and the declared cron
+    becomes the schedule, which is the split that was missing: before this,
+    `routine_runner.sh` took `date +%Y-%m-%d` as the cycle for every routine
+    except autoevo-nightly, so the plist *was* the schedule and an hourly plist
+    would have meant a daily run.
+
+    Selection only decides *which* cycle this invocation is for. Whether to act
+    on it stays with `schedule_decision`, which owns claim-state policy; a
+    failed cycle is still returned here and still refused there, because
+    same-cycle retry after effects needs a human.
+    """
+    if not cron_spec.is_evaluable(cron):
+        # Fail open. A malformed or non-literal schedule is a declaration bug,
+        # and the wrong response to it is a routine that silently stops running.
+        return {
+            "action": "run",
+            "reason": "current-cycle-unevaluable-cron",
+            "cycle_id": now.date().isoformat(),
+        }
+    window = cron_spec.estimate_cadence_days(cron) or 1
+    window = max(1, min(window, MAX_CATCHUP_DAYS))
+    today = now.date()
+    due = cron_spec.scheduled_dates(cron, today - timedelta(days=window), now)
+    if not due:
+        return {
+            "action": "skip",
+            "reason": "no-scheduled-occurrence-due",
+            "cycle_id": today.isoformat(),
+        }
+
+    latest = due[-1]
+    if latest == today:
+        return {
+            "action": "run",
+            "reason": "current-cycle",
+            "cycle_id": today.isoformat(),
+        }
+
+    cycle = latest.isoformat()
+    status = _claim_status(routine, cycle)
+    if status is None:
+        return {"action": "run", "reason": "missed-scheduled-cycle", "cycle_id": cycle}
+    if status == "completed":
+        return {
+            "action": "skip",
+            "reason": "latest-scheduled-cycle-completed",
+            "cycle_id": cycle,
+            "status": status,
+        }
+    return {
+        "action": "run",
+        "reason": "scheduled-cycle-unresolved",
+        "cycle_id": cycle,
+        "status": status,
+    }
+
+
 def select_scheduled_cycle(
     routine: str,
     *,
@@ -188,14 +292,24 @@ def select_scheduled_cycle(
         raise ValueError("scheduled cycle selection requires a timezone-aware time")
 
     today = current.date()
-    if routine != "autoevo-nightly" or current.hour >= 5:
+    if routine != "autoevo-nightly":
+        # autoevo-nightly keeps its bespoke pre-05:00 rule below. It is the one
+        # routine whose hourly plist is already in production and verified, and
+        # folding it into the generic path in the same change would put the
+        # only working case at risk to remove a small duplication.
+        cron = _declared_cron(routine)
+        if not cron:
+            return {
+                "action": "run",
+                "reason": "current-cycle-no-declared-cron",
+                "cycle_id": today.isoformat(),
+            }
+        return _select_by_cron(routine, cron, current)
+
+    if current.hour >= 5:
         return {
             "action": "run",
-            "reason": (
-                "current-cycle"
-                if routine != "autoevo-nightly"
-                else "primary-or-missed-current-cycle"
-            ),
+            "reason": "primary-or-missed-current-cycle",
             "cycle_id": today.isoformat(),
         }
 

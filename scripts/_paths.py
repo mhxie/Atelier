@@ -25,8 +25,10 @@ Usage:
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
+import time
 import tomllib
 from functools import lru_cache
 from pathlib import Path
@@ -230,3 +232,34 @@ def fmt(p: Path) -> str:
         return f"$OV/{rel.as_posix()}"
     except ValueError:
         return p.as_posix()
+
+
+# The vault lives on a Google Drive File Provider mount that intermittently
+# answers a read or an flock with EDEADLK while it materializes or syncs the
+# file. It is transient, not a real deadlock: the same path reads cleanly a
+# moment later. Untreated it has failed routine lock acquisition and aborted a
+# nightly sweep mid-plan.
+TRANSIENT_MOUNT_ERRNOS = frozenset({errno.EDEADLK, errno.EAGAIN})
+
+
+def retry_transient(operation, *, attempts: int = 4, delay: float = 0.5, what: str = "vault operation"):
+    """Run ``operation``, retrying the mount's transient EDEADLK with backoff.
+
+    Any other ``OSError`` is re-raised immediately: this widens no failure
+    except the one the mount is known to invent.
+    """
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except OSError as exc:
+            if exc.errno not in TRANSIENT_MOUNT_ERRNOS or attempt == attempts:
+                raise
+            print(
+                f"warning: {what} hit transient mount error {exc.errno} "
+                f"(attempt {attempt}/{attempts}); retrying",
+                file=sys.stderr,
+            )
+            time.sleep(delay * attempt)
+    raise AssertionError("unreachable")

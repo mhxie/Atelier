@@ -621,6 +621,24 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
             "total_events": len(events),
             "by_kind": kind_counts,
             "events_with_empty_phrase": empty_phrase_count,
+            "proposal_threshold_days": INTENT_MISS_DISTINCT_DAYS_THRESHOLD,
+            # Same rows the text mode prints under --propose, so a caller reading
+            # JSON (the /triage overview) sees the same actionable set instead
+            # of an always-empty lane.
+            "proposals": [
+                {
+                    "phrase": phrase,
+                    "target": pc.get("clarified") or None,
+                    "count": pc["count"],
+                    "distinct_days": len(pc["days"]),
+                }
+                for phrase, pc in sorted(
+                    phrase_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0])
+                )
+                if len(pc["days"]) >= INTENT_MISS_DISTINCT_DAYS_THRESHOLD
+            ]
+            if getattr(args, "propose", False)
+            else None,
             "phrases": [
                 {
                     "phrase": phrase,

@@ -18,7 +18,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from routine_claim import validate_claim
@@ -38,7 +38,16 @@ WEB_MODES = {"disabled", "live"}
 USER_CONFIG_MODES = {"ignore", "required"}
 SHELL_NETWORK_MODES = {"disabled", "enabled", "unrestricted"}
 ATELIER_ACCESS_MODES = {"read", "read-write"}
+FALLBACK_RUNTIMES = {"claude"}
 REASONING_EFFORTS = {"low", "medium", "high"}
+# External permission namespaces, and the subset that only reads. An unverified
+# read degrades to collecting nothing, so it stays a warning. An unverified
+# write is a preflight error: the first run that exercises the capability would
+# also be the first time it takes an irreversible action outside $OV, unattended
+# and with the prompt allowlist as the only thing bounding it.
+EXTERNAL_PERMISSION_NAMESPACES = {"gmail", "readwise", "mail"}
+EXTERNAL_READ_PERMISSIONS = {"gmail:read", "readwise:read"}
+
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 SAFE_COMMAND = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9._-]*$")
 SAFE_PERMISSION = re.compile(r"^[a-z0-9][a-z0-9._:-]*$")
@@ -204,6 +213,45 @@ def _validate_profiles(profiles: dict[str, dict[str, Any]]) -> list[str]:
                 errors.append(
                     f"profile {name!r} requires plugins but ignores user config"
                 )
+            fallback = profile.get("fallback_runtime")
+            if fallback is not None:
+                # A second runtime re-executes the whole cycle after the first
+                # failed. That is only safe for profiles whose every effect is
+                # an idempotent vault write: no Codex plugin the fallback cannot
+                # load, no shell escape, no external send, no repo commit.
+                if fallback not in FALLBACK_RUNTIMES:
+                    errors.append(f"profile {name!r} has invalid fallback_runtime")
+                if profile.get("required_plugins"):
+                    errors.append(
+                        f"profile {name!r} fallback_runtime conflicts with required_plugins"
+                    )
+                if profile.get("user_config") == "required":
+                    errors.append(
+                        f"profile {name!r} fallback_runtime conflicts with user_config='required'"
+                    )
+                if profile.get("sandbox") == "danger-full-access":
+                    errors.append(
+                        f"profile {name!r} fallback_runtime conflicts with danger-full-access"
+                    )
+                if profile.get("atelier_access") == "read-write":
+                    errors.append(
+                        f"profile {name!r} fallback_runtime conflicts with atelier read-write"
+                    )
+                unsafe = sorted(
+                    p
+                    for p in profile.get("permissions", [])
+                    if isinstance(p, str)
+                    and (
+                        p.endswith(":send-self")
+                        or p.endswith(":git-commit")
+                        or p.endswith(":create-document")
+                    )
+                )
+                if unsafe:
+                    errors.append(
+                        f"profile {name!r} fallback_runtime conflicts with external-write permissions: "
+                        + ", ".join(unsafe)
+                    )
         else:
             for field in ("required_connectors", "optional_connectors"):
                 try:
@@ -416,12 +464,13 @@ def _loaded_launchd_labels(labels: set[str]) -> tuple[set[str], str | None]:
     return loaded, None
 
 
-def _plist_labels_by_routine(routine_names: set[str]) -> dict[str, str]:
+def _plists_by_routine(routine_names: set[str]) -> dict[str, dict[str, Any]]:
+    """Map each routine to the parsed plist that invokes it."""
     candidates = list((ROOT / "scripts" / "launchd").glob("*.plist"))
     private_dir = _vault_root() / "_meta" / "launchd"
     if private_dir.is_dir():
         candidates.extend(private_dir.glob("*.plist"))
-    labels: dict[str, str] = {}
+    found: dict[str, dict[str, Any]] = {}
     for path in candidates:
         try:
             with path.open("rb") as handle:
@@ -446,8 +495,50 @@ def _plist_labels_by_routine(routine_names: set[str]) -> dict[str, str]:
                     continue
                 routine_name = invocation[index + 1]
                 if routine_name in routine_names:
-                    labels[routine_name] = label
-    return labels
+                    found[routine_name] = plist
+    return found
+
+
+def _plist_labels_by_routine(routine_names: set[str]) -> dict[str, str]:
+    return {
+        name: str(plist["Label"])
+        for name, plist in _plists_by_routine(routine_names).items()
+    }
+
+
+def plist_recovery(plist: dict[str, Any]) -> str:
+    """Classify how a plist recovers a cycle it did not complete.
+
+    This matters more than it looks. `routine_runner.sh` defers a cycle it
+    cannot start yet (readiness, contention, a machine that was asleep), and a
+    deferred cycle waits for "the next trigger". For a plist that fires once a
+    week, the next trigger is a week away, so one deferral costs a full cycle.
+    That is the shape of an intermittent hit rate: the scheduler is firing
+    exactly as configured and the output still goes missing.
+
+    Two things restore a missed cycle, and the runner's schedule gate makes
+    both cheap because it exits immediately for completed, fenced, and
+    not-yet-due claims:
+
+      hourly       a StartCalendarInterval with no Hour key is a launchd
+                   wildcard firing every hour (also StartInterval, or an
+                   explicit list dense enough to cover the day)
+      run-at-load  covers login and LaunchAgent reload after a missed event
+
+    Returns "none" when neither is present, which is a standing risk rather
+    than a failure: nothing is broken until a cycle is missed.
+    """
+    marks: list[str] = []
+    interval = plist.get("StartCalendarInterval")
+    if isinstance(interval, dict) and "Hour" not in interval:
+        marks.append("hourly")
+    elif isinstance(interval, list) and len(interval) >= 12:
+        marks.append("hourly")
+    elif plist.get("StartInterval"):
+        marks.append("hourly")
+    if plist.get("RunAtLoad") is True:
+        marks.append("run-at-load")
+    return "+".join(marks) if marks else "none"
 
 
 def _background_evidence(
@@ -565,7 +656,7 @@ def _background_evidence(
             value
             for value in record.get("permissions", [])
             if isinstance(value, str)
-            and value.split(":", 1)[0] in {"gmail", "readwise"}
+            and value.split(":", 1)[0] in EXTERNAL_PERMISSION_NAMESPACES
         ]
         if permissions:
             external_permissions_required.setdefault(profile, set()).update(permissions)
@@ -634,7 +725,16 @@ def _background_evidence(
                 continue
             expected_mutation = {
                 "gmail:read": "read-only",
+                "readwise:read": "read-only",
                 "readwise:create-document": "idempotent-test-write",
+                # Sending cannot be read-only or idempotent. It is verifiable
+                # only by actually sending, so the class is bounded instead:
+                # one message, to the authenticated account itself, from an
+                # explicitly authorized smoke. That is the honest floor for a
+                # capability an unattended routine will otherwise first
+                # exercise on real content.
+                "gmail:send-self": "self-directed-write",
+                "mail:send-self": "self-directed-write",
             }.get(permission)
             if claim.get("mutation_mode") != expected_mutation:
                 continue
@@ -686,10 +786,40 @@ def _background_evidence(
     }
 
 
+def _split_unverified_external(
+    unverified: dict[str, list[str]],
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Separate unverified external permissions into reads and writes.
+
+    Anything outside EXTERNAL_READ_PERMISSIONS counts as a write, so a new verb
+    is treated as dangerous until someone classifies it. The alternative default
+    would let an unrecognized capability through as a warning, which is the
+    failure this split exists to prevent.
+    """
+    reads: dict[str, list[str]] = {}
+    writes: dict[str, list[str]] = {}
+    for profile, permissions in unverified.items():
+        profile_reads = [p for p in permissions if p in EXTERNAL_READ_PERMISSIONS]
+        profile_writes = [p for p in permissions if p not in EXTERNAL_READ_PERMISSIONS]
+        if profile_reads:
+            reads[profile] = profile_reads
+        if profile_writes:
+            writes[profile] = profile_writes
+    return reads, writes
+
+
+def _format_permission_map(by_profile: dict[str, list[str]]) -> str:
+    return ", ".join(
+        f"{profile} ({', '.join(permissions)})"
+        for profile, permissions in sorted(by_profile.items())
+    )
+
+
 def _system_checks(
     records: list[dict[str, Any]],
     profiles: dict[str, dict[str, Any]],
     runtime_override: str | None = None,
+    smoke_permission: str | None = None,
 ) -> dict[str, Any]:
     local_records = [record for record in records if record["surface"] == "local"]
     required_clis: set[str] = set()
@@ -717,12 +847,14 @@ def _system_checks(
         else (set(), None)
     )
     local_names = {record["name"] for record in local_records}
-    plist_labels = _plist_labels_by_routine(local_names)
+    plists = _plists_by_routine(local_names)
+    plist_labels = {name: str(plist["Label"]) for name, plist in plists.items()}
     loaded_labels, launchd_error = _loaded_launchd_labels(set(plist_labels.values()))
     launchd = {
         name: {
             "label": plist_labels.get(name),
             "loaded": bool(plist_labels.get(name) in loaded_labels),
+            "recovery": plist_recovery(plists[name]) if name in plists else None,
         }
         for name in sorted(local_names)
     }
@@ -781,6 +913,19 @@ def _system_checks(
         errors.append(
             f"local routines without launchd plists: {', '.join(missing_plists)}"
         )
+    no_recovery = sorted(
+        name for name, value in launchd.items() if value["recovery"] == "none"
+    )
+    if no_recovery:
+        # A warning, not an error: nothing is broken until a cycle is missed,
+        # and every one of these routines works on a machine that happens to be
+        # awake. It earns a line because the cost is invisible at the moment it
+        # is paid -- the scheduler fires as configured and the output is simply
+        # never produced.
+        warnings.append(
+            f"launchd jobs with no way to recover a missed cycle ({len(no_recovery)}): "
+            + ", ".join(no_recovery)
+        )
     if unloaded:
         errors.append(f"local routine launchd jobs not loaded: {', '.join(unloaded)}")
     unavailable_optional = sorted(optional_plugins - plugins)
@@ -799,16 +944,41 @@ def _system_checks(
             "background runtime smoke missing capability profiles: "
             + ", ".join(background["unverified_profiles"])
         )
-    if background["external_permissions_unverified"]:
-        warnings.append(
-            "external content permissions not exercised or stale: "
-            + ", ".join(
-                f"{profile} ({', '.join(permissions)})"
-                for profile, permissions in sorted(
-                    background["external_permissions_unverified"].items()
-                )
-            )
+    unverified_external = background["external_permissions_unverified"]
+    if unverified_external:
+        unverified_reads, unverified_writes = _split_unverified_external(
+            unverified_external
         )
+        if unverified_reads:
+            warnings.append(
+                "external read permissions not exercised or stale: "
+                + _format_permission_map(unverified_reads)
+            )
+        if smoke_permission:
+            # The run that verifies a permission cannot require that permission
+            # to already be verified. Without this the gate deadlocks: the smoke
+            # preflights through this same resolve, and a write capability is
+            # unverified until precisely the smoke that is being blocked runs.
+            #
+            # Exactly one permission is exempted, and only on the smoke path.
+            # routine_runner.sh never passes it, so real execution still fails
+            # closed on an unverified write.
+            for profile, permissions in list(unverified_writes.items()):
+                remaining = [p for p in permissions if p != smoke_permission]
+                if remaining:
+                    unverified_writes[profile] = remaining
+                else:
+                    del unverified_writes[profile]
+            warnings.append(
+                f"verifying {smoke_permission}; its unverified state is exempt for this run"
+            )
+        if unverified_writes:
+            # Fail closed. A write capability that has never been exercised
+            # must not first be exercised by an unattended run.
+            errors.append(
+                "external write permissions not exercised or stale: "
+                + _format_permission_map(unverified_writes)
+            )
 
     return {
         "ready": not errors,
@@ -825,6 +995,271 @@ def _system_checks(
         "errors": errors,
         "warnings": warnings,
     }
+
+
+def _plist_fire_dates(plist: dict[str, Any], start: date, end: date) -> set[date]:
+    """Local dates in [start, end] on which this plist's calendar entries fire."""
+    interval = plist.get("StartCalendarInterval")
+    entries = (
+        interval
+        if isinstance(interval, list)
+        else ([interval] if isinstance(interval, dict) else [])
+    )
+    fires: set[date] = set()
+    day = start
+    while day <= end:
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if "Weekday" in entry and (day.weekday() + 1) % 7 != entry["Weekday"]:
+                continue
+            if "Day" in entry and day.day != entry["Day"]:
+                continue
+            if "Month" in entry and day.month != entry["Month"]:
+                continue
+            fires.add(day)
+            break
+        day += timedelta(days=1)
+    return fires
+
+
+def schedule_disagreements(
+    routines: list[dict[str, Any]],
+    plists: dict[str, dict[str, Any]],
+    *,
+    today: date | None = None,
+) -> dict[str, list[str]]:
+    """Routines whose plist fires on days their declared cron does not claim.
+
+    This is the precondition for letting the declared cron gate execution. Once
+    `routine_claim.select_scheduled_cycle` consults the cron, a plist firing on
+    a day the cron does not declare means the invocation is skipped and that
+    run is simply lost.
+
+    Only that direction is reported. The opposite -- a cron declaring a day the
+    plist never fires on -- costs nothing, because nothing runs on that day
+    today either.
+
+    Plists that can recover a missed cycle are exempt, and the exemption is the
+    point rather than a loophole. This check existed to prove the cron gate was
+    safe to wire; once wired, an hourly plist firing on an unclaimed day is the
+    intended design and the selector skips it. Flagging that would report the
+    fix as the fault. What still matters is a single-shot plist, where the plist
+    remains the effective schedule and a disagreement really does lose a run.
+    """
+    import cron_spec
+
+    end = (today or date.today()) - timedelta(days=1)
+    start = end - timedelta(days=89)
+    now = datetime.combine(end, datetime.min.time()).astimezone() + timedelta(
+        hours=23
+    )
+    findings: dict[str, list[str]] = {}
+    for row in routines:
+        name = str(row.get("name") or "")
+        plist = plists.get(name)
+        if not name or plist is None:
+            continue
+        if plist_recovery(plist) != "none":
+            continue
+        cron = row.get("cron")
+        if not isinstance(cron, str) or not cron_spec.is_evaluable(cron):
+            continue
+        declared = {
+            day
+            for day in cron_spec.scheduled_dates(cron, start, now)
+            if start <= day <= end
+        }
+        fires = _plist_fire_dates(plist, start, end)
+        unclaimed = sorted(fires - declared)
+        if unclaimed:
+            findings[name] = [day.isoformat() for day in unclaimed[:5]]
+    return findings
+
+
+def _latest_file_date(directory: Path, pattern: str) -> str:
+    """Newest ISO date appearing in a filename under `directory`."""
+    if not directory.is_dir():
+        return ""
+    dates = [
+        match.group(0)
+        for path in directory.glob(pattern or "*.md")
+        if (match := re.search(r"\d{4}-\d{2}-\d{2}", path.name))
+    ]
+    return max(dates) if dates else ""
+
+
+def _latest_claim(runs_dir: Path) -> tuple[str, str, str]:
+    """(cycle, status, why) of the newest claim for one routine.
+
+    `why` is the claim's own account of a failure. It is the difference between
+    knowing a routine failed and knowing what to fix, and it exists on the claim
+    precisely because the fuller transcript goes to a log that does not survive.
+    """
+    if not runs_dir.is_dir():
+        return "", "", ""
+    newest = ""
+    status = ""
+    why = ""
+    for path in runs_dir.glob("*.toml"):
+        if path.stem <= newest:
+            continue
+        try:
+            claim = _load_toml(path)
+        except Exception:
+            continue
+        newest = path.stem
+        status = str(claim.get("status") or "")
+        detail = str(claim.get("error_detail") or "")
+        error = str(claim.get("error") or "")
+        why = f"{error}: {detail}" if error and detail else (detail or error)
+    return newest, status, why
+
+
+def _latest_failure(failures_dir: Path) -> tuple[str, str]:
+    """(recorded_at, phase) of the newest failure diagnostic for one routine.
+
+    These files are written by `routine_runner.sh` for failures that happen
+    before a claim exists (owner probe, capability preflight, lock acquire), so
+    they are the only record of that entire class. Nothing read them before
+    this command.
+    """
+    if not failures_dir.is_dir():
+        return "", ""
+    newest_path = None
+    for path in failures_dir.glob("*.toml"):
+        if newest_path is None or path.name > newest_path.name:
+            newest_path = path
+    if newest_path is None:
+        return "", ""
+    try:
+        record = _load_toml(newest_path)
+    except Exception:
+        return newest_path.stem, "unreadable"
+    return str(record.get("recorded_at") or "")[:10], str(record.get("phase") or "")
+
+
+def _health() -> tuple[dict[str, Any], int]:
+    """One table answering "what is actually broken", from all four sources.
+
+    Diagnosis previously meant correlating routine_watch.toml, the output
+    directories, the claim files, and the failure diagnostics by hand, per
+    routine. With ~20 routines that is the wrong amount of work to do at the
+    moment something has already gone wrong.
+    """
+    import cues  # local import: only this subcommand needs it
+
+    ov = _vault_root()
+    _watch_path, routines = _load_watch()
+    runs_root = ov / "_meta" / "routine_runs"
+    failures_root = ov / "_meta" / "routine_failures"
+    # Derive execution surface exactly as the audit does. A local heuristic here
+    # would disagree with `audit --check-system` about which routines need a
+    # plist at all, and two tools contradicting each other about the same
+    # routine is worse than either being silent.
+    profiles = _load_profiles()
+    local_names: set[str] = set()
+    for row in routines:
+        try:
+            record = _routine_record(row, profiles)
+        except Exception:
+            continue
+        if record.get("surface") == "local" and record.get("name"):
+            local_names.add(str(record["name"]))
+    plists = _plists_by_routine(local_names)
+
+    rows: list[dict[str, Any]] = []
+    for row in routines:
+        name = str(row.get("name") or "")
+        if not name:
+            continue
+        cron = str(row.get("cron") or "")
+        output_dir = str(row.get("output_dir") or "")
+        cycle, status, why = _latest_claim(runs_root / name)
+        failed_at, failed_phase = _latest_failure(failures_root / name)
+        plist = plists.get(name)
+        rows.append(
+            {
+                "routine": name,
+                "cadence_days": cues._estimate_cadence_days(cron) if cron else None,
+                "last_output": (
+                    _latest_file_date(ov / output_dir, str(row.get("file_pattern") or ""))
+                    if output_dir
+                    else ""
+                ),
+                "last_cycle": cycle,
+                "last_status": status,
+                "last_error": why,
+                "last_failure": failed_at,
+                "failure_phase": failed_phase,
+                "recovery": plist_recovery(plist) if plist else ("" if name not in local_names else "no-plist"),
+            }
+        )
+    rows.sort(key=lambda r: r["routine"])
+    no_recovery = [r["routine"] for r in rows if r["recovery"] == "none"]
+    disagreements = schedule_disagreements(routines, plists)
+    return (
+        {
+            "ok": not no_recovery,
+            "counts": {
+                "routines": len(rows),
+                "no_recovery": len(no_recovery),
+                "with_failure_diagnostic": sum(1 for r in rows if r["last_failure"]),
+                "schedule_disagreements": len(disagreements),
+            },
+            "schedule_disagreements": disagreements,
+            "rows": rows,
+        },
+        0,
+    )
+
+
+def _health_text(payload: dict[str, Any]) -> str:
+    rows = payload["rows"]
+    if not rows:
+        return "no routines declared"
+    width = max(len(r["routine"]) for r in rows)
+    lines = [
+        f"{'routine'.ljust(width)}  {'cad':>4}  {'last output':11}  "
+        f"{'last claim':22}  {'last failure':22}  recovery"
+    ]
+    for r in rows:
+        cadence = f"{r['cadence_days']}d" if r["cadence_days"] else "-"
+        claim = f"{r['last_status'] or '-'} {r['last_cycle'] or ''}".strip()
+        failure = (
+            f"{r['failure_phase']} {r['last_failure']}".strip()
+            if r["last_failure"]
+            else "-"
+        )
+        lines.append(
+            f"{r['routine'].ljust(width)}  {cadence:>4}  {r['last_output'] or '-':11}  "
+            f"{claim[:22]:22}  {failure[:22]:22}  {r['recovery'] or '-'}"
+        )
+    counts = payload["counts"]
+    lines.append("")
+    lines.append(
+        f"{counts['routines']} routines; {counts['no_recovery']} cannot recover a "
+        f"missed cycle; {counts['with_failure_diagnostic']} have a failure diagnostic on record"
+    )
+    failing = [r for r in rows if r["last_status"] == "failed"]
+    if failing:
+        lines.append("")
+        lines.append("latest claim failed:")
+        for r in failing:
+            why = r["last_error"] or "(claim records no reason)"
+            lines.append(f"  {r['routine']} {r['last_cycle']}")
+            lines.append(f"      {why[:160]}")
+
+    disagreements = payload.get("schedule_disagreements") or {}
+    if disagreements:
+        lines.append("")
+        lines.append(
+            "plist fires on days the declared cron does not claim "
+            "(these runs would be lost once the cron gates execution):"
+        )
+        for name, days in sorted(disagreements.items()):
+            lines.append(f"  {name}: {', '.join(days)}")
+    return "\n".join(lines)
 
 
 def _audit(check_system: bool) -> tuple[dict[str, Any], int]:
@@ -878,6 +1313,7 @@ def _resolve(
     output_format: str,
     runtime: str | None,
     command: str | None,
+    smoke_permission: str | None = None,
 ) -> int:
     if not SAFE_NAME.fullmatch(name):
         raise AuditError(f"invalid routine name: {name}")
@@ -917,7 +1353,12 @@ def _resolve(
         selected_record = dict(record)
         selected_record["surface"] = surface
         selected_record["selected_profile"] = profile_name
-        system = _system_checks([selected_record], profiles, runtime_override=runtime)
+        system = _system_checks(
+            [selected_record],
+            profiles,
+            runtime_override=runtime,
+            smoke_permission=smoke_permission,
+        )
         payload["system"] = system
         if system["errors"]:
             if output_format == "json":
@@ -941,6 +1382,7 @@ def _resolve(
             str(profile["reasoning_effort"]),
             _profile_fingerprint(str(profile_name), profile),
             ",".join(profile["permissions"]),
+            str(profile.get("fallback_runtime") or "none"),
         )
         if any("\t" in field or "\n" in field for field in fields):
             raise AuditError("profile metadata contains unsafe whitespace")
@@ -954,6 +1396,10 @@ def main() -> int:
     audit_parser = subparsers.add_parser("audit", help="audit every routine")
     audit_parser.add_argument("--check-system", action="store_true")
     audit_parser.add_argument("--json", action="store_true")
+    health_parser = subparsers.add_parser(
+        "health", help="one table: schedule, output, claim, failure, recovery"
+    )
+    health_parser.add_argument("--json", action="store_true")
     resolve_parser = subparsers.add_parser(
         "resolve", help="resolve one routine profile"
     )
@@ -963,6 +1409,15 @@ def main() -> int:
     resolve_parser.add_argument("--runtime", choices=("codex", "claude"))
     resolve_parser.add_argument("--command")
     resolve_parser.add_argument("--format", choices=("json", "tsv"), default="json")
+    resolve_parser.add_argument(
+        "--smoke-permission",
+        help=(
+            "Exempt exactly this external permission from the unverified-write "
+            "gate. Only routine_permission_smoke.sh passes it, because a smoke "
+            "cannot require the verification it exists to produce. Never passed "
+            "by routine_runner.sh, so real execution still fails closed."
+        ),
+    )
     args = parser.parse_args()
     try:
         if args.command == "audit":
@@ -977,6 +1432,13 @@ def main() -> int:
                 for message in payload["errors"]:
                     print(f"ERROR: {message}", file=sys.stderr)
             return exit_code
+        if args.command == "health":
+            payload, exit_code = _health()
+            if args.json:
+                print(json.dumps(payload, indent=2, sort_keys=True))
+            else:
+                print(_health_text(payload))
+            return exit_code
         return _resolve(
             args.routine,
             args.surface,
@@ -984,6 +1446,7 @@ def main() -> int:
             args.format,
             args.runtime,
             args.command,
+            args.smoke_permission,
         )
     except AuditError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

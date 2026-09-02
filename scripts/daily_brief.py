@@ -13,8 +13,14 @@ The triage rule, in priority order:
 
   1. Forfeitable, inside its own lead time -> itemized. Missing it destroys value,
      and each row declares how early it needs the attention.
+  1b. Milestone, inside its own lead time   -> itemized under 本季主线. Nothing is
+     forfeited, but this is the quarter's main line, and a screen that only
+     ever pulls toward "don't lose money" never pulls toward it. Two or three
+     rows, never folded, so the first screen always names what the quarter is for.
   2. Dated and due within a week           -> itemized. Slips gracefully, still needs a slot.
   3. Everything else                       -> folded into a count line.
+  3b. Health observability                 -> one count line, always: days since
+     the newest weight row. A lapsed measurement is the failure nothing else fires on.
 
 The rule that matters most is #3, and specifically this: **overdue is not
 urgent.** A rotation task hundreds of days overdue is not an emergency, it is a
@@ -56,7 +62,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import deadlines as dl  # noqa: E402
-from _paths import PathsError, vault_root  # noqa: E402
+from _paths import PathsError, tier, vault_root  # noqa: E402
 
 BRIEF_SCHEMA = 1
 
@@ -80,6 +86,13 @@ REMINDER_TEXT_CHARS = 200
 # Absent config means no reminder lines, which is the correct default rather
 # than a warning: not every vault has such a feature.
 SOURCES_CONFIG = "_meta/brief_sources.toml"
+
+# Health observability. `directions.md` marks restoring it as immediate, and a
+# lapsed measurement is the failure that hides best: nothing fires when a table
+# simply stops getting rows. One count line, always present, from the newest
+# dated row of this section of `<paths.health>/metrics.md`.
+HEALTH_METRICS_FILE = "metrics.md"
+HEALTH_SECTION = "Body composition"
 
 # Review-debt cues worth one folded line. `recurring` is excluded because this
 # brief has its own recurring group and would otherwise double-count it.
@@ -212,6 +225,30 @@ def load_closing(ov: Path, today: date, warnings: list[str]) -> list[Group]:
             )
         )
     return groups
+
+
+def load_focus(ov: Path, today: date, warnings: list[str]) -> list[Group]:
+    """The quarter's main line: milestone rows inside their lead time.
+
+    Reads the same index as `load_closing`, which already reported its
+    warnings, so this loader stays silent about index state. Tier 1 because
+    it must survive the cap: folding the quarter's purpose into a count line
+    is exactly the failure this slot exists to prevent.
+    """
+    del warnings  # reported by load_closing on the same index
+    index = dl.load_index(ov, today)
+    rows = [d for d in dl.in_lead_window(index) if d.kind == "milestone"]
+    if not rows:
+        return []
+    return [
+        Group(
+            tier=1,
+            kind="focus",
+            heading=f"本季主线 {len(rows)} 件",
+            items=[_closing_item(d) for d in rows],
+            fold_heading=f"本季主线 {len(rows)} 件 (deadlines.py list --kind milestone)",
+        )
+    ]
 
 
 def _closing_item(row: dl.Deadline) -> Item:
@@ -431,6 +468,58 @@ def _tracking_failure_warning(name: str, section: object) -> str | None:
     return f"{name} refresh failed at {section['failed_at']}: {error}"
 
 
+def latest_table_date(text: str, section: str) -> str | None:
+    """Newest ISO date in the first cell of a markdown table under `section`.
+
+    The cell is usually a link (`[2026-04-11](../daily-notes/...)`), so the
+    date is searched for rather than parsed as the whole cell.
+    """
+    heading = re.compile(rf"^#{{1,6}}\s+{re.escape(section)}\s*$", re.MULTILINE)
+    match = heading.search(text)
+    if not match:
+        return None
+    rest = text[match.end():]
+    nxt = re.search(r"^#{1,6}\s", rest, re.MULTILINE)
+    block = rest[: nxt.start()] if nxt else rest
+    dates: list[str] = []
+    for line in block.splitlines():
+        if not line.startswith("|"):
+            continue
+        first = line.strip("|").split("|", 1)[0]
+        found = re.search(r"\d{4}-\d{2}-\d{2}", first)
+        if found:
+            dates.append(found.group(0))
+    return max(dates) if dates else None
+
+
+def load_health(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
+    """One line: how old the newest body-composition row is.
+
+    Always rendered when the metrics file exists, because the number that
+    matters is the one that has quietly grown large. A missing file is a
+    warning rather than silence: this vault declared the tier.
+    """
+    try:
+        path = tier("health") / HEALTH_METRICS_FILE
+    except (PathsError, KeyError):
+        return []
+    if not path.is_file():
+        warnings.append(f"health metrics missing ({HEALTH_METRICS_FILE}); observability unknown")
+        return []
+    try:
+        latest = latest_table_date(path.read_text(encoding="utf-8"), HEALTH_SECTION)
+    except OSError as exc:
+        warnings.append(f"health metrics unreadable: {exc!r}")
+        return []
+    if latest is None:
+        heading = f"健康观测: {HEALTH_SECTION} 无记录 ({HEALTH_METRICS_FILE})"
+    else:
+        age = _age_days(latest, today)
+        heading = f"健康观测: 体重上次 {latest} ({age}d 前) ({HEALTH_METRICS_FILE})"
+    # Born folded: it is a count line, so the cap may merge it with the others.
+    return [Group(tier=3, kind="health", heading=heading, fold_heading=heading, folded=True)]
+
+
 def load_tracking(ov: Path, today: date, warnings: list[str]) -> list[Group]:
     """Episode and ticket reminders from an optional derived cache.
 
@@ -621,10 +710,12 @@ def build(
     warnings: list[str] = []
     groups: list[Group] = []
     groups.extend(load_closing(ov, today, warnings))
+    groups.extend(load_focus(ov, today, warnings))
     groups.extend(load_todos(ov, today, warnings))
     groups.extend(load_recurring(ov, today, warnings))
     if not skip_cues:
         groups.extend(load_review(ov, today, warnings))
+    groups.extend(load_health(ov, today, warnings))
     groups.extend(load_tracking(ov, today, warnings))
 
     groups.sort(key=lambda g: g.tier)

@@ -12,6 +12,8 @@ These are user-installable artifacts: copy to `~/Library/LaunchAgents/` and load
 |---|---|---|
 | `com.atelier.autoevo-nightly.plist` | 05:00 primary, hourly deferred recovery, wake/login catch-up | `protocols/autoevo.md` + `.claude/commands/autoevo-nightly.md` |
 | `com.atelier.semantic-index.plist` | 07:30 and 19:30 local, plus load/login catch-up | Owner-gated, offline, timeout-bounded `scripts/semantic.py index --if-stale` |
+| `com.atelier.tracking-refresh.plist` | 05:30 and 17:30 local, plus load/login catch-up | Owner-gated, networked, deterministic refresh of the reminder cache consumed read-only by `daily_brief.py` |
+| `$OV/_meta/launchd/com.atelier.vault-job.<name>.plist` (private) | per job | Owner-gated, networked, timeout-bounded `scripts/vault_job_runner.sh <label> <vault-relative script> [args]` for a deterministic collector that lives in the vault; no model runs |
 
 ## Install
 
@@ -169,10 +171,23 @@ plist and owner/offline runner contract are covered by
 `scripts/harness_smoke.py`; inspect live state with
 `launchctl print gui/$(id -u)/com.atelier.semantic-index`.
 
-Unattended model-driven routines always use Codex. Deterministic derived-cache
-jobs such as semantic maintenance run their reviewed script directly.
-`atelier_runtime.py use claude` and `ATELIER_RUNTIME=claude` affect interactive
-launchers only.
+The tracking refresh follows the same deterministic-job boundary even though
+its derived cache lives under `$OV`: it performs fixed API and cache transforms,
+never invokes a model, and has no reviewable report artifact. `daily_brief.py`
+is the integration layer and never refreshes the cache itself. Stale or failed
+source sections remain visible as brief warnings. Inspect live state with
+`launchctl print gui/$(id -u)/com.atelier.tracking-refresh`.
+
+Unattended model-driven routines run through Codex. Profiles that declare
+`fallback_runtime = "claude"` in `harness/routine_profiles.toml` re-execute a
+cycle through headless Claude Code when Codex fails without delivering; a
+timeout never falls back. The claim then carries `runtime = "claude"`,
+`fallback_from`, `fallback_reason`, and `primary_exit_code`, and both
+transcripts are kept under `_meta/routine_logs/<routine>/` (`<cycle>.codex.log`
+and `<cycle>.log`). `ATELIER_FALLBACK_CLAUDE_MODEL` pins the fallback model.
+Deterministic derived-cache jobs such as semantic maintenance run their
+reviewed script directly. `atelier_runtime.py use claude` and
+`ATELIER_RUNTIME=claude` affect interactive launchers only.
 
 ### Step 4: install and load the plist
 
@@ -184,12 +199,26 @@ launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
 PLIST=com.atelier.semantic-index.plist
 cp "scripts/launchd/${PLIST}" "$HOME/Library/LaunchAgents/${PLIST}"
 launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
+
+PLIST=com.atelier.tracking-refresh.plist
+cp "scripts/launchd/${PLIST}" "$HOME/Library/LaunchAgents/${PLIST}"
+launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
 ```
+
+Deterministic vault jobs follow the same private-plist path. The plist calls
+`scripts/vault_job_runner.sh <label> <vault-relative script> [args]`; the
+wrapper sources the login profiles, refuses absolute or `..` script paths,
+runs the ownership gate, holds a wake assertion, and kills the job after
+`ATELIER_VAULT_JOB_TIMEOUT_SECONDS` (default 900). It logs to whatever
+`StandardOutPath` the plist names, normally
+`$OV/_meta/routine_logs/launchd/<label>.out`. Use it for collectors whose
+output a model-driven routine then reads, so the model judges rows instead of
+opening pages under a token budget.
 
 Install private local-routine plists from the shared vault on the owner machine:
 
 ```bash
-for SOURCE in "$OV"/_meta/launchd/com.atelier.routine-*.plist; do
+for SOURCE in "$OV"/_meta/launchd/com.atelier.routine-*.plist "$OV"/_meta/launchd/com.atelier.vault-job.*.plist; do
   PLIST=$(basename "$SOURCE")
   cp "$SOURCE" "$HOME/Library/LaunchAgents/$PLIST"
   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST"
@@ -203,6 +232,74 @@ launchctl list | grep atelier
 ```
 
 The expected output: one line per loaded plist, with PID `-` (no current run) and exit code `0` (last run, or just-loaded).
+
+## Every plist needs a way to recover a missed cycle
+
+A plist that fires once, at one hour, on one weekday has no second chance. When
+that firing lands on a sleeping machine, or the runner defers the cycle for
+readiness or contention, the cycle waits for "the next trigger" -- which for a
+weekly routine is a week away.
+
+Be careful not to over-attribute to this. Measured on 2026-08-31, it explained
+none of the observed loss: every scheduled cycle had a claim, so launchd was
+firing on time, and the degraded hit rates came from 95 of 279 claims being
+`failed`. A failed claim is refused by `schedule_decision` by design, so extra
+triggers would not have retried any of them. Recovery here is worth having for
+deferrals and for a machine that is genuinely off, and it is not a fix for
+routines that run and fail. For those, read the transcript (below).
+
+So a routine plist must carry at least one of:
+
+- **`StartCalendarInterval` with no `Hour` key** -- a launchd wildcard that fires
+  at minute 0 of every hour.
+- **`RunAtLoad`** -- covers login and LaunchAgent reload after a missed event.
+
+Both are cheap. The runner's schedule gate exits immediately for completed,
+fenced, and not-yet-due claims, so an hourly check on an already-finished cycle
+costs a process spawn and a TOML read. `com.atelier.autoevo-nightly.plist` is
+the reference shape: hourly wildcard plus `RunAtLoad`, with the intended time
+enforced by the runner rather than by the calendar entry.
+
+Check the fleet:
+
+```bash
+uv run scripts/routine_audit.py health
+```
+
+The `recovery` column reads `none` for any job that cannot recover a missed
+cycle. `routine_audit.py audit --check-system` reports the same set as a
+warning. It is a warning and not an error because nothing is wrong until a
+cycle is actually missed.
+
+## Diagnosing a routine that runs and fails
+
+`StandardOutPath` in every routine plist points into `/tmp`, which macOS purges.
+For three months that meant a run could fail, record `error = "model-execution-
+failed"` on its claim, and have its actual reason deleted within the week. The
+string on its own carries no information: it is the default assigned before the
+model is invoked, and it means only that the runtime exited non-zero.
+
+The runner now keeps what matters without depending on the plist:
+
+- **`error_detail` on the claim** -- a credential-screened tail of the
+  transcript, so `routine_audit.py health` and the session cue can say what
+  happened rather than that something did.
+- **`$OV/_meta/routine_logs/<routine>/<cycle>.log`** -- the full screened
+  transcript, written for every finished model run, success or failure, and
+  pruned to the newest ten per routine. A fallback cycle keeps both: the
+  failed primary as `<cycle>.codex.log` and the fallback as `<cycle>.log`.
+  It sits beside `routine_runs/` rather than in `~/Library/Logs` because claims
+  show several machines running these, and a transcript on the wrong machine is
+  worth as little as no transcript.
+
+Lines the credential guard flags are replaced with a marker rather than stored,
+and if the guard cannot run, nothing is kept.
+
+Start here:
+
+```bash
+uv run scripts/routine_audit.py health
+```
 
 ## Wake the Mac at the scheduled time
 
@@ -285,6 +382,16 @@ An actual index update writes one `search_efficiency` JSON report to the
 representative query latency, deduplication, and capsule size. A fresh no-op
 does not rerun the probes or emit a report.
 
+Test reminder tracking separately. It is deterministic, owner-gated, and
+networked; the cache write is atomic and source failures preserve the last
+successful section:
+
+```bash
+scripts/tracking_refresh_runner.sh
+uv run scripts/daily_brief.py
+tail -f /tmp/com.atelier.tracking-refresh.out /tmp/com.atelier.tracking-refresh.err
+```
+
 The audit log for the run itself (what the bot did to the vault) lives at `$OV/agent-findings/autoevo-applied-<YYYY-MM-DD>.md`; the `/tmp/` files capture aggregate wrapper and Codex CLI output. Each acquired attempt also records a private event journal under `$OV/cache/` in its claim. The claim file at `$OV/_meta/routine_runs/autoevo-nightly/<date>.toml` records status, timing, journal path, and verification evidence.
 
 Verify that a cycle performed real Forgetter work rather than only completing
@@ -355,8 +462,9 @@ approved retry even before its local Drive copy converges.
 
 ## Path assumptions
 
-The plists delegate to `scripts/routine_runner.sh` or
-`scripts/semantic_index_runner.sh`. They assume:
+The plists delegate to `scripts/routine_runner.sh`,
+`scripts/semantic_index_runner.sh`, or `scripts/tracking_refresh_runner.sh`.
+They assume:
 
 - Atelier checked out at `~/atelier/`. Edit the plist's `ProgramArguments` path if elsewhere.
 - `codex` on `PATH` via `/opt/homebrew/bin`, `/usr/local/bin`, or `~/.local/bin`. The plist and wrapper populate these locations because `launchd` does not inherit an interactive shell's `PATH`.

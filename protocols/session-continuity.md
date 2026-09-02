@@ -65,7 +65,7 @@ Sessions leave artifacts that future sessions can read:
 | `<paths.reflections>/YYYY-MM-DD-reflection.md` | Daily insights | Next reflect session |
 | `<paths.reflections>/YYYY-MM-DD-review.md` | Goal progress | Next review session |
 | `<paths.reflections>/YYYY-MM-DD-weekly.md` | Weekly patterns | Next weekly session |
-| `<paths.reflections>/YYYY-MM-DD-decision-*.md` | Decision records | Future decision/review sessions |
+| `<paths.gtd>/decisions/*.md` | Stable decision records; dated changes live inside each file | Future decision/review sessions |
 | `<paths.reflections>/YYYY-MM-DD-exploration.md` | Open threads | Next explore session |
 | `<paths.reflections>/YYYY-MM-DD-energy-audit.md` | Energy patterns | Next energy audit |
 | `<paths.sessions>/YYYY-MM-DD-<type>.md` | Session process log | Meta-reflection, Evolver, next session (excerpts) |

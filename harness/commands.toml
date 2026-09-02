@@ -67,7 +67,7 @@ codex_prompt = "Execute the $review skill in this Codex thread using `.claude/co
 source = ".claude/commands/decision.md"
 category = "session"
 status = "portable-adapted"
-description = "Structured decision journal with framework cross-validation."
+description = "Lightweight decision journal with analysis proportional to the stakes."
 codex_prompt = "Execute the $decision skill in this Codex thread using `.claude/commands/decision.md` as the authoritative spec."
 
 [commands.energy-audit]
@@ -136,6 +136,14 @@ category = "ops"
 status = "portable-adapted"
 description = "Run harness, privacy, structural, and staleness checks."
 codex_prompt = "Execute the $lint skill in this Codex thread using `.claude/commands/lint.md` as the authoritative spec."
+
+[commands.triage]
+source = ".claude/commands/triage.md"
+category = "ops"
+status = "portable-adapted"
+direct_only = true
+description = "Unified operational review center with a read-only overview and bounded review batches."
+codex_prompt = "Execute the $triage skill in this Codex thread using `.claude/commands/triage.md` as the authoritative spec."
 
 [commands.system-review]
 source = ".claude/commands/system-review.md"

@@ -74,6 +74,25 @@ source = "finance/example-tracker.md:131"
 lead_days = 60
 
 [[deadline]]
+slug = "probe-midpoint"
+label = "环境探针中检"
+due = 2099-03-01
+kind = "milestone"
+reversible = false
+source = "travel/example-trip.md:30"
+action = "定义性 vs plumbing 的体感"
+lead_days = 45
+
+[[deadline]]
+slug = "year-end-decision"
+label = "年底决策点"
+due = 2099-06-30
+kind = "milestone"
+reversible = true
+source = "travel/example-trip.md:31"
+lead_days = 30
+
+[[deadline]]
 slug = "reversible-chore"
 label = "Reversible obligation"
 due = 2099-02-02
@@ -104,6 +123,22 @@ TODOS = """## Q3
 - [x] 已完成的  due:2099-02-01
 """
 
+HEALTH = """# Longitudinal metrics
+
+## Body composition
+
+| Date | Source | Weight (kg) |
+|---|---|---|
+| [2098-09-11](../daily-notes/2098-09-11.md) | scale | 80 |
+| [2098-06-01](../daily-notes/2098-06-01.md) | DEXA | 82 |
+
+## Thyroid
+
+| Date | TSH |
+|---|---|
+| [2099-01-20](reports/x.md) | 1.0 |
+"""
+
 TRACKING = {
     "refreshed_at": "2099-01-31T02:00:00-07:00",
     "anime": {
@@ -119,7 +154,7 @@ TRACKING = {
 
 def build_vault(root: Path, **parts) -> Path:
     vault = root / "vault"
-    for sub in ("_meta", "gtd", "cache", "reflections", "finance", "travel"):
+    for sub in ("_meta", "gtd", "cache", "reflections", "finance", "travel", "health"):
         (vault / sub).mkdir(parents=True, exist_ok=True)
     (vault / "finance" / "example-tracker.md").write_text("x\n", encoding="utf-8")
     (vault / "travel" / "example-trip.md").write_text("x\n", encoding="utf-8")
@@ -134,6 +169,8 @@ def build_vault(root: Path, **parts) -> Path:
         )
     if parts.get("todos", TODOS) is not None:
         (vault / "gtd" / "2099Q1.md").write_text(parts.get("todos", TODOS), encoding="utf-8")
+    if parts.get("health", HEALTH) is not None:
+        (vault / "health" / "metrics.md").write_text(parts.get("health", HEALTH), encoding="utf-8")
     tracking = parts.get("tracking", TRACKING)
     if tracking is not None:
         (vault / "cache" / "reminders.json").write_text(
@@ -316,6 +353,46 @@ class BriefIntegrationTests(unittest.TestCase):
             self._group(brief, "closing_now")["items"][0]["source"], "travel/example-trip.md:12"
         )
 
+    def test_milestones_in_lead_get_the_focus_slot_not_the_closing_one(self):
+        """The quarter's main line: itemized at tier 1 under 本季主线, never
+        mistaken for a forfeitable perk even when marked irreversible."""
+        brief = self._brief()
+        focus = self._group(brief, "focus")
+        self.assertEqual(focus["tier"], 1)
+        self.assertEqual(focus["heading"], "本季主线 1 件")
+        self.assertIn("环境探针中检 · 29d · 定义性", focus["items"][0]["text"])
+        self.assertEqual(focus["items"][0]["source"], "travel/example-trip.md:30")
+        closing = json.dumps(
+            [self._group(brief, k) for k in ("closing_now", "closing_lead")], ensure_ascii=False
+        )
+        self.assertNotIn("环境探针中检", closing)
+        self.assertNotIn("年底决策点", json.dumps(brief, ensure_ascii=False))
+
+    def test_focus_slot_sits_below_closing_and_survives_the_cap(self):
+        brief = self._brief(cap="3")
+        kinds = [g["kind"] for g in brief["groups"]]
+        self.assertLess(kinds.index("closing_lead"), kinds.index("focus"))
+        self.assertFalse(self._group(brief, "focus")["folded"])
+        self.assertEqual(len(self._group(brief, "focus")["items"]), 1)
+
+    def test_health_line_reports_days_since_the_newest_weight_row(self):
+        """Guard for the 2026-09-01 digest, which carried no user-health line
+        while directions.md marked health observability immediate."""
+        brief = self._brief()
+        health = self._group(brief, "health")
+        self.assertEqual(health["tier"], 3)
+        self.assertIn("体重上次 2098-09-11 (142d 前)", health["heading"])
+        self.assertNotIn("2099-01-20", health["heading"])  # thyroid is not weight
+
+    def test_health_line_says_so_when_the_table_is_empty(self):
+        empty = self._brief(health="# m\n\n## Body composition\n\n| Date | W |\n|---|---|\n")
+        self.assertIn("无记录", self._group(empty, "health")["heading"])
+
+    def test_missing_health_metrics_is_a_warning_not_silence(self):
+        missing = self._brief(health=None)
+        self.assertNotIn("health", [g["kind"] for g in missing["groups"]])
+        self.assertTrue(any("health metrics missing" in w for w in missing["warnings"]))
+
     def test_dated_todos_inside_the_horizon_itemize(self):
         brief = self._brief()
         todo = self._group(brief, "todo")
@@ -406,14 +483,16 @@ class BriefIntegrationTests(unittest.TestCase):
         self.assertTrue(any("reminder cache" in w for w in brief["warnings"]))
 
     def test_empty_vault_produces_an_empty_brief_not_a_crash(self):
-        brief = self._brief(deadlines=None, recurring=None, todos=None, tracking=None)
+        brief = self._brief(deadlines=None, recurring=None, todos=None, tracking=None, health=None)
         self.assertEqual(brief["groups"], [])
         self.assertEqual(brief["rendered_lines"], 0)
 
     def test_cap_is_reported_and_respected(self):
-        brief = self._brief("--cap", "8")
-        self.assertEqual(brief["cap"], 8)
-        self.assertLessEqual(brief["rendered_lines"], 8)
+        # Tier 1 is 7 lines in this fixture (two closing groups plus 本季主线),
+        # so a cap of 10 leaves room for exactly the folded count lines.
+        brief = self._brief("--cap", "10")
+        self.assertEqual(brief["cap"], 10)
+        self.assertLessEqual(brief["rendered_lines"], 10)
         self.assertGreater(brief["folded_by_cap"], 0)
         self.assertFalse(brief["over_cap"])
 
