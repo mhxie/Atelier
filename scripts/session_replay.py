@@ -29,6 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import atomic_write  # noqa: E402
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - Windows has no fcntl
@@ -319,22 +322,7 @@ def copy_verified_temp(source: Path, destination: Path) -> None:
 
 def write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
     ensure_private_directory(path.parent)
-    descriptor, temp_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-    )
-    try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_name, path)
-    except Exception:
-        try:
-            os.unlink(temp_name)
-        except OSError:
-            pass
-        raise
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def snapshot_transcript(

@@ -19,7 +19,7 @@ Executable tooling for the Atelier knowledge layer. All scripts are stdlib-only 
 | `snapshot_anchors.py` | Saves `url:` / `gist:` wiki anchors to Readwise and backfills the `readwise:` document ID so anchor evidence stays durable | B | `readwise` CLI |
 | `lint.py` | Structural + corpus-level lint over `$OV/wiki/` — parse errors, duplicate titles, slug drift, orphan entries, graph topology | D | stdlib |
 | `harness_lint.py` | Claude Code and Codex portability lint — root instructions, model profiles, capability mappings, command and agent registries | ops | stdlib |
-| `harness_smoke.py` | Smoke test for native command skills, agent adapters, hooks, and lint JSON | ops | stdlib |
+| `harness_smoke.py` | Smoke runner: the ordered check list; the checks live in `smoke_common.py` (runner, `expect`, paths), `smoke_harness.py`, `smoke_semantic.py`, `smoke_vault.py`, `smoke_autoevo.py`, `smoke_routines.py`, `smoke_context.py`, `smoke_regressions.py` | ops | stdlib |
 | `atelier_runtime.py` | Native runtime selector: resolves the Codex or Claude default, persists a gitignored local preference, and launches registered workflows without generating adapter prompts | ops | stdlib |
 | `intent_coverage.py` | `/hi` and `$hi` intent catalog projection (`catalog`), per-route ledger (`intent-log`), and unrouted-request review (`intent-misses`) | ops | stdlib |
 | `privacy_check.py` | Scans public-bound pathnames, worktree files, and divergent staged blobs for private vault titles plus exact local terms from gitignored `profile/private_terms.txt`; deliberate public opt-outs live in `privacy_allowlist.txt`; wired into `/lint` Phase 0c | ops | stdlib |
@@ -47,6 +47,9 @@ Executable tooling for the Atelier knowledge layer. All scripts are stdlib-only 
 | `signal_facts.py` | Validates and ingests immutable private signal facts, derives definition-bound metrics, and emits bounded relevance-gated analysis bundles | ops | stdlib |
 | `shadow.py` | Cross-provider shadow-log correlation + reporting — `group-start` / `group-close` witnesses for multi-leg call sites, `report` over the JSONL call logs | ops | stdlib |
 | `command_timeout.py` | Runs one scheduled subprocess with an epoch-based wall-clock timeout that survives macOS sleep and terminates its process group on expiry | ops | stdlib |
+| `_git.py` | One git subprocess wrapper (`run_git`, `git_paths`, `merge_state`, bot identity) shared by every script that shells out to git | ops | stdlib |
+| `decisions.py` | Human-decision ledger at `$OV/_meta/decisions.jsonl`: `record` (reason mandatory), `import-autoevo` backfill, `list`, `stats` (per-class verdicts and precedent accuracy) | ops | stdlib |
+| `precedent.py` | Precedent judge: nearest past decisions for a new item, gated model verdict, and `autoevo` defaults on the pending queue | ops | stdlib, `chat_completion.py` |
 | `autoevo_preflight.py` | Checks autoevo Git, session, privacy, semantic, branch, and LFS readiness before model launch; writes a checksum-owned blocker audit without repairing Git | ops | stdlib, `git`, `uv`, optional Git LFS |
 | `autoevo_pending.py` | Sole writer for the autoevo pending queue: append with peers dedupe, resolve, defer, auto-dismiss; atomic TOML writes that preserve unknown tables | ops | stdlib |
 | `autoevo_quarantine.py` | Lists active per-scope quarantines for a selected cycle date, updates their state, and inserts generated skip evidence into the latest audit's Skipped section | ops | stdlib |
@@ -120,3 +123,14 @@ scripts/trust.py --json                            # structured output for /lint
 **Exit codes.** `0` on success. `2` on usage error (missing file, invalid date, note outside `$OV/wiki/`).
 
 See `protocols/wiki-schema.md` for the schema and the trust-model rationale.
+
+## Conventions
+
+- **Exit-code convention for JSON-emitting scripts**: `0` success, `1` a
+  reported failure the caller can act on (a refused op, a verdict of "not
+  verified"), `2` usage, input, or data errors and any unforeseen exception,
+  always with a single `{"error": "..."}` object on stdout. `harness_smoke.py`
+  and the routine runner branch on these.
+- **Shared helpers**: `_paths.py` (registry paths, `atomic_write`,
+  `parse_iso_date`, `retry_transient`) and `_git.py` (git subprocess). New
+  scripts import these instead of re-implementing them.

@@ -46,6 +46,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _git import git_paths  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ALLOWLIST = REPO_ROOT / "scripts" / "privacy_allowlist.txt"
 PRIVATE_SLUGS = REPO_ROOT / "profile" / "private_slugs.txt"
@@ -218,20 +221,11 @@ def collect_wikilinks(root: Path, allowlist: set[str], dirs: list[str]) -> set[s
 
 
 def _git_paths(args: list[str], repo_root: Path) -> list[str]:
-    result = subprocess.run(
-        ["git", *args, "-z"],
-        cwd=repo_root,
-        capture_output=True,
-    )
-    if result.returncode != 0:
-        stderr = result.stderr.decode("utf-8", errors="replace")
-        sys.stderr.write(f"privacy_check: `git {' '.join(args)}` failed: {stderr}\n")
+    try:
+        return git_paths(repo_root, *args)
+    except (RuntimeError, OSError) as exc:
+        sys.stderr.write(f"privacy_check: {exc}\n")
         raise SystemExit(2)
-    return sorted(
-        os.fsdecode(raw)
-        for raw in result.stdout.split(b"\0")
-        if raw
-    )
 
 
 def tracked_files(repo_root: Path = REPO_ROOT) -> list[str]:

@@ -65,7 +65,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import fmt, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import fmt, parse_iso_date, vault_root  # type: ignore[import-not-found]  # noqa: E402
 
 _LAST_UPDATED_RE = re.compile(r"^Last updated:\s*(\d{4}-\d{2}-\d{2})\s*$")
 _YAML_UPDATED_RE = re.compile(r"^(?:last_updated|updated):\s*(\d{4}-\d{2}-\d{2})\s*$")
@@ -80,11 +80,7 @@ _DISCOVER_SKIP_DIRS = {
 
 
 def _parse_iso(s: str) -> date | None:
-    try:
-        y, mo, d = map(int, s.split("-"))
-        return date(y, mo, d)
-    except ValueError:
-        return None
+    return parse_iso_date(s)
 
 
 def _read_last_updated(path: Path) -> tuple[date, str] | None:

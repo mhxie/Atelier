@@ -27,9 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import vault_root  # noqa: E402
-
-BOT_NAME = "Atelier Autoevo Bot"
-BOT_EMAIL = "noreply@atelier.local"
+from _git import BOT_EMAIL, BOT_NAME, run_git  # noqa: E402,F401  (identity re-exported for callers)
 
 
 def cluster_hash(sources: list[str]) -> str:
@@ -45,23 +43,7 @@ def cluster_hash(sources: list[str]) -> str:
 def _git(
     vault: Path, *args: str, bot_identity: bool = False
 ) -> subprocess.CompletedProcess[str]:
-    env = None
-    if bot_identity:
-        env = {
-            **os.environ,
-            "GIT_AUTHOR_NAME": BOT_NAME,
-            "GIT_AUTHOR_EMAIL": BOT_EMAIL,
-            "GIT_COMMITTER_NAME": BOT_NAME,
-            "GIT_COMMITTER_EMAIL": BOT_EMAIL,
-        }
-    return subprocess.run(
-        ["git", "-C", str(vault), *args],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        check=False,
-        env=env,
-    )
+    return run_git(vault, *args, timeout=120, bot_identity=bot_identity)
 
 
 def _protected_paths() -> frozenset[str]:
@@ -96,9 +78,23 @@ def _commit(vault: Path, message: str, paths: list[str], *, force_add: list[str]
                     + ", ".join(collisions[:5])
                 )
             }
-    add = _git(vault, "add", "--", *paths)
-    if add.returncode != 0:
-        return {"error": f"git add failed: {add.stderr.strip()[:300]}"}
+    # Stage what still exists; a path already removed by `git rm` / `git mv`
+    # is neither on disk nor in the index and would make `git add` fail, while
+    # a path deleted on disk but still tracked needs `-A` to stage the deletion.
+    present = [p for p in paths if (vault / p).exists()]
+    tracked_gone = [
+        p for p in paths
+        if not (vault / p).exists()
+        and _git(vault, "ls-files", "--error-unmatch", "--", p).returncode == 0
+    ]
+    if present:
+        add = _git(vault, "add", "--", *present)
+        if add.returncode != 0:
+            return {"error": f"git add failed: {add.stderr.strip()[:300]}"}
+    if tracked_gone:
+        gone = _git(vault, "add", "-A", "--", *tracked_gone)
+        if gone.returncode != 0:
+            return {"error": f"git add -A failed: {gone.stderr.strip()[:300]}"}
     for path in force_add or []:
         forced = _git(vault, "add", "-f", "--", path)
         if forced.returncode != 0:
@@ -120,57 +116,112 @@ def _commit(vault: Path, message: str, paths: list[str], *, force_add: list[str]
     return {"sha": sha}
 
 
-def cmd_merge(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    chash = cluster_hash(args.source)
-    source_lines = "\n".join(f"- {line}" for line in args.source_evidence or args.source)
+def merge_commit(
+    vault: Path, *, scope: str, target_slug: str, band: str, sources: list[str],
+    paths: list[str], source_evidence: list[str] | None = None,
+) -> dict:
+    chash = cluster_hash(sources)
+    source_lines = "\n".join(f"- {line}" for line in source_evidence or sources)
     message = (
-        f"[autoevo:redundant] {args.scope}: merge {len(args.source)} notes into {args.target_slug}\n\n"
+        f"[autoevo:redundant] {scope}: merge {len(sources)} notes into {target_slug}\n\n"
         f"Source notes:\n{source_lines}\n\n"
-        f"Auto-band: {args.band}\n"
+        f"Auto-band: {band}\n"
         f"cluster_hash: {chash}\n"
         "Revert: git revert <future sha>"
     )
-    result = _commit(vault, message, args.paths)
+    result = _commit(vault, message, paths)
     if "sha" in result:
         result["cluster_hash"] = chash
+    return result
+
+
+def archive_commit(
+    vault: Path, *, slug: str, days_inactive: str, evidence: str, source: str, target: str, band: str,
+) -> dict:
+    message = (
+        f"[autoevo:low-signal] archive: {slug} after {days_inactive} days inactive\n\n"
+        f"{evidence}\n"
+        f"Moved: {source} -> {target}\n\n"
+        f"Auto-band: {band}"
+    )
+    return _commit(vault, message, [source, target])
+
+
+def stale_commit(
+    vault: Path, *, slug: str, source: str, phrase: str, entry_id: str,
+    proposed_at: str, default_at: str, veto_days: str = "14",
+) -> dict:
+    """time-stale-A default op: the note now carries a stale banner."""
+    chash = cluster_hash([source])
+    message = (
+        f"[autoevo:time-stale-A] stale-banner: {slug} after {veto_days}d veto window\n\n"
+        f"Dated phrase: {phrase}\n"
+        f"Queue entry: {entry_id} (proposed {proposed_at}, default fired {default_at})\n"
+        f"Path: {source}\n\n"
+        f"Auto-band: time-stale-A-default (no veto in /autoevo-review by {default_at})\n"
+        f"cluster_hash: {chash}\n"
+        "Revert: git revert <future sha>"
+    )
+    result = _commit(vault, message, [source])
+    if "sha" in result:
+        result["cluster_hash"] = chash
+    return result
+
+
+def queue_commit(vault: Path, *, summary: str, detail: str, queue_path: str, extra_paths: list[str] | None = None) -> dict:
+    message = f"[autoevo:queue] _meta: {summary}\n\n{detail}"
+    return _commit(vault, message, [queue_path, *(extra_paths or [])])
+
+
+def audit_commit(
+    vault: Path, *, run_date: str, auto: str, pending: str, errors: str, quarantined: str,
+    paths: list[str], force_add: list[str] | None = None,
+) -> dict:
+    message = (
+        f"[autoevo:audit] agent-findings: record nightly run {run_date}\n\n"
+        f"Auto-applied: {auto}, Pending: {pending}, Errors: {errors}, Quarantined: {quarantined}"
+    )
+    return _commit(vault, message, paths, force_add=force_add or [])
+
+
+def _print_result(result: dict) -> int:
     print(json.dumps(result, sort_keys=True))
     return 0 if "sha" in result else 1
+
+
+def cmd_merge(args: argparse.Namespace) -> int:
+    return _print_result(merge_commit(
+        vault_root(), scope=args.scope, target_slug=args.target_slug, band=args.band,
+        sources=args.source, paths=args.paths, source_evidence=args.source_evidence,
+    ))
 
 
 def cmd_archive(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    message = (
-        f"[autoevo:low-signal] archive: {args.slug} after {args.days_inactive} days inactive\n\n"
-        f"{args.evidence}\n"
-        f"Moved: {args.source} -> {args.target}\n\n"
-        f"Auto-band: {args.band}"
-    )
-    result = _commit(vault, message, [args.source, args.target])
-    print(json.dumps(result, sort_keys=True))
-    return 0 if "sha" in result else 1
+    return _print_result(archive_commit(
+        vault_root(), slug=args.slug, days_inactive=args.days_inactive, evidence=args.evidence,
+        source=args.source, target=args.target, band=args.band,
+    ))
+
+
+def cmd_stale(args: argparse.Namespace) -> int:
+    return _print_result(stale_commit(
+        vault_root(), slug=args.slug, source=args.source, phrase=args.phrase, entry_id=args.entry_id,
+        proposed_at=args.proposed_at, default_at=args.default_at, veto_days=args.veto_days,
+    ))
 
 
 def cmd_queue(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    message = (
-        f"[autoevo:queue] _meta: {args.summary}\n\n"
-        f"{args.detail}"
-    )
-    result = _commit(vault, message, [args.queue_path, *(args.extra_path or [])])
-    print(json.dumps(result, sort_keys=True))
-    return 0 if "sha" in result else 1
+    return _print_result(queue_commit(
+        vault_root(), summary=args.summary, detail=args.detail, queue_path=args.queue_path,
+        extra_paths=args.extra_path,
+    ))
 
 
 def cmd_audit(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    message = (
-        f"[autoevo:audit] agent-findings: record nightly run {args.run_date}\n\n"
-        f"Auto-applied: {args.auto}, Pending: {args.pending}, Errors: {args.errors}, Quarantined: {args.quarantined}"
-    )
-    result = _commit(vault, message, args.paths, force_add=args.force_add or [])
-    print(json.dumps(result, sort_keys=True))
-    return 0 if "sha" in result else 1
+    return _print_result(audit_commit(
+        vault_root(), run_date=args.run_date, auto=args.auto, pending=args.pending, errors=args.errors,
+        quarantined=args.quarantined, paths=args.paths, force_add=args.force_add,
+    ))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -195,6 +246,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--band", required=True)
     p.set_defaults(func=cmd_archive)
 
+    p = sub.add_parser("stale", help="time-stale-A default op commit (after stale-banner)")
+    p.add_argument("--slug", required=True)
+    p.add_argument("--source", required=True, help="relative path of the banner-bearing note")
+    p.add_argument("--phrase", required=True, help="the dated phrase Forgetter flagged")
+    p.add_argument("--entry-id", required=True)
+    p.add_argument("--proposed-at", required=True)
+    p.add_argument("--default-at", required=True)
+    p.add_argument("--veto-days", default="14")
+    p.set_defaults(func=cmd_stale)
+
     p = sub.add_parser("queue", help="pending-queue state commit")
     p.add_argument("--summary", required=True, help='subject tail, e.g. "append N pending findings from DATE sweep"')
     p.add_argument("--detail", required=True, help='body line, e.g. "Categories: redundant=n, ..."')
@@ -216,7 +277,13 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_audit)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except SystemExit:
+        raise
+    except Exception as exc:  # keep the one-JSON-object contract for headless callers
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
+        return 2
 
 
 if __name__ == "__main__":

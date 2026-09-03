@@ -22,6 +22,7 @@ import platform
 import re
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -252,19 +253,36 @@ def _owner_backend_content() -> tuple[Path, str]:
     return path, updated
 
 
-def _active_running_claims() -> list[Path]:
+def _active_running_claims(stale_after_hours: float | None = None) -> list[Path]:
+    """Claims still marked running.
+
+    A claim can stay `running` forever after `kill -9` or power loss before the
+    runner's EXIT trap; `stale_after_hours` lets an operator treat claims whose
+    file has not been touched for that long as abandoned when transferring
+    ownership. The default (None) keeps every running claim blocking.
+    """
     runs_root = _ov_path() / "_meta" / "routine_runs"
     if not runs_root.is_dir():
         return []
     active: list[Path] = []
     for path in runs_root.glob("*/*.toml"):
         claim = _load_toml(path, required=True)
-        if claim and claim.get("status") == "running":
-            active.append(path)
+        if not claim or claim.get("status") != "running":
+            continue
+        if stale_after_hours is not None:
+            try:
+                age_hours = (time.time() - path.stat().st_mtime) / 3600
+            except OSError:
+                age_hours = 0.0
+            if age_hours >= stale_after_hours:
+                continue
+        active.append(path)
     return active
 
 
-def claim_here(*, force: bool, source_stopped: bool, label: str | None) -> dict[str, Any]:
+def claim_here(
+    *, force: bool, source_stopped: bool, label: str | None, stale_running_hours: float | None = None,
+) -> dict[str, Any]:
     backend_before = configured_backend()
     watch_path, updated_watch = _owner_backend_content()
     identity = ensure_local_identity(label)
@@ -279,11 +297,12 @@ def claim_here(*, force: bool, source_stopped: bool, label: str | None) -> dict[
             "cross-machine transfer requires --source-stopped after unloading the old scheduler"
         )
     ownership_change = previous is None or transferring or backend_before != OWNER_BACKEND
-    active = _active_running_claims()
+    active = _active_running_claims(stale_running_hours)
     if ownership_change and active:
         raise OwnershipError(
             "cannot transfer ownership while a routine claim is running: "
             + ", ".join(str(path) for path in active)
+            + " (pass --stale-running-hours N to ignore claims untouched for N hours)"
         )
 
     previous_generation = previous.get("generation", 1) if previous else 0
@@ -336,6 +355,12 @@ def main() -> int:
         help="Assert the previous machine's routine plists are unloaded before transfer.",
     )
     claim_parser.add_argument("--label", help="Human-readable machine label; defaults to hostname.")
+    claim_parser.add_argument(
+        "--stale-running-hours",
+        type=float,
+        default=None,
+        help="Treat `running` claims whose file is older than this as abandoned (after kill -9 or power loss).",
+    )
     claim_parser.add_argument("--json", action="store_true")
 
     args = parser.parse_args()
@@ -345,6 +370,7 @@ def main() -> int:
                 force=args.force,
                 source_stopped=args.source_stopped,
                 label=args.label,
+                stale_running_hours=args.stale_running_hours,
             )
             _emit(payload, as_json=args.json)
             return 0

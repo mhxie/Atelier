@@ -58,6 +58,36 @@ def _inbound_link_index(vault: Path) -> set[str]:
     return titles
 
 
+def low_signal_content_failures(vault: Path, rel: str) -> list[str]:
+    """Which non-age low-signal conditions do NOT hold for one note.
+
+    Empty means every one of them holds. The five conditions are conjunctive on
+    purpose: each alone catches a deliberate stub, a brand-new note, or an
+    intentional archive, so four-of-five is a working note, not a flag. Age is
+    the caller's to supply, because callers differ on the clock they trust.
+
+    Exists so a consumer can RECOMPUTE the rule from disk instead of trusting a
+    `conditions_met` count it was handed.
+    """
+    failures: list[str] = []
+    wip_prefix = f"{tier('wip').relative_to(vault)}/"
+    if not str(rel).startswith(wip_prefix):
+        failures.append(f"not under {wip_prefix}")
+    path = vault / rel
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return [*failures, "unreadable on disk"]
+    words = len(text.split())
+    if words >= LOW_SIGNAL_MAX_WORDS:
+        failures.append(f"{words} words >= {LOW_SIGNAL_MAX_WORDS}")
+    if TAG_RE.search(text):
+        failures.append("carries #tags")
+    if path.stem.casefold() in _inbound_link_index(vault):
+        failures.append("has inbound wikilinks")
+    return failures
+
+
 def scan_low_signal(vault: Path, now: float) -> list[dict]:
     wip = tier("wip")
     if not wip.is_dir():

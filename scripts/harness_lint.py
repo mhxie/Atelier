@@ -49,6 +49,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 from render_runtime_edges import TIER_TO_EFFORT  # noqa: E402  (single owner of the tier map)
+from _git import git_paths  # noqa: E402
 
 SEVERITY_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 MAX_CONTEXT_BUDGET_BYTES = 64 * 1024
@@ -162,19 +163,14 @@ def load_claude_agents() -> tuple[dict[str, dict[str, str]], list[Finding]]:
 
 
 def git_list(paths: list[str], *, others: bool = False) -> tuple[list[str], Finding | None]:
-    cmd = ["git", "ls-files"]
+    args = ["ls-files"]
     if others:
-        cmd.extend(["-o", "--exclude-standard"])
-    cmd.extend(paths)
-    res = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
-    if res.returncode != 0:
-        return [], Finding(
-            "ERROR",
-            "git-ls-files",
-            "git",
-            f"`{' '.join(cmd)}` failed: {res.stderr.strip()}",
-        )
-    return sorted(line for line in res.stdout.splitlines() if line.strip()), None
+        args.extend(["-o", "--exclude-standard"])
+    args.extend(paths)
+    try:
+        return git_paths(ROOT, *args), None
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        return [], Finding("ERROR", "git-ls-files", "git", str(exc))
 
 
 def load_claude_commands() -> tuple[dict[str, str], list[Finding]]:
@@ -3236,6 +3232,8 @@ def run_lints() -> list[Finding]:
     harness_agents_raw, _ = _load_toml(ROOT / "harness" / "agents.toml")
     harness_agents_data = (harness_agents_raw or {}).get("agents", {}) or {}
     findings.extend(check_intents_registry(intents, agents, harness_agents_data))
+    findings.extend(check_intents_overlay())
+    findings.extend(check_autoevo_band_sync())
     findings.extend(check_intents_procedures(intents))
     findings.extend(check_intents_agents_in_procedure(intents))
     findings.extend(check_intents_profile_reads(intents))

@@ -1189,6 +1189,7 @@ def check_autoevo_ran(
         "session_lock_unreadable": "the session-lock file's metadata cannot be read; check `<paths.cache>/atelier-session-lock` permissions and disk health",
         "session_active": "a stale `<paths.cache>/atelier-session-lock`; remove it if no session is open",
         "git_index_lock_present": "a stale `.git/index.lock` in $OV; remove it only if no git process is running",
+        "git_operation_in_progress": "a merge, rebase, cherry-pick, or bisect is in progress in $OV; finish or abort it (`git status` says which) before the bot can commit",
         "git_index_missing": "the $OV git index is missing; restore it before the bot can classify files",
         "git_not_worktree": "$OV is not a git worktree; re-init or fix the mount before the bot can commit",
         "privacy_hits": "resolve the privacy_check.py finding in $OV",
@@ -1901,6 +1902,38 @@ def snooze_cue(ov: Path, key: str, until: date) -> None:
 # --- main -----------------------------------------------------------------
 
 
+def cue_errors_log_path() -> Path:
+    base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+    return Path(base) / "atelier" / "cue_errors.jsonl"
+
+
+def record_cue_errors(errors: list[tuple[str, str]], today: date, log_path: Path | None = None) -> Path | None:
+    """Append one JSON line per crashed check; machine-local, never in the vault."""
+    path = log_path or cue_errors_log_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            for name, detail in errors:
+                handle.write(json.dumps({"date": today.isoformat(), "check": name, "error": detail[:400]}) + "\n")
+        return path
+    except OSError:
+        return None
+
+
+def cue_errors_cue(errors: list[tuple[str, str]], log_path: Path | None) -> Cue:
+    names = ", ".join(name for name, _ in errors)
+    where = f" 详情在 `{log_path}`." if log_path else " (日志写入也失败了)."
+    return Cue(
+        key="cue_errors",
+        severity="hard",
+        command_path="scripts/cues.py",
+        message=(
+            f"{len(errors)} 个 cue 检查自身报错 ({names}), 它们的提示可能缺失.{where} "
+            f"跑 `uv run scripts/cues.py --verbose --only <name>` 复现."
+        ),
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Quiet-by-default cue checks for Claude /hi and Codex $hi session start."
@@ -2017,12 +2050,14 @@ def main(argv: list[str] | None = None) -> int:
         _touch_session_lock(args.verbose, "SessionStart")
 
     fired: list[Cue] = []
+    errors: list[tuple[str, str]] = []
     for name, fn in CHECKS:
         if args.only and name != args.only:
             continue
         try:
             cue, reason = fn(ov, today)
         except Exception as exc:  # never let a cue check break /hi
+            errors.append((name, f"{type(exc).__name__}: {exc}"))
             if args.verbose:
                 print(f"# debug: {name} raised {exc!r}", file=sys.stderr)
             continue
@@ -2036,6 +2071,12 @@ def main(argv: list[str] | None = None) -> int:
         if cue:
             cue.message = _format_runtime_message(cue.message, output_runtime)
             fired.append(cue)
+    if errors:
+        # A check that crashes is itself a finding: it means the one surface
+        # that would report last night's failure may be blind. Log durably
+        # and say so, instead of degrading silently to "no cue".
+        log_path = record_cue_errors(errors, today)
+        fired.append(cue_errors_cue(errors, log_path))
 
     if args.hook:
         # Shared SessionStart hook protocol. Injects fired cues plus recent

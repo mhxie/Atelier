@@ -179,6 +179,25 @@ class RoutineCueTest(unittest.TestCase):
             self.assertNotIn("routine 1 (report-2026-08-28.md)", out["message"])
 
 
+
+class CueErrorSurfacingTest(unittest.TestCase):
+    def test_crashed_checks_are_logged_and_reported(self) -> None:
+        import cues
+        from datetime import date
+
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "cue_errors.jsonl"
+            errors = [("autoevo_ran", "OSError: boom"), ("weekly", "ValueError: bad")]
+            path = cues.record_cue_errors(errors, date(2099, 1, 1), log_path=log)
+            self.assertEqual(path, log)
+            lines = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([row["check"] for row in lines], ["autoevo_ran", "weekly"])
+            cue = cues.cue_errors_cue(errors, path)
+            self.assertEqual((cue.key, cue.severity), ("cue_errors", "hard"))
+            self.assertIn("autoevo_ran, weekly", cue.message)
+            self.assertIn(str(log), cue.message)
+
+
 if __name__ == "__main__":
     unittest.main()
 

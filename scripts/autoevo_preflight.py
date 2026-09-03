@@ -31,8 +31,7 @@ from routine_claim import validate_cycle_id
 ATELIER_ROOT = Path(__file__).resolve().parents[1]
 SESSION_LOCK_TTL_SECONDS = 6 * 60 * 60
 GENERIC_RETRY_DELAY_SECONDS = 60 * 60
-BOT_NAME = "Atelier Autoevo Bot"
-BOT_EMAIL = "noreply@atelier.local"
+from _git import BOT_EMAIL, BOT_NAME, merge_state  # noqa: E402
 
 # Paths autoevo may touch: the three sweep scopes, the audit write target,
 # and its queue files. The dirty-tree gate only looks here. The bot stages
@@ -454,6 +453,21 @@ def inspect_preflight(
                     "gate": "git_index_lock_present",
                     "detail": (
                         "Git index.lock exists; autoevo will not delete or replace it"
+                    ),
+                }
+            )
+        try:
+            in_progress = merge_state(vault)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PreflightError(f"cannot inspect git operation state: {exc}") from exc
+        health["git_operation_in_progress"] = in_progress
+        if in_progress:
+            blockers.append(
+                {
+                    "gate": "git_operation_in_progress",
+                    "detail": (
+                        f"Git operation in progress ({', '.join(in_progress)}); a bot "
+                        "commit would complete the user's merge, rebase, cherry-pick, or bisect"
                     ),
                 }
             )

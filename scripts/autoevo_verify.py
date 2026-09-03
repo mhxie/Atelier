@@ -14,6 +14,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from _paths import tier
+from _git import run_git  # noqa: E402
 
 SAFE_CYCLE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 RUN_HEADING = re.compile(r"(?m)^## Autoevo Run:")
@@ -250,23 +251,11 @@ def _verify_sidecars(
 
 def _git_commit(vault: Path, output: Path) -> str:
     relative = output.relative_to(vault).as_posix()
-    result = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", relative],
-        cwd=vault,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    result = run_git(vault, "log", "-1", "--format=%H", "--", relative, timeout=30)
     commit = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise VerificationError("audit output has no Git commit")
-    status = subprocess.run(
-        ["git", "status", "--porcelain=v1"],
-        cwd=vault,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
+    status = run_git(vault, "status", "--porcelain=v1", timeout=30)
     if status.returncode != 0:
         raise VerificationError("cannot inspect final vault worktree")
     if status.stdout:
@@ -461,6 +450,13 @@ def main() -> int:
         else:
             print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+    except Exception as exc:  # keep the one-JSON-object contract for headless callers
+        payload = {"verified": False, "cycle_id": args.cycle, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        if args.json:
+            print(json.dumps(payload, sort_keys=True))
+        else:
+            print(f"ERROR: {payload['error']}", file=sys.stderr)
+        return 2
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))
     else:

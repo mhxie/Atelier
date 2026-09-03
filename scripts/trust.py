@@ -56,11 +56,11 @@ import argparse
 import json
 import re
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier  # type: ignore[import-not-found]  # noqa: E402
+from _paths import parse_iso_date, tier  # type: ignore[import-not-found]  # noqa: E402
 
 WIKI_DIR = tier("wiki")
 DAMPING = 0.85
@@ -174,10 +174,7 @@ class WikiNote:
 
 
 def _parse_iso(s: str) -> date | None:
-    try:
-        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
-    except (ValueError, AttributeError):
-        return None
+    return parse_iso_date(s)
 
 
 def _split_marker_line(line: str) -> tuple[str, str, list[str]] | None:

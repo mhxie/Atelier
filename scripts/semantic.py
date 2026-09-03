@@ -46,7 +46,7 @@ from typing import Any, Iterator, List, Optional, Sequence, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from _paths import vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import parse_iso_date, vault_root  # type: ignore[import-not-found]  # noqa: E402
 from semantic_corpus import (  # type: ignore[import-not-found]  # noqa: E402
     ACTIVE_SCOPE,
     corpus_metadata_fingerprint,  # noqa: F401  (re-export; harness_smoke calls semantic.corpus_metadata_fingerprint)
@@ -364,11 +364,11 @@ def tokenize(query: str) -> List[str]:
 def parse_date(s: Optional[str], flag_name: str) -> Optional[datetime]:
     if s is None:
         return None
-    try:
-        return datetime.strptime(s, "%Y-%m-%d")
-    except ValueError:
+    parsed = parse_iso_date(s) if len(s.strip()) == 10 else None
+    if parsed is None:
         warn(f"invalid {flag_name} value (expected YYYY-MM-DD): {s}")
         sys.exit(2)
+    return datetime(parsed.year, parsed.month, parsed.day)
 
 
 def lexical_score_text(text: str, tokens: List[str]) -> Tuple[float, List[str]]:

@@ -82,20 +82,11 @@ hook, queue TOML corrupted) follow steps 4c, 7, and Edge cases, and exit 1.
 ## Step 0: Acquire run identity
 
 ```bash
-RUN_TS=$(date +%Y%m%d-%H%M%S)
-if [ -n "${ATELIER_ROUTINE_PROFILE:-}" ] && [ -z "${ATELIER_ROUTINE_CYCLE:-}" ]; then
-  echo "abort: unattended invocation omitted ATELIER_ROUTINE_CYCLE"
-  exit 1
-fi
-if [ -n "${ATELIER_ROUTINE_CYCLE:-}" ]; then
-  RUN_DATE=$(python3 scripts/routine_claim.py autoevo-nightly \
-    --validate-cycle "$ATELIER_ROUTINE_CYCLE")
-else
-  # Current-date fallback is only for an explicit interactive invocation.
-  RUN_DATE=$(date +%Y-%m-%d)
-fi
-echo "autoevo-nightly run started $RUN_TS"
+uv run --quiet python3 scripts/autoevo_run.py identity
 ```
+
+Bind `run_ts` → `$RUN_TS` and `run_date` → `$RUN_DATE`. An `error` is fatal
+(exit 1): an unattended invocation must carry a validated `ATELIER_ROUTINE_CYCLE`.
 
 ## Step 1: Plan (gates + paths + rotation + quarantine filter)
 
@@ -104,26 +95,25 @@ uv run --quiet python3 scripts/autoevo_run.py plan --run-ts "$RUN_TS" --run-date
 ```
 
 One JSON object. Bind for the rest of the run: `paths.cache` → `$PATHS_CACHE`,
-`paths.archive` → `$PATHS_ARCHIVE`, `paths.findings` → `$PATHS_FINDINGS`,
-`paths.findings_rel` → `$FINDINGS_REL`, `paths.audit_rel` → `$AUDIT_REL`,
-`outcomes_file` → `$OUTCOMES_FILE`, `quarantine_skipped_file` →
-`$QUARANTINE_SKIPPED`, `protected_file` → `$AUTOEVO_PROTECTED_FILE` and
-`export` it, so every `autoevo_commit.py` call inherits it. Initialize
-`DECAY_REPORT_RELS=()` as the register of persisted reports. Never hardcode vault segments; the plan output is the
-canonical resolution.
+`paths.findings` → `$PATHS_FINDINGS`, `paths.findings_rel` → `$FINDINGS_REL`,
+`paths.audit_rel` → `$AUDIT_REL`, `outcomes_file` → `$OUTCOMES_FILE`,
+`quarantine_skipped_file` → `$QUARANTINE_SKIPPED`, `protected_file` →
+`$AUTOEVO_PROTECTED_FILE` and `export` it, so every commit inherits it. Keep a
+register `DECAY_REPORT_RELS` of persisted reports. Never hardcode vault
+segments; the plan output is the canonical resolution.
 
 - **`gate.status: "blocked"`** — write the audit log (step 7 format) with one
-  § Skipped line per blocker (`<gate>: <detail>`), then exit 0. Do not proceed.
-  The runner already ran `autoevo_preflight.py`; this repeat is defense in
-  depth because Git and session state can change between the runner check and
-  the first write.
+  § Skipped line per blocker (`<gate>: <detail>`), then exit 0. The runner
+  already ran `autoevo_preflight.py`; this repeat is defense in depth because
+  Git and session state can change between the runner check and the first
+  write.
 - **`gate.status: "ready"`** — `dispatches` is tonight's ordered dispatch list
   (wip, one research subdir by day-of-month rotation, reflections — already
   quarantine-filtered), `quarantine_skipped` carries the `scope_quarantined:`
   lines for step 7, and `notes` carries rotation/empty-tier observations for
   audit § Notes. `protected_paths` lists in-scope files carrying uncommitted
-  user edits: never propose, merge, archive, or delete one. They are refused at
-  the commit choke point regardless, so proposing one only wastes a dispatch.
+  user edits: never propose, merge, archive, or delete one. They are refused
+  at the commit choke point regardless, so proposing one only wastes a dispatch.
 
 ## Step 2: Forgetter sweep + persist reports
 
@@ -158,41 +148,38 @@ uv run --quiet python3 scripts/autoevo_run.py outcome \
 ```
 
 3. **Persist the inline findings** with the `Write` tool to
-   `$PATHS_FINDINGS/decay-${RUN_TS}-<dispatch.slug>.md` and register it:
-   `DECAY_REPORT_RELS+=("${FINDINGS_REL}/decay-${RUN_TS}-<slug>.md")`. A report
+   `$PATHS_FINDINGS/decay-${RUN_TS}-<dispatch.slug>.md` and register it in
+   `DECAY_REPORT_RELS` as `${FINDINGS_REL}/decay-${RUN_TS}-<slug>.md`. A report
    counts as persisted only once step 7 commits it with the audit log.
-4. **Parse `findings_inline`** for step 3. `mode: partial` adds the
+4. **Parse `findings_inline`** into rows for step 3. `mode: partial` adds the
    `forgetter_partial:` § Notes row (see condition 2).
 
 ## Step 3: Route findings by trust band
 
-Per `protocols/autoevo.md` § Trust bands. If a row's `confidence` field is
-absent, treat as `medium` and queue — never auto-apply on unspecified
-confidence.
+Write every parsed row to `$PATHS_CACHE/autoevo-${RUN_TS}-findings.json` as a
+JSON list of `{category, confidence, candidate, peers, scores, mode,
+conditions_met, claim, contradicting_peer, contradiction_signal}` (vault-
+relative paths; omit fields a category lacks), then:
 
-**Redundant:**
+```bash
+uv run --quiet python3 scripts/autoevo_run.py route-bands \
+  --findings "$PATHS_CACHE/autoevo-${RUN_TS}-findings.json" --today "$RUN_DATE"
+```
 
-| Confidence | Threshold check | Route |
-|---|---|---|
-| `high` | 3+ peers ≥ 0.85 AND all in `<paths.wip>/` AND all + candidate untouched > 30d | Auto-apply (step 4) |
-| `medium` or `low` | Anything else | Pending queue (step 5) |
+The helper owns the thresholds (`BAND_RULES`; explained in
+`protocols/autoevo.md` § Trust bands) and re-verifies every auto-apply
+precondition on disk, so Forgetter's `confidence` is a hint, never the
+decision. Buckets: `auto_apply` (step 4, each row carries `band` and
+`band_label`), `pending` (step 5, `route_reason` becomes the evidence
+suffix), `probe` (contradicted: dispatch Challenger below), `invalid` (audit
+§ Notes as `route_invalid: <reason>`; no op).
 
-**Low-signal:**
-
-| Confidence | Threshold check | Route |
-|---|---|---|
-| `high` | All 5 conditions AND mtime > 365d ago | Auto-apply (step 4) |
-| `medium` | All 5 conditions AND mtime 90-365d | Pending queue (step 5) |
-
-**Time-stale:** always pending queue. Era judgments are intent-laden; never
-auto-act.
-
-**Contradicted:** dispatch Challenger (synchronous) per finding:
+**Contradicted:** dispatch Challenger (synchronous) per `probe` row:
 
 ```
 Agent (subagent_type=challenger) with:
   task: probe-contradiction
-  wiki_claim: <claim text> / contradicting_peer: <path> / contradiction_signal: <phrase>
+  wiki_claim: <claim> / contradicting_peer: <path> / contradiction_signal: <phrase>
 ```
 
 `rhetorical` → one-line note in audit § "Contradicted rhetorical dismissals".
@@ -201,8 +188,9 @@ user approval; never auto-apply).
 
 ## Step 4: Auto-apply ops (commit-per-op)
 
-Process redundant first (merges create survivors), then low-signal. For each
-finding:
+Process `redundant-high` rows first (merges create survivors), then
+`low-signal-high`. For each row, `SOURCES` = candidate + peers (merge) or the
+candidate alone (archive):
 
 ### 4.0 Tombstone check
 
@@ -211,9 +199,8 @@ uv run --quiet python3 scripts/autoevo_run.py tombstone-check \
   $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done) --today "$RUN_DATE"
 ```
 
-Runs both layers of `protocols/autoevo.md` § Revert tombstones (git-log revert
-detection + explicit TOML). If `skip: true`, route the finding to the pending
-queue with the returned `reason` and continue.
+If `skip: true`, route the row to the pending queue with the returned `reason`
+and continue.
 
 ### 4.1 Snapshot
 
@@ -222,109 +209,88 @@ uv run --quiet python3 scripts/autoevo_run.py snapshot --run-ts "$RUN_TS" \
   $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done)
 ```
 
-All-or-nothing copies of every source into `$PATHS_CACHE` (an external edit
-mid-run cannot corrupt the merge; never auto-apply on a partial snapshot set).
-On `error`, route the whole finding to the pending queue and continue. The
-returned `target_rel` is the oldest-mtime source — the surviving slug that
-preserves inbound `[[wikilinks]]`.
+All-or-nothing copies into `$PATHS_CACHE`; every op below re-verifies its
+sources against these snapshots immediately before writing, so an edit that
+lands mid-run refuses the op instead of being overwritten. On `error`, queue
+the row and continue. `target_rel` is the oldest-mtime source (the surviving
+slug that preserves inbound `[[wikilinks]]`).
 
 ### 4a. Redundant auto-merge
 
-1. Dispatch Curator with the snapshot set:
+Dispatch Curator with the snapshot set:
 
 ```
 Agent (subagent_type=curator) with:
   operation: compact / mode: auto-apply / band: redundant-high
-  source_notes: [<candidate + peers>]
-  snapshot_paths: [<snapshot outputs>]
-  target_path: <target_rel from snapshot>
-  evidence: <Forgetter row evidence dict including confidence: high>
+  source_notes: [<candidate + peers>]  snapshot_paths: [<snapshot outputs>]
+  target_path: <target_rel>  evidence: <row incl. scores, mode, band_label>
 ```
 
-   Curator runs its scope guards and Content Preservation Checklist and
-   returns `auto_apply_safe: true | false`. On `false`, queue the finding with
-   the `refusal_reason` and continue.
-2. **Write** the merged body to `$OV/<target_rel>` (overwrite the survivor).
-3. Stage with the sanity check (never `git add -A`):
+On `auto_apply_safe: false`, queue with the `refusal_reason` and continue.
+Otherwise write Curator's merged body to `$PATHS_CACHE/autoevo-${RUN_TS}-merge-<slug>.md`
+(never to the vault directly) and run the op:
 
 ```bash
-uv run --quiet python3 scripts/autoevo_run.py stage-merge --target "<target_rel>" \
-  $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done)
+uv run --quiet python3 scripts/autoevo_run.py merge-op --run-ts "$RUN_TS" \
+  --target "<target_rel>" $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done) \
+  --body "$PATHS_CACHE/autoevo-${RUN_TS}-merge-<slug>.md" --scope "<dir under $OV>" \
+  --target-slug "<slug>" --band "<band_label>" \
+  $(for ev in "${SOURCE_EVIDENCE[@]}"; do printf ' --source-evidence %q' "$ev"; done)
 ```
 
-   On `error` (staged set diverged), run the step 4c rollback for this op's
-   paths, log audit § Errors, queue the finding, continue.
-4. Commit via the sole committer (never hand-write the git call — it computes
-   `cluster_hash`, renders the pinned message shape, and commits `--only`):
+The helper verifies snapshots, writes the survivor, stages with the sanity
+check, commits through the sole committer (pinned message shape, `cluster_hash`
+for tomorrow's tombstone walk), and rolls its own paths back on any failure.
+`sha` → audit § "Auto-applied"; `error` → 4c.
+
+### 4b. Low-signal auto-archive
 
 ```bash
-MERGE_RESULT=$(uv run --quiet python3 scripts/autoevo_commit.py merge \
-  --scope "<relative dir under $OV>" --target-slug "<target slug>" \
-  --band "redundant-high (3+ peers ≥ 0.85, all > 30d cold, mode=<stub|real>, floor=<0.5|0.6>)" \
-  $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done) \
-  $(for ev in "${SOURCE_EVIDENCE[@]}"; do printf ' --source-evidence %q' "$ev"; done) \
-  --paths "<target_rel>" "${SOURCES[@]}")
-COMMIT_SHA=$(printf '%s' "$MERGE_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha",""))')
-[ -n "$COMMIT_SHA" ] || { echo "merge commit failed: $MERGE_RESULT" >&2; false; }
+uv run --quiet python3 scripts/autoevo_run.py archive-target --source "<source_rel>" --run-date "$RUN_DATE"
 ```
 
-   The `cluster_hash` body line is what the next night's tombstone check
-   reads; removing it breaks revert detection.
-5. Append to audit § "Auto-applied" with the SHA and a one-line summary.
-
-### 4b. Low-signal auto-archive (through Curator)
-
-1. Snapshot (4.1) over the single source path.
-2. Derive and validate the archive target:
+On `error` (target exists), queue and log § Errors. Dispatch Curator
+(`operation: archive / mode: auto-apply / band: low-signal-high`,
+`target_path: <target_rel>`, evidence with words + mtime); it re-greps inbound
+wikilinks and returns `auto_apply_safe`. On `false`, queue. Then:
 
 ```bash
-uv run --quiet python3 scripts/autoevo_run.py archive-target \
-  --source "<source_rel>" --run-date "$RUN_DATE"
+uv run --quiet python3 scripts/autoevo_run.py archive-op --run-ts "$RUN_TS" \
+  --source "<source_rel>" --target "<target_rel>" --slug "<slug>" --days-inactive "<N>" \
+  --evidence "words: <N>, links_in: 0, tags: 0, mtime: <YYYY-MM-DD>" --band "<band_label>"
 ```
 
-   On `error` (target exists), queue the finding, log § Errors, continue.
-3. Dispatch Curator (`operation: archive / mode: auto-apply / band:
-   low-signal-high`, `target_path: <target_rel>`, evidence dict with words +
-   mtime). Curator re-greps inbound wikilinks — catching a link added since
-   the sweep — and returns `auto_apply_safe`. On `false`, queue.
-4. Move and commit (`git mv` records a rename, and every decayed note stays
-   recoverable):
+`sha` → audit § "Auto-applied"; `error` → 4c.
+
+### 4d. Veto-expired defaults
 
 ```bash
-git -C "$OV" mv -- "<source_rel>" "<target_rel>"
-ARCHIVE_RESULT=$(uv run --quiet python3 scripts/autoevo_commit.py archive \
-  --slug "<slug>" --days-inactive "<N>" \
-  --evidence "words: <N>, links_in: 0, tags: 0, mtime: <YYYY-MM-DD>" \
-  --source "<source_rel>" --target "<target_rel>" \
-  --band "low-signal-high (all 5 Forgetter conditions + >365d cold)")
-COMMIT_SHA=$(printf '%s' "$ARCHIVE_RESULT" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("sha",""))')
-[ -n "$COMMIT_SHA" ] || { echo "archive commit failed: $ARCHIVE_RESULT" >&2; false; }
+uv run --quiet python3 scripts/autoevo_pending.py veto-expired --today "$RUN_DATE" --apply-dismissals
 ```
 
-   Append to audit § "Auto-applied".
+`dismissed` ids resolved in place: audit § Notes `default-dismissed: <id>`.
+For each `expired` entry (`stale-banner`; `peers` holds one path): run 4.0 and
+4.1 on that path (skip → stays pending, log § Notes), then
+
+```bash
+uv run --quiet python3 scripts/autoevo_run.py stale-op --run-ts "$RUN_TS" --run-date "$RUN_DATE" \
+  --entry-id "<id>" --source "<peer_rel>" --phrase "<dated phrase from evidence_summary>" \
+  --proposed-at "<proposed_at>" --default-at "<default_at>"
+```
+
+The helper verifies the snapshot, inserts the banner once, commits, and
+resolves the entry `applied` (`by = rule` in the decision ledger).
+`changed: false` means the banner already existed; the entry is still
+resolved. Audit § "Auto-applied": `stale-banner: <peer_rel> (<id>)`.
 
 ### 4c. Failure handling
 
-If any commit fails (hook error, permission, disk full, signing prompt):
-
-1. Do NOT retry the op. A single failure aborts the entire auto-apply phase
-   for this run.
-2. Roll back only this op's declared paths — never the whole worktree (an
-   external edit can land after preflight and a broad restore would destroy
-   it):
-
-```bash
-uv run --quiet python3 scripts/autoevo_run.py rollback --run-ts "$RUN_TS" \
-  --paths "<every path this op touched>" \
-  $(for src in "${SOURCES[@]}"; do printf ' --source %q' "$src"; done)
-```
-
-   Restores HEAD content for pre-existing paths, deletes paths the failed op
-   created, and recovers deleted sources from the step 4.1 snapshots.
-3. Write `git -C "$OV" status` output verbatim to audit § Errors.
-4. Continue to step 5 — the queue is independent of git state. Remaining
-   auto-apply findings queue with reason
-   `"auto-apply phase aborted on commit failure"`.
+An op that returns `error` has already rolled back its own declared paths
+(`rolled_back` lists them; never the whole worktree). Do NOT retry. Write the
+error and `git -C "$OV" status` to audit § Errors, queue the row with reason
+`"auto-apply aborted: <error>"`, and skip the remaining auto-apply rows this
+run (queue them with reason `"auto-apply phase aborted on commit failure"`).
+Continue to step 5; the queue is independent of git state.
 
 ## Step 5: Append to pending queue
 
@@ -342,20 +308,49 @@ PENDING_JSON="$PATHS_CACHE/autoevo-${RUN_TS}-pending.json"   # write the list he
 uv run --quiet python3 scripts/autoevo_pending.py append --entries "$PENDING_JSON" --today "$RUN_DATE"
 ```
 
-The helper appends atomically and dedupes against pending + recently-resolved
-entries (90d window anchored on `resolved_at`), printing
-`{"appended": [...], "skipped": [...], "invalid": [...]}`. Record
-`pending-dedupe-skipped: <N>` in audit § Notes; list `invalid` ids under
-§ Errors (an invalid entry means a malformed Forgetter envelope — fix the
-envelope, never hand-edit the TOML).
-
-Commit only when `appended` is non-empty (a dedupe-only night leaves the file
-unchanged and the commit would fail empty):
+Record `pending-dedupe-skipped: <N>` in audit § Notes; list `invalid` ids under
+§ Errors (a malformed Forgetter envelope — fix the envelope, never hand-edit
+the TOML). Then let precedent set defaults without sending vault content to
+any hosted model:
 
 ```bash
-uv run --quiet python3 scripts/autoevo_commit.py queue \
-  --summary "append <N> pending findings from <RUN_DATE> sweep" \
-  --detail "Categories: redundant=<n>, time-stale-A=<n>, time-stale-B=<n>, contradicted=<n>, low-signal=<n>"
+uv run --quiet python3 scripts/precedent.py autoevo --today "$RUN_DATE" \
+  --bundle-dir "$PATHS_CACHE/autoevo-${RUN_TS}-precedent"
+```
+
+For each `<id>.prompt.txt` written, dispatch `Agent (subagent_type=precedent-judge)`
+with the prompt file path and the judgment target `<id>.json` in the same
+directory (one dispatch may cover the whole directory), then:
+
+```bash
+uv run --quiet python3 scripts/precedent.py autoevo --today "$RUN_DATE" \
+  --judgment-dir "$PATHS_CACHE/autoevo-${RUN_TS}-precedent"
+```
+
+Audit § Notes: `precedent: <id> <verdict|gate>` per judged entry. No bundles
+(nothing to judge) is a Note, not an Error.
+
+Record any `git revert` of an earlier autoevo op as a human `undo` line, so a
+default the user undid reaches `decisions.py stats` instead of being the one
+outcome the precedent judge never sees. Idempotent; safe every night:
+
+```bash
+uv run --quiet python3 scripts/autoevo_run.py record-undos --today "$RUN_DATE"
+```
+
+Commit whenever the queue file actually changed, not only when `appended` is
+non-empty: precedent defaults (`set-default`) and expired dismissals
+(`veto-expired --apply-dismissals`) mutate the same file, and an uncommitted
+mutation leaves `$OV` dirty for the next run's step 1 gate. A dedupe-only
+night changes nothing and must skip the commit, which would otherwise fail
+empty:
+
+```bash
+if ! git -C "$OV" diff --quiet -- _meta/autoevo_pending.toml; then
+  uv run --quiet python3 scripts/autoevo_commit.py queue \
+    --summary "append <N> pending findings from <RUN_DATE> sweep" \
+    --detail "Categories: redundant=<n>, time-stale-A=<n>, time-stale-B=<n>, contradicted=<n>, low-signal=<n>"
+fi
 ```
 
 ## Step 6: Run /lint and report
@@ -411,53 +406,25 @@ Run ID: <RUN_TS>
 - (none) | <error description>
 ```
 
-Update quarantine state from this run's outcomes, then insert the plan's
-quarantine lines into the latest `### Skipped (reason)` section before
-staging (the deterministic helper owns expiry pruning, counter transitions,
-TOML escaping, and section placement):
+Write `DECAY_REPORT_RELS` as a JSON list to
+`$PATHS_CACHE/autoevo-${RUN_TS}-reports.json`, then finalize: the helper
+updates quarantine counters from `$OUTCOMES_FILE`, inserts the plan's
+`scope_quarantined:` lines into the latest § Skipped, and commits the audit
+log, every registered report, and the (whitelist-ignored) quarantine state in
+one path-limited commit. The verifier requires every report named by the run
+to exist in the same commit as the audit.
 
 ```bash
-QUARANTINE_COUNT_FILE="$PATHS_CACHE/autoevo-${RUN_TS}-quarantine-count.txt"
-uv run --quiet python3 scripts/autoevo_quarantine.py update \
-  --outcomes "$OUTCOMES_FILE" \
-  --state "$OV/_meta/autoevo_quarantine.toml" \
-  --count-file "$QUARANTINE_COUNT_FILE" \
-  --today "$RUN_DATE"
-uv run --quiet python3 scripts/autoevo_quarantine.py insert-skipped \
-  --audit "$OV/$AUDIT_REL" \
-  --skipped-lines "$QUARANTINE_SKIPPED"
+uv run --quiet python3 scripts/autoevo_run.py finalize --run-ts "$RUN_TS" --run-date "$RUN_DATE" \
+  --audit-rel "$AUDIT_REL" --outcomes "$OUTCOMES_FILE" --quarantine-skipped "$QUARANTINE_SKIPPED" \
+  --reports "$PATHS_CACHE/autoevo-${RUN_TS}-reports.json" --auto "<N>" --pending "<M>" --errors "<K>"
 ```
 
-`<Q>` below comes from `$QUARANTINE_COUNT_FILE`; it counts only threshold
-transitions (prior_count < 3 AND new_count >= 3).
-
-Commit the audit log, every registered decay report, and quarantine state in
-one path-limited commit — the verifier requires every report named by the run
-to exist in the same commit as the audit, and a plain `git commit` could
-absorb unrelated staged work:
-
-```bash
-FINAL_COMMIT_PATHS=("$AUDIT_REL")
-git -C "$OV" add -- "$AUDIT_REL"
-
-if [ ${#DECAY_REPORT_RELS[@]} -gt 0 ]; then
-  git -C "$OV" add -- "${DECAY_REPORT_RELS[@]}"
-  FINAL_COMMIT_PATHS+=("${DECAY_REPORT_RELS[@]}")
-fi
-
-# The quarantine TOML is whitelist-ignored; the audit subcommand force-adds
-# exactly that one declared bot-owned state file when present.
-uv run --quiet python3 scripts/autoevo_commit.py audit \
-  --run-date "$RUN_DATE" --auto "<N>" --pending "<M>" --errors "<K>" --quarantined "<Q>" \
-  --paths "${FINAL_COMMIT_PATHS[@]}" \
-  $( [ -f "$OV/_meta/autoevo_quarantine.toml" ] && printf -- '--force-add _meta/autoevo_quarantine.toml' )
-```
-
-Never remove an existing `index.lock`, reset the index, or otherwise repair
-Git state here. If the audit commit fails after a pre-flight abort, leave the
-audit file on disk, print the error, exit 0 (`check_autoevo_ran` reads the
-file directly). On a normal run that passed the clean-tree gate, an audit
-commit failure is fatal.
+`quarantined` in the result is `<Q>` (threshold transitions only). Never
+remove an existing `index.lock`, reset the index, or otherwise repair Git
+state here. If finalize fails after a pre-flight abort, leave the audit file on
+disk, print the error, exit 0 (`check_autoevo_ran` reads the file directly).
+On a normal run that passed the clean-tree gate, a finalize failure is fatal.
 
 After delivery and lock release the runner calls
 `scripts/autoevo_verify.py --cycle <RUN_DATE> --json`; the claim stays

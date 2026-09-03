@@ -164,6 +164,29 @@ class QueueExtraPathTest(unittest.TestCase):
             self.assertEqual(subject, "[autoevo:queue] _meta: auto-dismiss 1 stale pending entries")
 
 
+
+class StaleCommitTest(unittest.TestCase):
+    def test_stale_commit_shape_carries_cluster_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp) / "vault"
+            (vault / "wip").mkdir(parents=True)
+            (vault / "wip" / "plan.md").write_text("plan\n", encoding="utf-8")
+            _git(vault, "init", "-q")
+            _git(vault, "add", "-A")
+            _git(vault, "commit", "-q", "-m", "base")
+            (vault / "wip" / "plan.md").write_text("> Stale since 2099-01-15\nplan\n", encoding="utf-8")
+            out = _run(vault, "stale", "--slug", "plan", "--source", "wip/plan.md",
+                       "--phrase", "by end of Q3 2025", "--entry-id", "20990101-time-stale-A-001",
+                       "--proposed-at", "2099-01-01", "--default-at", "2099-01-15")
+            self.assertEqual(out["_exit"], 0, out)
+            body = _git(vault, "log", "-1", "--format=%B").stdout
+            self.assertTrue(body.startswith("[autoevo:time-stale-A] stale-banner: plan after 14d veto window"))
+            self.assertIn(f"cluster_hash: {out['cluster_hash']}", body)
+            self.assertIn("Queue entry: 20990101-time-stale-A-001", body)
+            author = _git(vault, "log", "-1", "--format=%an").stdout.strip()
+            self.assertEqual(author, "Atelier Autoevo Bot")
+
+
 if __name__ == "__main__":
     unittest.main()
 

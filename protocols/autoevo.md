@@ -170,7 +170,8 @@ the first mutation. Each abort surfaces as a cue at next `/hi`.
 | Git index | resolved Git index exists | A missing index makes `git status` resemble mass deletion plus untracked recreation. Do not misclassify it as ordinary dirtiness. |
 | Git index lock | resolved `index.lock` is absent | Never delete or replace a possibly live lock. |
 | Session-active lock | `<paths.cache>/atelier-session-lock` exists AND mtime < 6h | User may be mid-session; avoid collision. |
-| Dirty `$OV` working tree inside autoevo scopes | `scripts/autoevo_preflight.py --dirty-scope` > 0 (status entries under the sweep tiers, `<paths.agent_findings>/`, or `_meta/autoevo_*.toml`) | Don't compound user intent into bot commits. Dirt elsewhere is ignored because every bot commit stages explicit paths with `--only`. |
+| Git operation in progress | no `MERGE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `BISECT_LOG`, `rebase-merge`, or `rebase-apply` in the git dir | A bot commit would silently complete the user's merge, rebase, cherry-pick, or bisect. |
+| Dirty autoevo state | no Git status entries under `_meta/autoevo_*.toml` | The queue or quarantine file is in an unknown condition. Dirty content files inside the sweep tiers do not block: they are recorded as `protected_paths` and every op refuses them, first at snapshot verification and again at the commit choke point (`--only`, explicit paths). |
 | Dirty zettelm submodule | same check inside `<paths.zettelm>/` | User is mid mobile-capture digest. |
 | Privacy gate | `python3 scripts/privacy_check.py --json` returns `hit_count > 0` | Hard veto; never commit a leak. |
 | Semantic readiness | Offline real query exits 0 and returns JSON | Forgetter depends on semantic retrieval; fail before model launch if the cached model, environment, or Lance index is unavailable. |
@@ -192,11 +193,29 @@ earlier skip remains in history without preserving a stale warning.
 
 ### Auto-apply (no human in loop, each op commits)
 
+The numbers below are rendered from `scripts/autoevo_run.py` `BAND_RULES`;
+`harness_lint.py` fails when this table and the code disagree, and no other
+prose file may restate them. `route-bands` re-verifies each precondition on
+disk (scores, tiers, mtimes, mode) before an op runs.
+
 | Category | Threshold | Op |
 |---|---|---|
-| Redundant | 3+ peers ≥ 0.85 retrieval AND all peers in `<paths.wip>/` AND all peers + candidate untouched > 30d | Curator merge (`--auto-apply redundant-high`) |
-| Low-signal | All 5 Forgetter conditions hold AND untouched > 365d | `mv` to `<paths.archive>/decayed/<YYYY-MM-DD>-<slug>.md`. Never `rm`; archive is the recovery surface. |
+| Redundant | 3+ peers ≥ 0.85 retrieval AND all peers + candidate in `<paths.wip>/` AND all untouched > 30d AND mode `real` | Curator merge, then `autoevo_run.py merge-op` (band `redundant-high`) |
+| Low-signal | All 5 Forgetter conditions hold AND untouched > 365d | `autoevo_run.py archive-op` (`git mv` to `<paths.archive>/decayed/<YYYY-MM-DD>-<slug>.md`; never `rm`, the archive is the recovery surface) |
 | Contradicted (rhetorical) | Auto-Challenger probe says "rhetorical, not a real contradiction" | No op; audit-log entry only. |
+
+### Default after a veto window (human may veto, silence applies)
+
+| Category | Threshold | Default op |
+|---|---|---|
+| Any queued category with enough precedent | `scripts/precedent.py autoevo` (nightly step 5) finds at least 3 concordant past human decisions of the same class and the judge passes its gates (`protocols/decision-ledger.md`) | `set-default` stamps the judged verdict: `dismiss` (resolved in place when the window closes) or `stale-banner` (time-stale-A with every peer under `<paths.wip>/` or `<paths.research>/`: the nightly inserts one banner under the note's title via `scripts/autoevo_run.py stale-banner`, commits per op with `scripts/autoevo_commit.py stale`, tombstone-aware, and resolves the entry `applied`). `default_at = today + 14d`. The veto is whichever action contradicts the default: skip (`dismissed`) vetoes a `stale-banner` default, apply vetoes a `dismiss` default. Skipping a `dismiss` default agrees with it and is recorded as a confirmation. Defer restarts the window. |
+
+The proposed action on a content-stale finding ("close, redate, or verify
+X") is the user's to carry out; the system's only executable default is to
+mark the note stale so retrieval stops treating it as current, or to drop the
+proposal when precedent says the user would. `append --rule-defaults` can
+stamp the fixed stale-banner rule without a judge; it is off by default.
+Entries the judge cannot back stay human-only.
 
 ### Log to pending queue (surface at /hi)
 
@@ -204,7 +223,7 @@ earlier skip remains in history without preserving a stale warning.
 |---|---|---|
 | Redundant | 3+ working-tier peers ≥ 0.6 but below auto-band thresholds (peers under papers, preprints, wiki, profile, or daily notes never count; see `forgetter.md` § Redundant) | Append to pending queue through `scripts/autoevo_pending.py append`, which skips clusters already pending, or resolved within its `--dedupe-days` window (default 90). |
 | Time-stale (era-stale, Forgetter heuristic B) | Always | Append to pending queue. Era judgments are intent-laden; never auto-act. |
-| Time-stale (content-stale, Forgetter heuristic A) | Always | Append to pending queue. |
+| Time-stale (content-stale, Forgetter heuristic A) | Always | Append to pending queue; a default arrives only from the precedent judge. |
 | Contradicted (real) | Challenger probe confirms genuine contradiction | Append to pending queue. Wiki rewrites need human approval. |
 | Low-signal | 5 conditions hold AND 90-365d untouched | Append to pending queue. |
 
@@ -266,6 +285,9 @@ proposed_at = "2026-05-22"
 last_surfaced = "2026-05-22"
 surface_count = 0
 status = "pending"   # pending | applied | dismissed | auto-dismissed
+# Stamped by `append` on default-eligible categories (see Trust bands):
+# default_action = "stale-banner"
+# default_at = "2026-06-05"                # proposed_at + 14d; defer pushes it
 # Written by `scripts/autoevo_pending.py` on resolution (absent while pending):
 # resolved_at = "2026-06-21"              # decision date; anchors the 90-day dedupe window
 # dismiss_reason = "user skipped during /autoevo-review"
@@ -278,7 +300,8 @@ Lifecycle:
 3. **Resolve**: `/autoevo-review` walks each pending entry; user picks apply / skip / defer / explain-more.
    - Apply → dispatch Curator in approval mode; on confirm, `autoevo_pending.py resolve --status applied` and commit.
    - Skip → `autoevo_pending.py resolve --status dismissed --reason ...`; record in audit log.
-   - Defer → `autoevo_pending.py defer` (bumps `surface_count` and `last_surfaced`); reuse `cue_snooze.json` for the snooze interval. The helper is the only queue writer; nothing hand-edits the TOML.
+   - Defer → `autoevo_pending.py defer` (bumps `surface_count` and `last_surfaced`, and pushes `default_at` out by another 14 days when the entry carries a default); reuse `cue_snooze.json` for the snooze interval. The helper is the only queue writer; nothing hand-edits the TOML.
+3b. **Default**: `/autoevo-nightly` step 5 runs `scripts/precedent.py autoevo` over new pending entries; a passing verdict becomes `default_action` / `default_at`. Step 4d runs `autoevo_pending.py veto-expired --apply-dismissals`: `dismiss` defaults resolve in place, `stale-banner` defaults get their op, a per-op commit, and `applied` with reason `default after veto window`. A skip before the deadline (status `dismissed`) is the veto; the nightly never touches resolved entries. Every resolution carries a reason and lands in the decision ledger.
 4. **Auto-dismiss**: after 3 skips (`surface_count >= 3`, the helper's built-in threshold) OR `--max-age-days` (default 30) from `proposed_at` without resolution, `scripts/autoevo_pending.py auto-dismiss` sets `status = "auto-dismissed"` with a `dismiss_reason`; `/autoevo-review` writes the one-line note to the audit log. Dismissed clusters stay in the file so the next sweep does not re-propose them.
 
 ## Audit log: `<paths.agent_findings>/autoevo-applied-<YYYY-MM-DD>.md`
@@ -341,7 +364,7 @@ The archive directory is the asymmetric safety: deletions are revert-only; archi
 
 When the user runs `git revert <[autoevo:redundant] sha>`, the bot's next run would re-flag the same peer set, re-score it at the same retrieval, and re-merge within 24-72h — undoing the user's undo. The tombstone mechanism prevents this loop.
 
-**The cluster hash.** Every redundant auto-merge commit body includes a `cluster_hash: <12 hex chars>` line, computed as the first 12 hex chars of `sha1` over the sorted list of source relative paths (one per line, LF-terminated). Two compact runs on the same exact source set produce the same hash; the hash is stable across re-runs and machines as long as the path strings match.
+**The cluster hash.** Every redundant auto-merge and stale-banner commit body includes a `cluster_hash: <12 hex chars>` line, computed as the first 12 hex chars of `sha1` over the sorted list of source relative paths (one per line, LF-terminated). Two compact runs on the same exact source set produce the same hash; the hash is stable across re-runs and machines as long as the path strings match.
 
 **Auto-detection at `/autoevo-nightly` step 4.0.** For each finding the bot is about to auto-apply:
 

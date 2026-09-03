@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlparse
 
-from _paths import fmt, vault_root
+from _paths import fmt, parse_iso_date, vault_root
 
 
 SCHEMA_VERSION = 1
@@ -150,10 +150,10 @@ def canonical_json(value: Any) -> str:
 def parse_date(value: Any, field: str) -> date:
     if not isinstance(value, str):
         raise SignalFactsError(f"{field} must be an ISO date string")
-    try:
-        return date.fromisoformat(value)
-    except ValueError as exc:
-        raise SignalFactsError(f"{field} is not a valid ISO date: {value!r}") from exc
+    parsed = parse_iso_date(value) if len(value.strip()) == 10 else None
+    if parsed is None:
+        raise SignalFactsError(f"{field} is not a valid ISO date: {value!r}")
+    return parsed
 
 
 def parse_datetime(value: Any, field: str) -> datetime:

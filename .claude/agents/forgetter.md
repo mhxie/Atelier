@@ -88,27 +88,19 @@ The conjunction is the false-positive guard — each condition alone catches del
 
 ## Confidence Field (per row)
 
-Every row carries `confidence: high | medium | low` — the trust signal `/autoevo-nightly` reads to auto-apply or queue. Derive per category:
+Every row carries `confidence: high | medium | low`. It is a hint: the exact
+thresholds live once, in `scripts/autoevo_run.py` `BAND_RULES` (explained in
+`protocols/autoevo.md` § Trust bands), and `route-bands` re-verifies every
+auto-apply precondition on disk before any op. Your job is to report the raw
+values it needs: retrieval scores per peer, mode (stub | real) and floor, every
+path, and for low-signal the count of conditions met. Set `high` only when you
+believe every auto-apply precondition of that band holds, `medium` when the
+flag holds but some precondition fails, `low` when borderline. Stub mode never
+reaches `high`: lexical overlap must not drive autonomous deletion.
 
-**Redundant** (stub mode never reaches `high` — lexical overlap must not drive autonomous deletion):
-
-| Confidence | Conditions (all must hold) |
-|---|---|
-| `high` | 3+ peers ≥ 0.85, **and** all peers + candidate under `<paths.wip>/`, **and** every mtime older than 30d, **and** mode `real` |
-| `medium` | 3+ peers ≥ 0.6, **and** at least one of {peer not in wip, any mtime within 30d, mode = stub} |
-| `low` | Borderline: exactly 3 peers, lowest score within 0.05 of the floor, or peer-set inconsistency |
-
-**Low-signal:**
-
-| Confidence | Conditions |
-|---|---|
-| `high` | All 5 conditions **and** mtime > 365d ago |
-| `medium` | All 5 conditions **and** mtime 90-365d ago |
-| `low` | Reserved; anything under 5/5 is no flag at all, not a low-confidence flag |
-
-**Time-stale:** always `medium` (intent-laden; no auto-apply path exists).
+**Time-stale:** always `medium` (intent-laden; defaults come from precedent, never from the sweep).
 **Contradicted:** always `low` (the genuine/rhetorical judgment is Challenger's, downstream).
-**Backward compatibility:** a row without `confidence` is treated as `medium` by `/autoevo-nightly` and queued; the bot never auto-applies on absence.
+**Backward compatibility:** a row without `confidence` is queued; the bot never auto-applies on absence.
 
 ## Sweep Process
 

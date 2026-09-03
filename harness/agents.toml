@@ -87,6 +87,19 @@
 # dispatch the agent. Empty `used_by` is an orphan signal (lint WARN).
 # `python3 scripts/harness_lint.py --fix-used-by` regenerates from the walk.
 
+[agents.precedent-judge]
+source = ".claude/agents/precedent-judge.md"
+voices = { native = "sonnet" }
+kinds = ["app"]
+dispatch_rationale = ["model-tier"]
+status = "portable-adapted"
+description = "Applies the user's own past decisions to a new pending item; one JSON verdict per prompt file, never invents policy. Le cercle archetype: The Clerk of the Court."
+codex_prompt = "Run the Precedent Judge role through native Codex agent `precedent-judge`; `.claude/agents/precedent-judge.md` remains authoritative."
+pattern = "solo"
+used_by = [
+    "commands.autoevo-nightly",
+]
+
 [agents.challenger]
 source = ".claude/agents/challenger.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
