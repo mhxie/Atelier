@@ -122,6 +122,8 @@ class Group:
     items: list[Item] = field(default_factory=list)
     folded: bool = False
     fold_heading: str = ""
+    # Structured facts a renderer may want without parsing the heading.
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def rendered_lines(self) -> int:
         return 1 + (0 if self.folded else len(self.items))
@@ -511,13 +513,17 @@ def load_health(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
     except OSError as exc:
         warnings.append(f"health metrics unreadable: {exc!r}")
         return []
+    meta: dict[str, Any] = {}
     if latest is None:
         heading = f"健康观测: {HEALTH_SECTION} 无记录 ({HEALTH_METRICS_FILE})"
     else:
         age = _age_days(latest, today)
         heading = f"健康观测: 体重上次 {latest} ({age}d 前) ({HEALTH_METRICS_FILE})"
+        meta = {"latest": latest, "age_days": age}
     # Born folded: it is a count line, so the cap may merge it with the others.
-    return [Group(tier=3, kind="health", heading=heading, fold_heading=heading, folded=True)]
+    return [
+        Group(tier=3, kind="health", heading=heading, fold_heading=heading, folded=True, meta=meta)
+    ]
 
 
 def load_tracking(ov: Path, today: date, warnings: list[str]) -> list[Group]:
@@ -700,6 +706,31 @@ def apply_cap(groups: list[Group], cap: int) -> tuple[list[Group], int, bool]:
     return groups, folded_by_cap, total() > cap
 
 
+def brief_signals(groups: list[Group]) -> dict[str, int]:
+    """The few numbers worth a masthead slot, read from the groups directly.
+
+    A number earns the masthead only if it changes what the reader does in
+    the next twelve hours: how many things are closing, how far the nearest
+    milestone is, how stale the last weight row is. Fleet bookkeeping and
+    chronic overdue counts do not qualify; they stay in the ledger and the
+    colophon. Keys are absent, never zero-filled, when the fact is unknown.
+    """
+    signals: dict[str, int] = {}
+    closing = [g for g in groups if g.kind in ("closing_now", "closing_lead")]
+    if closing:
+        signals["closing"] = sum(len(g.items) for g in closing)
+        signals["closing_now"] = sum(len(g.items) for g in closing if g.kind == "closing_now")
+    focus_days = [
+        i.days_left for g in groups if g.kind == "focus" for i in g.items if i.days_left is not None
+    ]
+    if focus_days:
+        signals["focus_days"] = min(focus_days)
+    for g in groups:
+        if g.kind == "health" and g.meta.get("age_days") is not None:
+            signals["weight_age_days"] = int(g.meta["age_days"])
+    return signals
+
+
 def build(
     ov: Path,
     today: date,
@@ -719,6 +750,7 @@ def build(
     groups.extend(load_tracking(ov, today, warnings))
 
     groups.sort(key=lambda g: g.tier)
+    signals = brief_signals(groups)
     groups, folded_by_cap, over_cap = apply_cap(groups, cap)
     if over_cap:
         warnings.append(
@@ -733,6 +765,7 @@ def build(
         "rendered_lines": sum(g.rendered_lines() for g in groups),
         "folded_by_cap": folded_by_cap,
         "over_cap": over_cap,
+        "signals": signals,
         "groups": [
             {
                 "tier": g.tier,

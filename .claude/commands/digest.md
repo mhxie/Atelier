@@ -5,7 +5,7 @@ description: "Daily and weekly digest: action surface, mandatory configured stat
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi 日报`, `/hi routine digest`,
 > `/hi 汇总 routine`, `/hi digest 邮件`). See `harness/intents.toml`
-> `[intents.digest]` for the full pattern list. Both paths execute this procedure.
+> `[intents.digest]` for the row's example phrases. Both paths execute this procedure.
 
 One document per run. Its first screen is what closes today; everything below it
 is intel that is never urgent by construction.
@@ -399,6 +399,10 @@ history.
 
 - Scratch files live in `mktemp -d` output. The artifact itself is the only
   durable output and `write` places it.
+- The masthead strip shows a number only when it changes the next twelve
+  hours: 关窗, 主线 (days to the nearest milestone), 体重 (days since the last
+  weight row), 决策 (bullets under 需要的决策), and 失败 when nonzero. Fleet
+  bookkeeping (有产出, 完成, 待 review, recurring 逾期) is in the colophon.
 - Mail clients sanitize CSS, so the renderer emits semantic HTML only. Source
   references render as plain labels rather than `#anchor` links, because Gmail
   rewrites in-message anchors so they navigate nowhere.

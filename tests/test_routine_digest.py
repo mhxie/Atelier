@@ -1539,29 +1539,55 @@ class MastheadAndContextTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 rd.load_context(path)
 
-    def test_health_strip_borrows_recurring_and_review_counts_from_the_brief(self):
+    def test_signal_strip_shows_only_live_numbers(self):
+        """Guard for the 2026-09-01 masthead, which spent its strip on fleet
+        bookkeeping (4/19 有产出, 149 待 review) that reads the same every day."""
         brief = {
             "schema": 1,
             "date": "2099-01-30",
+            "signals": {"closing": 2, "closing_now": 1, "focus_days": 29, "weight_age_days": 143},
+            "groups": [],
+            "warnings": [],
+        }
+        overview = {"schema": 1, "sections": [{"title": "需要的决策", "bullets": [{"text": "a"}]}]}
+        strip = rd._render_signals(self.manifest["health"], brief, overview)
+        self.assertEqual(strip.count("<td"), 4)
+        for label in ("关窗", "主线", "体重", "决策"):
+            self.assertIn(label, strip)
+        self.assertIn(f'color:{rd._URGENT};">2<', strip)  # one closes today
+        self.assertIn(f'color:{rd._ACCENT};">29d<', strip)
+        self.assertIn(f'color:{rd._URGENT};">143d<', strip)  # past WEIGHT_STALE_DAYS
+        for noise in ("有产出", "待 review", "完成", "失败"):
+            self.assertNotIn(noise, strip)
+
+    def test_signal_strip_is_empty_when_nothing_is_live(self):
+        self.assertEqual(rd._render_signals(self.manifest["health"]), "")
+        self.assertEqual(rd._render_signals(self.manifest["health"], {"signals": {"closing": 0}}, {"sections": []}), "")
+        failed = {**self.manifest["health"], "failed": 3}
+        strip = rd._render_signals(failed)
+        self.assertEqual(strip.count("<td"), 1)
+        self.assertIn(f'color:{rd._URGENT};">3<', strip)
+        self.assertIn("失败", strip)
+        fresh = rd._render_signals(self.manifest["health"], {"signals": {"weight_age_days": 3}})
+        self.assertIn(f'color:{rd._INK};">3d<', fresh)  # every three days is on cadence
+        late = rd._render_signals(self.manifest["health"], {"signals": {"weight_age_days": 4}})
+        self.assertIn(f'color:{rd._URGENT};">4d<', late)
+
+    def test_fleet_bookkeeping_moves_to_the_colophon(self):
+        brief = {
+            "schema": 1,
+            "date": "2099-01-30",
+            "signals": {},
             "groups": [
                 {"tier": 3, "kind": "recurring", "heading": "recurring: 9 条逾期, 4 条刚到期", "folded": True, "items": []},
-                {
-                    "tier": 3,
-                    "kind": "review",
-                    "heading": "review 债 3 项",
-                    "folded": False,
-                    "items": [{"text": "autoevo_pending"}, {"text": "aggregate_freshness"}, {"text": "routine_outputs"}],
-                },
             ],
             "warnings": [],
         }
-        strip = rd._render_health(self.manifest["health"], brief)
-        self.assertIn("recurring 逾期", strip)
-        self.assertIn(f'color:{rd._URGENT};">9<', strip)
-        self.assertIn("review 债", strip)
-        self.assertIn(">3<", strip)
-        self.assertEqual(strip.count("<td"), 6)
-        self.assertEqual(rd._render_health(self.manifest["health"]).count("<td"), 4)
+        document = rd.render(self.manifest, {"schema": 1}, brief)
+        self.assertNotIn(rd._S_STAT_TABLE, document)
+        for bit in ("routine 4/19 有产出", "2 完成", "149 待 review", "recurring 逾期 9"):
+            self.assertIn(bit, document)
+            self.assertGreater(document.index(bit), document.index("Source index"))
 
     def test_ledger_due_column_encodes_urgency(self):
         brief = {

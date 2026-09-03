@@ -393,6 +393,17 @@ class BriefIntegrationTests(unittest.TestCase):
         self.assertNotIn("health", [g["kind"] for g in missing["groups"]])
         self.assertTrue(any("health metrics missing" in w for w in missing["warnings"]))
 
+    def test_signals_carry_the_masthead_numbers(self):
+        brief = self._brief()
+        self.assertEqual(
+            brief["signals"],
+            {"closing": 3, "closing_now": 1, "focus_days": 29, "weight_age_days": 142},
+        )
+
+    def test_signals_are_absent_not_zero_when_unknown(self):
+        bare = self._brief(deadlines=None, health=None)
+        self.assertEqual(bare["signals"], {})
+
     def test_dated_todos_inside_the_horizon_itemize(self):
         brief = self._brief()
         todo = self._group(brief, "todo")
