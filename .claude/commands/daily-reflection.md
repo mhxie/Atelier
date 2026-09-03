@@ -28,7 +28,7 @@ Run a reflection session grounded in your notes and goals.
      --component reflections \
      --component daily \
      --effective-date YYYY-MM-DD \
-     --byte-budget 20480 \
+     --byte-budget 49152 \
      --format json
    ```
 

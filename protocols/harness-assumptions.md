@@ -52,8 +52,8 @@ Voice band vocabulary used in this file:
 
 | Rule | Location | Current Value | Re-test When |
 |------|----------|--------------|-------------|
-| Route context | context_bundle.py, session-continuity.md, intents.toml | Per-intent 4, 6, or 8 KB serialized UTF-8 | Repeated targeted retrieval shows a route is under-provisioned |
-| Selected workflow context | context_bundle.py, session-continuity.md | At most 20 KB before targeted source reads | Workflow evidence needs exceed the cap repeatedly |
+| Route context | context_bundle.py, session-continuity.md, intents.toml | 32 KB when profile files are preloaded, 8 KB otherwise; declared sections land whole (per-file cap 16 KB) | A declared profile or continuity section is truncated on a normal route |
+| Selected workflow context | context_bundle.py, session-continuity.md | At most 64 KB before targeted source reads | Workflow evidence needs exceed the cap repeatedly |
 | Reflection continuity | context_bundle.py | Headings plus at most two high-signal closing sections from up to 3 files | Reflection structure changes |
 | Daily-note preload | context_bundle.py, session-continuity.md | Explicit component only | More routes demonstrably require current capture |
 | Profile preload | context_bundle.py, intents.toml | Only selected row's `profile_reads` | Intent ownership changes |

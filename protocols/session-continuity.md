@@ -29,11 +29,12 @@ current capture. Add route-specific sources with `--component sources
 sync, promotion, and meeting routes do not load a daily note by default.
 
 The complete serialized projection uses the selected intent's
-`context_budget_bytes` from `harness/intents.toml`, currently 4, 6, or 8 KB.
-A workflow may explicitly raise `--byte-budget` to at most 20 KB. Anything
-omitted is retrieved deliberately after routing. This gives the session a
-"previously on..." anchor without loading complete reflections or unrelated
-profile material.
+`context_budget_bytes` from `harness/intents.toml`: 32 KB when the row
+preloads profile files, 8 KB for continuity-only rows. Declared sections land
+whole, in priority order, until the ceiling; a workflow may raise
+`--byte-budget` to at most 64 KB. Anything omitted is reported and retrieved
+deliberately after routing. The projection is a "previously on..." anchor,
+not a substitute for reading the sources a workflow actually needs.
 
 ### Reading recovery
 

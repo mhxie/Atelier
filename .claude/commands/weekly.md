@@ -4,7 +4,7 @@ description: Structured weekly review over the past seven effective days.
 # Weekly Review
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi weekly review`, `/hi this week`).
-> See `harness/intents.toml` `[intents.weekly]` for the full pattern list. Both paths
+> See `harness/intents.toml` `[intents.weekly]` for the row's example phrases. Both paths
 > execute this same procedure.
 
 Run a structured weekly review covering the past 7 days. Deeper than daily reflection, lighter than a full goal review.
@@ -27,7 +27,7 @@ When to invoke:
 
 1. Reuse the current `weekly` context projection from `$hi`; for direct
    invocation, run `uv run scripts/context_bundle.py --intent weekly
-   --byte-budget 20480 --format json`.
+   --format json`.
 
 2. Use the projected reflection headings and closing sections as the first
    pass. Search the seven-day window semantically and read only the source

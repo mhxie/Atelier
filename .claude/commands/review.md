@@ -5,7 +5,7 @@ description: Goal review for quarterly full reviews and monthly light pulses.
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi review my goals`,
 > `/hi goal pulse`, `/hi check directions`). See `harness/intents.toml`
-> `[intents.review]` for the full pattern list. Both paths execute this same procedure.
+> `[intents.review]` for the row's example phrases. Both paths execute this same procedure.
 
 Review progress on near/mid/long-term goals. Surface what's progressing, what's neglected, and what has shifted.
 
@@ -47,7 +47,7 @@ Stale-goal floor: every full review must explicitly resolve each item under `## 
 
 1. Reuse the current `review` context projection from `$hi`; for direct
    invocation, run `uv run scripts/context_bundle.py --intent review
-   --byte-budget 20480 --format json`.
+   --format json`.
 
 2. Use the projected reflection headings and closing sections as the continuity
    seed. Search the selected lookback window, 90 days for a full review or 30

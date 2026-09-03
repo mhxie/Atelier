@@ -23,17 +23,27 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_INTENTS_PATH = ROOT / "harness" / "intents.toml"
 DEFAULT_COMPONENTS = ("profile", "session", "reflections")
 VALID_COMPONENTS = ("profile", "session", "reflections", "daily", "sources")
-MAX_BYTE_BUDGET = 20 * 1024
+MAX_BYTE_BUDGET = 64 * 1024
 DEFAULT_REFLECTION_COUNT = 3
 MAX_REFLECTION_COUNT = 10
-ROUTE_PREFIX = "ATELIER_INTENT_ROUTE "
 
 SESSION_SECTION_NAMES = ("Continuity", "Anomalies")
 READING_CAPSULE_SECTION = "Reading Capsule"
 REFLECTION_HEADING_LIMIT = 40
 REFLECTION_CLOSING_LIMIT = 2
-MIN_INITIAL_EXCERPT_BYTES = 160
-MIN_FITTED_EXCERPT_BYTES = 96
+# Smallest excerpt worth emitting. Below this a fragment is noise; the
+# candidate is omitted (and reported) instead of stubbed.
+MIN_EXCERPT_BYTES = 256
+
+# Per-candidate ceilings. They exist so one oversized file cannot consume the
+# whole projection, not to ration context: at these sizes a typical profile
+# file, session section, or reflection closing lands whole.
+PROFILE_CAP_BYTES = 16 * 1024
+SESSION_SECTION_CAP_BYTES = 4 * 1024
+REFLECTION_HEADINGS_CAP_BYTES = 2 * 1024
+REFLECTION_CLOSING_CAP_BYTES = 4 * 1024
+DAILY_CAP_BYTES = 16 * 1024
+SOURCE_CAP_BYTES = 16 * 1024
 
 COMPONENT_RENDER_ORDER = {
     "profile": 0,
@@ -198,50 +208,21 @@ def load_intents(path: Path) -> dict[str, dict[str, Any]]:
         raise BundleError(f"cannot import shared registry loader: {exc}") from exc
     except RegistryError as exc:
         raise BundleError(str(exc)) from exc
-    return {
+    rows = {
         str(name): row
         for name, row in intents.items()
         if isinstance(name, str) and isinstance(row, dict)
     }
-
-
-def _unwrap_route_payload(payload: Any) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        raise BundleError("--route-json must decode to a JSON object")
-
-    hook_output = payload.get("hookSpecificOutput")
-    if isinstance(hook_output, dict):
-        context = hook_output.get("additionalContext")
-        if not isinstance(context, str):
-            raise BundleError(
-                "hook route JSON has no hookSpecificOutput.additionalContext text"
-            )
-        return parse_route_json_text(context)
-    return payload
-
-
-def parse_route_json_text(value: str) -> dict[str, Any]:
-    """Parse an inline route packet, hook output, or JSON file."""
-    raw = value.strip()
-    if raw.startswith(ROUTE_PREFIX):
-        raw = raw[len(ROUTE_PREFIX) :].strip()
-    elif not raw.startswith("{"):
-        candidate_path = Path(raw).expanduser()
-        if candidate_path.is_file():
-            try:
-                raw = candidate_path.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeError) as exc:
-                raise BundleError(
-                    f"cannot read route JSON {candidate_path}: {exc}"
-                ) from exc
-            if raw.startswith(ROUTE_PREFIX):
-                raw = raw[len(ROUTE_PREFIX) :].strip()
-
+    # The gitignored overlay next to the registry may add private rows; the
+    # same merge the router uses, so `--intent <private>` resolves here too.
     try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise BundleError(f"invalid --route-json: {exc}") from exc
-    return _unwrap_route_payload(payload)
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from intent_coverage import merge_overlay
+
+        rows, _problems = merge_overlay(rows, path.with_name("intents.local.toml"))
+    except ImportError:
+        pass
+    return rows
 
 
 def normalize_intent_name(value: str) -> str:
@@ -302,27 +283,12 @@ def _validate_context_budget(value: Any, intent_name: str) -> int:
 def resolve_route(
     *,
     intent_arg: str | None,
-    route_json_arg: str | None,
     intents_path: Path,
 ) -> dict[str, Any]:
     intents = load_intents(intents_path)
-    packet: dict[str, Any] | None = None
-    input_kind = "intent"
-    if route_json_arg is not None:
-        packet = parse_route_json_text(route_json_arg)
-        input_kind = "route-json"
-        if packet.get("ambiguous") is True:
-            raise BundleError(
-                "route packet is ambiguous; resolve the intent before loading context"
-            )
-        packet_name = packet.get("name")
-        if not isinstance(packet_name, str):
-            raise BundleError("route packet has no string 'name' field")
-        intent_name = normalize_intent_name(packet_name)
-    elif intent_arg is not None:
-        intent_name = normalize_intent_name(intent_arg)
-    else:
-        raise BundleError("one of --intent or --route-json is required")
+    if intent_arg is None:
+        raise BundleError("--intent is required")
+    intent_name = normalize_intent_name(intent_arg)
 
     row = intents.get(intent_name)
     if row is None:
@@ -341,25 +307,8 @@ def resolve_route(
     )
     profile_reads = _validate_profile_reads(row.get("profile_reads", []), intent_name)
 
-    mismatches: list[str] = []
-    if packet is not None:
-        if isinstance(packet.get("mode"), str) and packet["mode"] != mode:
-            mismatches.append("mode")
-        if (
-            isinstance(packet.get("procedure"), str)
-            and packet["procedure"] != procedure
-        ):
-            mismatches.append("procedure")
-        if (
-            isinstance(packet.get("context_budget_bytes"), int)
-            and packet["context_budget_bytes"] != context_budget_bytes
-        ):
-            mismatches.append("context_budget_bytes")
-        if "profile_reads" in packet and packet.get("profile_reads") != profile_reads:
-            mismatches.append("profile_reads")
-
     route: dict[str, Any] = {
-        "input": input_kind,
+        "input": "intent",
         "name": intent_name,
         "mode": mode,
         "procedure": procedure,
@@ -367,8 +316,6 @@ def resolve_route(
         "profile_reads": profile_reads,
         "registry": display_path(intents_path),
     }
-    if mismatches:
-        route["packet_registry_mismatch"] = mismatches
     return route
 
 
@@ -590,7 +537,7 @@ def add_profile_candidates(
                 representation="source_excerpt",
                 text=content,
                 source_bytes=utf8_len(text),
-                cap_bytes=3584,
+                cap_bytes=PROFILE_CAP_BYTES,
                 priority=10,
                 ordinal=next_ordinal,
             )
@@ -637,7 +584,7 @@ def add_session_candidates(
                 representation="source_section",
                 text=section.body,
                 source_bytes=utf8_len(text),
-                cap_bytes=1536,
+                cap_bytes=SESSION_SECTION_CAP_BYTES,
                 priority=0,
                 ordinal=next_ordinal,
             )
@@ -708,7 +655,7 @@ def add_session_candidates(
             representation="source_section",
             text=reading_section.body,
             source_bytes=utf8_len(reading_text),
-            cap_bytes=1536,
+            cap_bytes=SESSION_SECTION_CAP_BYTES,
             priority=1,
             ordinal=next_ordinal,
         )
@@ -755,7 +702,7 @@ def add_reflection_candidates(
                     representation="heading_index",
                     text=headings,
                     source_bytes=utf8_len(text),
-                    cap_bytes=1200,
+                    cap_bytes=REFLECTION_HEADINGS_CAP_BYTES,
                     priority=25,
                     ordinal=next_ordinal,
                     pre_truncation_reasons=reasons,
@@ -783,7 +730,7 @@ def add_reflection_candidates(
                     representation="source_section",
                     text=section.body,
                     source_bytes=utf8_len(text),
-                    cap_bytes=1600,
+                    cap_bytes=REFLECTION_CLOSING_CAP_BYTES,
                     priority=20,
                     ordinal=next_ordinal,
                 )
@@ -831,7 +778,7 @@ def add_daily_candidate(
             representation="source_excerpt",
             text=content,
             source_bytes=utf8_len(text),
-            cap_bytes=4096,
+            cap_bytes=DAILY_CAP_BYTES,
             priority=5,
             ordinal=next_ordinal,
         )
@@ -897,7 +844,7 @@ def add_explicit_source_candidates(
                 representation=representation,
                 text=content,
                 source_bytes=utf8_len(text),
-                cap_bytes=4096,
+                cap_bytes=SOURCE_CAP_BYTES,
                 priority=5,
                 ordinal=next_ordinal,
             )
@@ -995,38 +942,27 @@ def allocate_excerpts(
     omissions: list[dict[str, Any]],
     byte_budget: int,
 ) -> list[Excerpt]:
+    """Whole sections in priority order until the budget is spent.
+
+    A candidate that fits is included whole (up to its cap). One that does
+    not fit is truncated to the remaining space when at least
+    MIN_EXCERPT_BYTES remain, otherwise omitted and reported. Nothing is
+    pre-shrunk to make room for lower-priority material: one full profile
+    beats three stubs.
+    """
     ordered = sorted(candidates, key=lambda item: (item.priority, item.ordinal))
-    allocations = {candidate.ordinal: 0 for candidate in ordered}
+    allocations: dict[int, int] = {}
     remaining = byte_budget
-
     for candidate in ordered:
-        grant = min(
-            MIN_INITIAL_EXCERPT_BYTES,
-            candidate.cap_bytes,
-            candidate.available_bytes,
-            remaining,
-        )
-        allocations[candidate.ordinal] += grant
+        grant = min(candidate.cap_bytes, candidate.available_bytes, max(remaining, 0))
+        if grant < min(MIN_EXCERPT_BYTES, candidate.available_bytes):
+            grant = 0
+        allocations[candidate.ordinal] = grant
         remaining -= grant
-        if remaining <= 0:
-            break
-
-    if remaining > 0:
-        for candidate in ordered:
-            current = allocations[candidate.ordinal]
-            grant = min(
-                candidate.cap_bytes - current,
-                candidate.available_bytes - current,
-                remaining,
-            )
-            allocations[candidate.ordinal] += grant
-            remaining -= grant
-            if remaining <= 0:
-                break
 
     excerpts: list[Excerpt] = []
     for candidate in candidates:
-        grant = allocations[candidate.ordinal]
+        grant = allocations.get(candidate.ordinal, 0)
         if grant <= 0:
             omissions.append(
                 omission(
@@ -1040,17 +976,8 @@ def allocate_excerpts(
         content = truncate_utf8(candidate.text, grant)
         reasons = set(candidate.pre_truncation_reasons)
         if grant < candidate.available_bytes:
-            if grant >= candidate.cap_bytes:
-                reasons.add("component_cap")
-            else:
-                reasons.add("content_budget")
-        excerpts.append(
-            Excerpt(
-                candidate=candidate,
-                content=content,
-                truncation_reasons=reasons,
-            )
-        )
+            reasons.add("component_cap" if grant >= candidate.cap_bytes else "content_budget")
+        excerpts.append(Excerpt(candidate=candidate, content=content, truncation_reasons=reasons))
     return excerpts
 
 
@@ -1149,15 +1076,6 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- Truncated: {'yes' if budget['truncated'] else 'no'}",
         "",
     ]
-    if route.get("packet_registry_mismatch"):
-        fields = ", ".join(route["packet_registry_mismatch"])
-        lines.extend(
-            [
-                f"Route packet differed from the current registry for: {fields}. "
-                "The registry values were used.",
-                "",
-            ]
-        )
 
     for excerpt in payload["excerpts"]:
         lines.extend(
@@ -1268,7 +1186,7 @@ def fit_rendered_output(
         shrinkable = [
             excerpt
             for excerpt in excerpts
-            if excerpt.included_bytes > MIN_FITTED_EXCERPT_BYTES
+            if excerpt.included_bytes > MIN_EXCERPT_BYTES
         ]
         if shrinkable:
             target = max(
@@ -1280,7 +1198,7 @@ def fit_rendered_output(
                 ),
             )
             new_limit = max(
-                MIN_FITTED_EXCERPT_BYTES,
+                MIN_EXCERPT_BYTES,
                 target.included_bytes - overflow - 32,
             )
             target.content = truncate_utf8(target.candidate.text, new_limit)
@@ -1323,7 +1241,6 @@ def build_bundle(
     vault: Path,
     intents_path: Path,
     intent: str | None,
-    route_json: str | None,
     components: Sequence[str],
     source_specs: Sequence[str],
     effective_date: date,
@@ -1331,11 +1248,7 @@ def build_bundle(
     reflection_count: int,
     output_format: str,
 ) -> str:
-    route = resolve_route(
-        intent_arg=intent,
-        route_json_arg=route_json,
-        intents_path=intents_path,
-    )
+    route = resolve_route(intent_arg=intent, intents_path=intents_path)
     selected_budget = (
         byte_budget if byte_budget is not None else route["context_budget_bytes"]
     )
@@ -1366,17 +1279,10 @@ def build_parser() -> argparse.ArgumentParser:
             "routing. The byte budget covers the entire UTF-8 output."
         )
     )
-    route_group = parser.add_mutually_exclusive_group(required=True)
-    route_group.add_argument(
+    parser.add_argument(
         "--intent",
+        required=True,
         help="selected intent registry key, for example 'review' or 'intents.review'",
-    )
-    route_group.add_argument(
-        "--route-json",
-        help=(
-            "inline route packet JSON, an ATELIER_INTENT_ROUTE line, a full hook "
-            "JSON object, or a path to a JSON file"
-        ),
     )
     parser.add_argument(
         "--vault",
@@ -1464,7 +1370,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             vault=vault,
             intents_path=intents_path,
             intent=args.intent,
-            route_json=args.route_json,
             components=components,
             source_specs=args.source,
             effective_date=effective_date,
