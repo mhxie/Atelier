@@ -14,6 +14,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import PathsError, vault_root  # noqa: E402
+from routine_collect import strip_frontmatter  # noqa: E402
 from routine_digest_core import (  # noqa: E402
     DEFAULT_ROUTINE_LINES,
     _within_days,
@@ -498,6 +499,14 @@ def render(
     if manifest.get("skipped_routines"):
         skipped = ", ".join(html_mod.escape(s) for s in manifest["skipped_routines"])
         depth.append(f'<p style="{_S_NOTE}">Excluded from this digest: {skipped}.</p>')
+
+    # Inputs that failed or were skipped this run. They belong here, with the
+    # provenance, and not in a section above the fold: a missing Readwise
+    # pull changes nothing the reader does in the next twelve hours.
+    gaps = [str(g).strip() for g in (overview.get("gaps") or []) if str(g).strip()]
+    if gaps:
+        rendered = "<br>".join(html_mod.escape(g) for g in gaps)
+        depth.append(f'<p style="{_S_NOTE}">输入缺口<br>{rendered}</p>')
 
     depth.append(f'<hr style="{_S_RULE}">')
     depth.append(
@@ -1176,9 +1185,13 @@ def markdown_to_html(text: str, *, limit: int = DEEP_PER_SOURCE_CHARS) -> tuple[
     Images are removed outright: mail clients block remote images by default,
     so they cost bytes and a broken-image box and return nothing.
 
+    A leading frontmatter block is dropped first: it is machine bookkeeping
+    (`date:`, `type:`, channel counts) that read as stray paragraphs when the
+    raw-body fallback showed a routine file in full.
+
     Returns (html, truncated).
     """
-    body = _MD_IMAGE.sub("", text)
+    body = _MD_IMAGE.sub("", strip_frontmatter(text))
     truncated = len(body) > limit
     if truncated:
         cut = body[:limit]
@@ -1360,6 +1373,10 @@ def _render_source(source: dict[str, Any]) -> str:
     when = html_mod.escape(str(source.get("date", "")))
     headline = html_mod.escape(str(source.get("headline", "")))
     head = f"<strong>{label}</strong> · {when}"
+    if source.get("carried"):
+        # Dated before this window and delivered by no earlier daily digest:
+        # the routine finished after that morning's run.
+        head += f' <span style="{_S_TRACE}">补录</span>'
     if headline:
         head += f" · {headline}"
     if source.get("date_source"):

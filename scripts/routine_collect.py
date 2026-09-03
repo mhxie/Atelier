@@ -45,6 +45,15 @@ CONTEXT_SCHEMA = 1  # must match daily_context.CONTEXT_SCHEMA
 DIGEST_UPDATES_CONFIG = "_meta/digest_updates.toml"
 
 DIGEST_UPDATES_STATE = "_meta/digest_update_state.json"
+# Daily selection reaches back this many days for files no earlier daily
+# digest delivered. A routine that finishes after the morning run writes a
+# file dated today, and a strict one-day window tomorrow would never see it:
+# the Thursday finance routines run at 07:00 and 08:00, the digest at 06:00,
+# so their output was never digested at all. Carried files are marked in the
+# manifest and the delivered ledger stops them from repeating the day after.
+DAILY_CARRY_DAYS = 1
+# Delivered paths are kept this long so the ledger does not grow forever.
+DELIVERED_RETENTION_DAYS = 14
 
 # Research first. The fleet writes fourteen finance files for every research
 # one, and the curated depth is picked from what the manifest shows first, so
@@ -187,7 +196,7 @@ def load_update_sources(ov: Path) -> tuple[list[DigestUpdateSource], list[str]]:
         )
     return sources, warnings
 
-def load_update_state(ov: Path) -> tuple[dict[str, str], list[str]]:
+def _load_state_payload(ov: Path) -> tuple[dict[str, Any], list[str]]:
     path = ov / DIGEST_UPDATES_STATE
     if not path.is_file():
         return {}, []
@@ -197,10 +206,31 @@ def load_update_state(ov: Path) -> tuple[dict[str, str], list[str]]:
         return {}, [f"digest update state unreadable: {exc!r}"]
     if not isinstance(payload, dict) or payload.get("schema") != 1:
         return {}, ["digest update state has unsupported schema"]
+    return payload, []
+
+def load_update_state(ov: Path) -> tuple[dict[str, str], list[str]]:
+    payload, warnings = _load_state_payload(ov)
+    if warnings or not payload:
+        return {}, warnings
     daily = payload.get("daily")
     if not isinstance(daily, dict):
         return {}, ["digest update state daily cursor is invalid"]
     return {str(k): str(v) for k, v in daily.items() if isinstance(v, str)}, []
+
+def load_delivered_state(ov: Path) -> tuple[dict[str, str], list[str]]:
+    """{vault-relative path: effective date of the daily digest that carried it}.
+
+    Written by `write` for daily artifacts only. A path is skipped by a later
+    day's carry-back when its recorded date is earlier than that day, so a
+    same-day re-run reproduces the same selection and the next day drops it.
+    """
+    payload, warnings = _load_state_payload(ov)
+    if warnings or not payload:
+        return {}, warnings
+    delivered = payload.get("delivered", {})
+    if not isinstance(delivered, dict):
+        return {}, ["digest update state delivered ledger is invalid"]
+    return {str(k): str(v) for k, v in delivered.items() if isinstance(v, str)}, []
 
 def _markdown_cells(line: str) -> list[str]:
     raw = line.strip()
@@ -338,17 +368,45 @@ def collect_digest_updates(
     return selected, warnings
 
 def advance_update_state(ov: Path, manifest: dict[str, Any]) -> None:
-    """Mark daily updates as written, without claiming they were reviewed."""
-    if manifest.get("mode") != "daily" or not manifest.get("updates"):
+    """Mark daily updates and sources as written, without claiming they were reviewed.
+
+    Updates advance the per-ledger cursor. Sources are recorded in the
+    delivered ledger under the artifact's effective date; the first delivery
+    date wins, and entries older than DELIVERED_RETENTION_DAYS are dropped.
+    """
+    if manifest.get("mode") != "daily":
         return
+    delivered_on = str(manifest.get("window", {}).get("until", ""))[:10]
     current, _ = load_update_state(ov)
-    for item in manifest["updates"]:
+    delivered, _ = load_delivered_state(ov)
+    for item in manifest.get("updates") or []:
         current[str(item["source"])] = str(item["id"])
-    payload = {"schema": 1, "daily": dict(sorted(current.items()))}
+    if delivered_on:
+        for _lane, source in _iter_manifest_sources(manifest):
+            path = str(source.get("path", ""))
+            if path:
+                delivered.setdefault(path, delivered_on)
+        try:
+            floor = date.fromisoformat(delivered_on) - timedelta(days=DELIVERED_RETENTION_DAYS)
+            delivered = {k: v for k, v in delivered.items() if v[:10] >= floor.isoformat()}
+        except ValueError:
+            pass
+    if not current and not delivered:
+        return
+    payload = {
+        "schema": 1,
+        "daily": dict(sorted(current.items())),
+        "delivered": dict(sorted(delivered.items())),
+    }
     atomic_write(
         ov / DIGEST_UPDATES_STATE,
         json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
     )
+
+def _iter_manifest_sources(manifest: dict[str, Any]):
+    for lane in manifest.get("lanes", []):
+        for source in lane.get("sources", []):
+            yield lane.get("lane", ""), source
 
 def effective_date(now: datetime | None = None) -> date:
     """Today, or yesterday before 03:00 local -- the harness day boundary."""
@@ -408,6 +466,17 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not match:
         return {}, text
     return _parse_meta_lines(match.group(1)), text[match.end():]
+
+def strip_frontmatter(text: str) -> str:
+    """The body without a leading metadata block; a leading `---` rule stays.
+
+    For renderers that show a routine file in full: the fence and its
+    `key: value` lines are bookkeeping and read as noise in a mail client.
+    """
+    match = _FRONTMATTER.match(text)
+    if not match or not _looks_like_meta_block(match.group(1)):
+        return text
+    return text[match.end():]
 
 def _looks_like_meta_block(raw: str) -> bool:
     """True when a `---` fenced block is frontmatter, not a horizontal rule.
@@ -638,6 +707,7 @@ class Source:
     items: list[dict[str, str]]
     primary_urls: list[str] = field(default_factory=list)
     units: list[dict[str, Any]] = field(default_factory=list)
+    carried: bool = False
 
 def collect(
     ov: Path,
@@ -716,6 +786,38 @@ def collect(
             if truncated:
                 break
 
+    carry: dict[str, Any] | None = None
+    delivered_warnings: list[str] = []
+    if mode == "daily" and not unacked and days is None and since is None:
+        # Files dated just before the window that no earlier day's digest
+        # delivered: a routine that finished after yesterday's morning run.
+        delivered, delivered_warnings = load_delivered_state(ov)
+        carry_start = start - timedelta(days=DAILY_CARRY_DAYS)
+        carried = 0
+        already = 0
+        for routine in active:
+            directory = ov / routine.output_dir
+            if not directory.is_dir():
+                continue
+            for path in sorted(directory.glob(routine.file_pattern), key=lambda p: p.name):
+                when, when_source = file_date(path)
+                if not (carry_start <= when < start):
+                    continue
+                delivered_on = delivered.get(_vault_relative(ov, path))
+                if delivered_on and delivered_on < end.isoformat():
+                    already += 1
+                    continue
+                if len(sources) >= max_files:
+                    truncated = True
+                    break
+                source = _build_source(ov, path, routine, when, when_source, excerpt_chars, max_items)
+                source.carried = True
+                sources.append(source)
+                carried += 1
+            if truncated:
+                break
+        carry = {"days": DAILY_CARRY_DAYS, "files": carried, "already_delivered": already}
+
     sources.sort(key=lambda s: (s.date, s.label, s.name), reverse=True)
     lanes = _group_lanes(sources)
     updates, update_warnings = collect_digest_updates(
@@ -724,6 +826,7 @@ def collect(
         start=start,
         end=end,
     )
+    update_warnings = delivered_warnings + update_warnings
     ack_targets: dict[str, str] = {}
     for source in sources:
         directory = str(Path(source.path).parent)
@@ -750,6 +853,7 @@ def collect(
         "updates": updates,
         "update_warnings": update_warnings,
         "acks": ack_targets,
+        **({"carry": carry} if carry is not None else {}),
     }
 
 def collect_health(
@@ -923,6 +1027,8 @@ def _source_dict(source: Source) -> dict[str, Any]:
         data["items"] = source.items
     if source.primary_urls:
         data["primary_urls"] = source.primary_urls
+    if source.carried:
+        data["carried"] = True
     return data
 
 def load_overview(path: Path | None) -> dict[str, Any]:

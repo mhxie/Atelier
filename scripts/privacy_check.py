@@ -2,16 +2,20 @@
 """
 privacy_check.py: Detect private identifiers in public-bound repository files.
 
-Automated discovery sources:
+Terms come from the private-entity index `scripts/privacy_index.py` builds
+at `$OV/_meta/privacy_index.json` (directory names and paths, filename stems,
+wiki-link targets, routine and feature registries, note frontmatter, profile
+proper nouns; each with provenance), rebuilt automatically when missing or a
+day old. Two rules run over every public-bound source:
 
-  1. Filename stems: multi-word `*.md` stems under content dirs in `$OV/`.
-  2. Wiki-link targets: `[[...]]` references extracted from vault content.
-     Catches person names, private note titles, and concepts that may not
-     have their own files. Filtered to multi-word ASCII targets and any
-     non-ASCII targets to avoid false positives on system vocabulary.
-  3. Local exact terms: optional `profile/private_terms.txt`, one private
-     name, place, or preference phrase per line. `profile/private_slugs.txt`
-     remains the single-word compatibility list.
+  1. Term rule: any indexed term, case-insensitive with word boundaries.
+  2. Path rule: any path-shaped token that names a real directory under a
+     content tier of `$OV` (public tier segments from harness/paths.toml are
+     never hits). This is what catches `research/<private-dir>/` in prose.
+
+Optional `profile/private_terms.txt` (one phrase per line) and
+`profile/private_slugs.txt` (single words) still add explicit terms for what
+no vault source can derive.
 
 The scanner reads public-bound pathnames, working-tree content, and staged
 index blobs when they differ. A filename-only or partially staged leak
@@ -29,6 +33,10 @@ keeps an earlier leak from silently exempting itself forever.
 CLI:
     uv run scripts/privacy_check.py                   human report
     uv run scripts/privacy_check.py --json            machine-readable output
+    uv run scripts/privacy_check.py --range A..B      scan every commit in a
+                                                      history range (pre-push)
+    uv run scripts/privacy_check.py --why "<term>"    provenance of a term
+    uv run scripts/privacy_check.py --rebuild-index   refresh the index first
     uv run scripts/privacy_check.py --allow-empty-ov  exit 0 when $OV is unset
 
 Exit code: 0 if no hits, 1 if any hit (treat as ERROR), 2 on IO error or
@@ -302,6 +310,63 @@ def path_sources(files: list[str]) -> list[tuple[str, str, str]]:
     ]
 
 
+_PATH_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_./-])([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+)")
+
+
+def scan_vault_paths(paths: list[str], sources: list[tuple[str, str, str]]) -> list[dict]:
+    """Path rule: a path-shaped token whose prefix is a private vault directory."""
+    if not paths:
+        return []
+    private = {p.strip("/").casefold() for p in paths}
+    hits: list[dict] = []
+    for relative, source, content in sources:
+        if source == "path":
+            continue
+        seen: set[str] = set()
+        for i, line in enumerate(content.splitlines(), 1):
+            for m in _PATH_TOKEN_RE.finditer(line):
+                token = m.group(1).strip("/").casefold()
+                parts = token.split("/")
+                for k in range(1, len(parts) + 1):
+                    prefix = "/".join(parts[:k])
+                    if prefix in private:
+                        if prefix not in seen:
+                            seen.add(prefix)
+                            hits.append({"file": relative, "line": i, "private_title": prefix, "source": source,
+                                         "rule": "vault-path", "why": "a directory under a content tier of $OV"})
+                        break
+    return hits
+
+
+def range_sources(rev_range: str, repo_root: Path = REPO_ROOT) -> list[tuple[str, str, str]]:
+    """`(path, source, text)` for every file each commit in `rev_range` touched.
+
+    Intermediate commits count: a name added in one commit and removed two
+    commits later still ships in history.
+    """
+    commits = subprocess.run(
+        ["git", "rev-list", "--reverse", rev_range], cwd=repo_root, capture_output=True, text=True
+    ).stdout.split()
+    sources: list[tuple[str, str, str]] = []
+    for commit in commits:
+        short = commit[:7]
+        listing = subprocess.run(
+            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=AM", commit],
+            cwd=repo_root, capture_output=True, text=True,
+        ).stdout.splitlines()
+        for relative in (line.strip() for line in listing if line.strip()):
+            blob = subprocess.run(["git", "show", f"{commit}:{relative}"], cwd=repo_root, capture_output=True)
+            if blob.returncode != 0:
+                continue
+            try:
+                text = blob.stdout.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+            sources.append((relative, f"history:{short}", text))
+            sources.append((relative, "path", re.sub(r"[-_/\\]+", " ", relative)))
+    return sources
+
+
 def scan(terms: list[str], sources: list[tuple[str, str, str]]) -> list[dict]:
     """Case-insensitive scan with word boundaries for ASCII terms."""
     hits: list[dict] = []
@@ -387,6 +452,9 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument("--json", action="store_true", help="Emit JSON output.")
+    ap.add_argument("--range", default=None, metavar="A..B", help="Scan every commit in a git history range instead of the working tree.")
+    ap.add_argument("--why", default=None, metavar="TERM", help="Explain where a term comes from (or why it is not indexed) and exit.")
+    ap.add_argument("--rebuild-index", action="store_true", help="Rebuild $OV/_meta/privacy_index.json before scanning.")
     ap.add_argument(
         "--allow-empty-ov",
         action="store_true",
@@ -424,11 +492,11 @@ def main(argv: list[str] | None = None) -> int:
     private_slugs = load_private_slugs()
     private_terms = load_private_terms()
     coverage_warnings: list[str] = []
-    if not PRIVATE_TERMS.exists():
-        coverage_warnings.append(
-            "profile/private_terms.txt is absent; exact identity and preference "
-            "coverage depends on derived vault titles plus semantic review"
-        )
+    import privacy_index
+
+    if args.why:
+        print(json.dumps(privacy_index.explain(privacy_index.load_or_build(OV, allowlist=allowlist), args.why), ensure_ascii=False, indent=1))
+        return 0
     dirs = _discover_private_dirs(OV)
     if not dirs and not private_slugs and not private_terms and not args.allow_empty_ov:
         msg = (
@@ -451,29 +519,40 @@ def main(argv: list[str] | None = None) -> int:
         else:
             sys.stderr.write(msg + "\n")
         return 2
-    titles = collect_titles(OV, allowlist, dirs)
-    files = tracked_files()
-    sources = content_sources(files)
-    sources.extend(path_sources(files))
-    wikilinks = collect_wikilinks(OV, allowlist, dirs)
-    all_terms = sorted(set(titles) | wikilinks)
-    private_term_slugs = {
-        term.casefold()
-        for term in private_terms
-        if _SINGLE_ASCII_WORD_RE.fullmatch(term)
-    }
-    private_term_phrases = private_terms - {
-        term for term in private_terms if _SINGLE_ASCII_WORD_RE.fullmatch(term)
-    }
-    phrase_terms = sorted(set(all_terms) | private_term_phrases)
-    slug_terms = private_slugs | private_term_slugs
+    index = privacy_index.load_or_build(OV, force=args.rebuild_index, allowlist=allowlist)
+    index_terms: dict[str, dict] = index.get("terms", {})
+    counts = index.get("counts", {})
+    titles = [t for t, e in index_terms.items() if "stem" in e["kinds"]]
+    wikilinks = {t for t, e in index_terms.items() if "wikilink" in e["kinds"]}
+    if args.range:
+        sources = range_sources(args.range)
+        if not sources:
+            coverage_warnings.append(f"range {args.range} touched no readable files")
+    else:
+        files = tracked_files()
+        sources = content_sources(files)
+        sources.extend(path_sources(files))
+    explicit = set(index_terms) | private_terms
+    slug_terms = private_slugs | {t.casefold() for t in explicit if _SINGLE_ASCII_WORD_RE.fullmatch(t)}
+    phrase_terms = sorted(t for t in explicit if not _SINGLE_ASCII_WORD_RE.fullmatch(t))
     hits = scan(phrase_terms, sources) if phrase_terms else []
     hits.extend(scan_slugs(slug_terms, sources))
+    hits.extend(scan_vault_paths(index.get("paths", []), sources))
+    for hit in hits:
+        if "why" in hit:
+            continue
+        entry = next((e for t, e in index_terms.items() if t.casefold() == str(hit["private_title"]).casefold()), None)
+        hit["rule"] = "term"
+        hit["why"] = (f"{'/'.join(entry['kinds'])}: {entry['sources'][0]}" if entry and entry.get("sources") else "explicit private term or slug")
 
     if args.json:
         print(json.dumps({
             "action": "abort" if hits else "proceed",
             "ov_dir": OV.as_posix(),
+            "range": args.range,
+            "index_built": index.get("built"),
+            "index_counts": counts,
+            "paths_scanned": len(index.get("paths", [])),
             "filename_stems": len(titles),
             "wikilink_targets": len(wikilinks),
             "private_slugs": len(private_slugs),
@@ -484,15 +563,15 @@ def main(argv: list[str] | None = None) -> int:
             "coverage_warnings": coverage_warnings,
             "hit_count": len(hits),
             "hits": hits,
-        }, indent=2))
+        }, indent=2, ensure_ascii=False))
     else:
         if not hits:
+            kinds = ", ".join(f"{counts.get(k, 0)} {k}" for k in ("dir", "stem", "wikilink", "registry", "frontmatter", "profile"))
+            scope = f"history {args.range}" if args.range else "working tree"
             print(
-                f"privacy_check: clean ({len(phrase_terms) + len(slug_terms)} "
-                f"private terms scanned: {len(titles)} filename stems + "
-                f"{len(wikilinks)} wikilink targets + "
-                f"{len(private_slugs)} private slugs + "
-                f"{len(private_terms)} explicit private terms, 0 leaks)"
+                f"privacy_check: clean ({scope}; {len(phrase_terms) + len(slug_terms)} terms "
+                f"[{kinds}, {len(private_slugs)} slugs, {len(private_terms)} explicit] + "
+                f"{len(index.get('paths', []))} vault paths, 0 leaks)"
             )
             for warning in coverage_warnings:
                 print(f"privacy_check: coverage warning: {warning}", file=sys.stderr)
@@ -508,15 +587,15 @@ def main(argv: list[str] | None = None) -> int:
                 "path": " [pathname]",
                 "worktree": "",
             }.get(h.get("source"), f" [{h.get('source', 'unknown')}]")
-            print(f"  {h['file']}:{h['line']}{source}: {h['private_title']!r}")
+            print(f"  {h['file']}:{h['line']}{source}: {h['private_title']!r}  <- {h.get('why', '')}")
         for warning in coverage_warnings:
             print(f"privacy_check: coverage warning: {warning}", file=sys.stderr)
         print()
         print(
-            "Each line shows a private identifier from your $OV vault "
-            "(filename stem, [[wikilink]] target, or local private term) "
-            "appearing in a public-bound file. Replace with a generic placeholder, or add the term to "
-            "scripts/privacy_allowlist.txt if the exposure is deliberate."
+            "Each line shows a private identifier from your $OV vault appearing in a "
+            "public-bound file, with the source that indexed it. Replace it with a "
+            "placeholder or registry indirection; add it to scripts/privacy_allowlist.txt "
+            "only if the exposure is deliberate. `--why '<term>'` explains a term."
         )
 
     return 1 if hits else 0

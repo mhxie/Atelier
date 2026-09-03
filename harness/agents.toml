@@ -320,6 +320,7 @@ description = "Semantic privacy scanner for committed-file diffs. Catches leaks 
 codex_prompt = "Run the Privacy Reviewer role through native Codex agent `privacy-reviewer`; `.claude/agents/privacy-reviewer.md` remains authoritative."
 pattern = "generator-verifier"
 used_by = [
+    "commands.push",
     "commands.system-review",
 ]
 

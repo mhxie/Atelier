@@ -1157,8 +1157,31 @@ print(str(directory / f"{cycle}.log"))
 PY
 }
 
+# Warm the tool cache of every CLI the allowlist grants, outside the sandbox.
+# The Readwise CLI registers its subcommands from a 24-hour cache in
+# ~/.readwise-cli.json and rewrites that file when the cache is stale. Inside
+# workspace-write the home directory is not writable, so a stale cache made
+# `reader-list-documents` an unknown command and the digest lost its article
+# section. `--refresh --version` forces the fetch and the write here, where
+# the write is allowed, and exits without running any tool. Failure is a
+# warning: the routine then degrades exactly as it did before this step.
+warm_cli_caches() {
+    case ",$PERMISSION_ALLOWLIST," in
+        *",readwise:"*)
+            if command -v readwise >/dev/null 2>&1; then
+                if "${TIMEOUT_CMD[@]}" readwise --refresh --version </dev/null >/dev/null 2>&1; then
+                    runner_event "warm: readwise tool cache refreshed"
+                else
+                    runner_event "warning: readwise tool cache refresh failed; the CLI may reject subcommands inside the sandbox"
+                fi
+            fi
+            ;;
+    esac
+}
+
 MODEL_LOG=$(mktemp "${TMPDIR:-/tmp}/atelier-routine-model.XXXXXX")
 
+warm_cli_caches
 runner_event "starting: runtime=$RUNTIME command=$COMMAND"
 STARTED_AT=$(date +%s)
 export ATELIER_ACTIVE_RUNTIME="$RUNTIME"

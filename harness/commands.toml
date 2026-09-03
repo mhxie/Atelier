@@ -92,6 +92,14 @@ direct_only = true
 description = "Personal relationship management audit grounded in local relationship notes."
 codex_prompt = "Execute the $prm skill in this Codex thread using `.claude/commands/prm.md` as the authoritative spec."
 
+[commands.push]
+source = ".claude/commands/push.md"
+category = "ops"
+status = "portable-adapted"
+direct_only = true
+description = "Publish local commits after both privacy gates pass over the whole unpushed range."
+codex_prompt = "Execute the $push skill in this Codex thread using `.claude/commands/push.md` as the authoritative spec."
+
 [commands.introspect]
 source = ".claude/commands/introspect.md"
 category = "profile"

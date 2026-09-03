@@ -25,6 +25,10 @@ If the working tree is clean, stop and tell the user there is nothing to review.
 
 ### 1b. Privacy gate (blocking)
 
+The scan covers the working tree and staged blobs; before pushing, `/push`
+repeats it over the whole unpushed history so a name that lived in an
+intermediate commit cannot ship.
+
 ```bash
 uv run scripts/privacy_check.py --json
 ```

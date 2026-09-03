@@ -98,7 +98,7 @@ sources:
 - **Use vault-relative paths.** Wikilink resolvers expect paths from the vault root, not from the index file's directory. Write `[[abroad/raw/<sub>/<file>.pdf]]`, not `[[../abroad/...]]`.
 - **Include extension for non-md files.** PDFs, JPEGs, PNGs need the suffix to resolve: `[[abroad/raw/<sub>/<file>.pdf]]`. Markdown files omit `.md`: `[[abroad/timeline]]`.
 - **Multi-file cells separator: ` · `** (U+00B7 middle dot, not comma). Reads cleanly when the cell has 3+ links.
-- **Spaces in paths are fine** inside `[[]]` — no escaping needed. Folder names with parentheses (`Photos (2)`) work; avoid square brackets in paths since they collide with link syntax.
+- **Spaces in paths are fine** inside `[[]]` — no escaping needed. Folder names with parentheses (`Scans (old)`) work; avoid square brackets in paths since they collide with link syntax.
 - **For directory-level references** (no specific file), use plain backticks not wikilinks: `` `<domain>/raw/<sub>/` ``. Wikilinks don't address folders.
 - **Retrofitting plain date cells**: `scripts/log_backlinks.py` converts bare `YYYY-MM-DD` values in markdown-table date columns into `[[YYYY-MM-DD]]` daily-note wikilinks across an index file. Use it when adopting this convention on a pre-existing index.
 

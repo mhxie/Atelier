@@ -72,8 +72,8 @@ The 32 threshold is hard, not "rough". A directory at 32 should be split before 
 | `daily-notes/` | year, then month (two-level grouping keeps every level under 32; filename carries full ISO date) | `daily-notes/YYYY/MM/YYYY-MM-DD.md` |
 | `reflections/` | year-month | `reflections/YYYY-MM/YYYY-MM-DD-reflection.md` |
 | `agent-findings/` | year-month | `agent-findings/YYYY-MM/<agent>-<slug>.md` |
-| `preprints/<class>/` | venue | `preprints/unofficial-reviews/<venue><yy>/` |
-| `wiki/` (and any localized shadow wikis from `[paths.wiki_localized]`) | topic cluster (semantic) | `wiki/data-systems/<Topic Title>.md` |
+| `preprints/<class>/` | venue | `preprints/<class>/<venue><yy>/` |
+| `wiki/` (and any localized shadow wikis from `[paths.wiki_localized]`) | topic cluster (semantic) | `wiki/<cluster>/<Topic Title>.md` |
 | `research/<area>/labs/` | by org type or first-letter | `research/<area>/labs/<X>/<lab>/` |
 | `people/` | first-letter bucket: `A/`, …, `0-9/`, `中/` (CJK) | `people/<X>/<Person Name>.md` |
 | `archive/<subdir>` | first-letter bucket or topical sub-grouping (case-by-case) | `archive/<subdir>/<X>/<Item>.md` |
@@ -132,7 +132,7 @@ Reviewer-side detection of violations: `protocols/antipatterns.md` § 8 (Scope c
 
 ## Lint enforcement
 
-Atelier-side lint runs via `uv run scripts/harness_lint.py` (registered names, path-literal templating, doc-indirection cycles, etc.) and `uv run scripts/privacy_check.py` (public-bound pathnames and content checked against private titles, wikilinks, local exact terms, and divergent staged blobs). Both fire in `/lint` and `/system-review`. Personal exact terms live only in gitignored `profile/private_terms.txt`; the committed allowlist is reserved for deliberately public literals and is honored by both mechanical and semantic privacy gates.
+Atelier-side lint runs via `uv run scripts/harness_lint.py` (registered names, path-literal templating, doc-indirection cycles, etc.) and `uv run scripts/privacy_check.py`. The privacy gate scans public-bound pathnames, content, and divergent staged blobs against the private-entity index that `scripts/privacy_index.py` derives from the vault (directory names and paths, note stems, wikilinks, routine and feature registries, frontmatter, profile proper nouns, each with provenance; rebuilt when a day old), plus a path rule that flags any real content-tier directory named in prose. Both fire in `/lint` and `/system-review`; `/push` runs the mechanical gate over the whole unpushed history (`--range`) and the semantic privacy-reviewer over the same range before anything leaves the machine, and `scripts/hooks/pre-push` repeats the mechanical range scan (`git config core.hooksPath scripts/hooks`). `profile/private_terms.txt` and `profile/private_slugs.txt` stay for what no vault source can derive; the committed allowlist is reserved for deliberately public literals and is honored by both gates. `privacy_check.py --why "<term>"` explains any hit.
 
 Vault-side lint for the conventions in this doc (folder fission, image placement, image naming, ISO date strings) is currently manual. A consolidated `scripts/vault_lint.py` is deferred until two distinct conventions need automated enforcement at once; until then, the fission rule is enforced by `scripts/aggregate_freshness.py` only for self-declaring aggregates, and image / date conventions are honored by hand.
 

@@ -9,11 +9,16 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from datetime import date
 from pathlib import Path
 from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+# Research subdirectories get run-unique names: a fixed literal subdirectory name
+# in this file would be a real vault path during the plan gate's privacy scan.
+LAB_A = f"lab-{uuid.uuid4().hex[:6]}"
+LAB_B = f"lab-{uuid.uuid4().hex[:6]}"
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import _paths  # noqa: E402
 import autoevo_run  # noqa: E402
@@ -45,8 +50,8 @@ def _make_vault(tmp: str) -> Path:
     vault = Path(tmp).resolve() / "vault"
     for seg in (
         "wip",
-        "research/alpha",
-        "research/beta",
+        f"research/{LAB_A}",
+        f"research/{LAB_B}",
         "research/cache",
         "reflections",
         "cache",
@@ -80,11 +85,11 @@ class PlanTest(unittest.TestCase):
     def test_ready_plan_rotates_and_filters_quarantine(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-run-") as tmp:
             vault = _make_vault(tmp)
-            # Quarantine research/alpha; day 3 over the 1 remaining live subdir
-            # must pick beta, and the excluded `cache` subdir never appears.
+            # Quarantine the first lab; day 3 over the 1 remaining live subdir
+            # must pick the second, and the excluded `cache` subdir never appears.
             (vault / "_meta" / "autoevo_quarantine.toml").write_text(
                 "[[quarantine]]\n"
-                f'scope = "{vault / "research" / "alpha"}"\n'
+                f'scope = "{vault / "research" / LAB_A}"\n'
                 'first_failed = "2099-06-01"\n'
                 "consecutive_failures = 3\n"
                 'reason = "forgetter_no_envelope"\n'
@@ -100,7 +105,7 @@ class PlanTest(unittest.TestCase):
                 scopes,
                 [
                     str(vault / "wip"),
-                    str(vault / "research" / "beta"),
+                    str(vault / "research" / LAB_B),
                     str(vault / "reflections"),
                 ],
             )
@@ -364,7 +369,7 @@ class RouteBandsTest(unittest.TestCase):
                 _old(path, 60)
             fresh = vault / "wip" / "fresh.md"
             fresh.write_text("fresh\n", encoding="utf-8")
-            outside = vault / "research" / "alpha" / "o.md"
+            outside = vault / "research" / LAB_A / "o.md"
             outside.write_text("o\n", encoding="utf-8")
             _old(outside, 60)
             low = vault / "wip" / "low.md"
@@ -376,7 +381,7 @@ class RouteBandsTest(unittest.TestCase):
             rows = [
                 {"category": "redundant", "confidence": "high", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md", "wip/d.md"], "scores": [0.9, 0.88, 0.86], "mode": "real"},
                 {"category": "redundant", "confidence": "high", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md", "wip/fresh.md"], "scores": [0.9, 0.88, 0.86], "mode": "real"},
-                {"category": "redundant", "confidence": "high", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md", "research/alpha/o.md"], "scores": [0.9, 0.88, 0.86], "mode": "real"},
+                {"category": "redundant", "confidence": "high", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md", f"research/{LAB_A}/o.md"], "scores": [0.9, 0.88, 0.86], "mode": "real"},
                 {"category": "redundant", "confidence": "high", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md", "wip/d.md"], "scores": [0.9, 0.88, 0.86], "mode": "stub"},
                 {"category": "redundant", "confidence": "medium", "candidate": "wip/a.md", "peers": ["wip/b.md", "wip/c.md"], "scores": [0.5, 0.4], "mode": "real"},
                 {"category": "low-signal", "confidence": "high", "candidate": "wip/low.md", "conditions_met": 5},

@@ -60,6 +60,13 @@ fi
 "$PY" scripts/daily_context.py ${PLACE:+--place "$PLACE"} --json --out "$SCRATCH/context.json" && CONTEXT=1
 ```
 
+The scheduled run passes `--offline` to `daily_context.py`: its allowlist
+grants no web action, so the script must not fetch weather there, and the
+flag says so instead of leaving the model to skip the whole script and lose
+the quota half, which never touches the network. Weather in the unattended
+document needs an explicit permission in the profile, and that changes the
+profile fingerprint, so the permission smokes must be re-run first.
+
 `PLACE` is where the day is spent, and it is the one input here that needs
 judgment: interactively, read today's calendar, take the city of the first
 located event, and pass it as a city name (`"Lisbon"`), not an address. Leave
@@ -85,6 +92,16 @@ tracking cache but never refreshes it. The independent, owner-gated
 `com.atelier.tracking-refresh` deterministic routine owns AniList and concert
 cache refreshes before this procedure runs; a missed or failed refresh appears
 as a brief warning instead of turning the digest into a network retry path.
+
+The daily selection is the effective day plus a one-day carry: files dated
+yesterday that no earlier daily digest delivered. Routines that finish after
+the morning run (the Thursday finance pair runs at 07:00 and 08:00, the digest
+at 06:00) write files dated that day, and without the carry they were never
+digested. `write` records every delivered path with the artifact's date in
+`$OV/_meta/digest_update_state.json`; the next day's carry skips those, while
+a same-day re-run reproduces the same selection. Carried sources are marked
+`carried` in the manifest and `补录` in the source index. `--days` or
+`--since` disables the carry.
 
 For backlog, swap the window for `--unacked --max-files 40`.
 
@@ -199,6 +216,18 @@ Write `$SCRATCH/overview.json`:
 does not match renders as `(unmatched)` in the document, which is a visible
 signal that a bullet cited something it did not read. Copy the paths, do not
 retype them.
+
+Inputs that failed or were skipped this run (the Readwise pull, the context,
+the brief) go into a top-level `gaps` array, one short line each:
+
+```json
+"gaps": ["Readwise CLI unavailable in the sandbox; no 新文章 this run."]
+```
+
+The renderer places them in the colophon, below the fold. Never write a
+section for them: a missing input changes nothing the reader does in the next
+twelve hours, and a section above the fold spends that attention on
+bookkeeping.
 
 Section order for **daily**:
 
@@ -412,6 +441,12 @@ history.
   approves the write.
 - Harness-maintenance output (the nightly decay sweep) is excluded by default and
   belongs to `/autoevo-review`.
+- The Readwise CLI registers its subcommands from a 24-hour tool cache in the
+  home directory and rewrites it when stale; inside the routine sandbox that
+  write fails and every subcommand becomes unknown. `routine_runner.sh` warms
+  the cache outside the sandbox before launching any routine whose allowlist
+  carries a `readwise:` permission, so this does not depend on someone having
+  used the CLI interactively in the last day.
 - The brief's line cap never folds forfeitable items. When it reports `over_cap`,
   that is a real signal that too much is closing at once, not a formatting
   problem to fix.

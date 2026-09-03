@@ -25,8 +25,13 @@ digest procedure could read the calendar, otherwise from the private
 unattended run uses. No place, no weather. Open-Meteo needs no key. A failed
 fetch becomes a warning, never a missing document.
 
+``--offline`` skips the weather fetch even when a place is configured, so a
+run whose action allowlist grants no web access can still carry the quota
+half, which never touches the network. The skip is reported as a warning
+when a place was configured, so the reader knows why the masthead is bare.
+
 Usage:
-    daily_context.py [--place "Lisbon"] [--date YYYY-MM-DD] --json [--out F]
+    daily_context.py [--place "Lisbon"] [--offline] [--date YYYY-MM-DD] --json [--out F]
 """
 
 from __future__ import annotations
@@ -363,6 +368,7 @@ def build(
     codex_sessions: Path | None = None,
     weather_fetcher=fetch_weather,
     ov: Path | None = None,
+    offline: bool = False,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
     home = Path.home()
@@ -392,7 +398,9 @@ def build(
             region_arg = region_arg or configured.get("region")
             country_arg = country_arg or configured.get("country")
             place_source = "config"
-    if place:
+    if place and offline:
+        warnings.append(f"weather skipped for {place!r}: --offline (no web access in this run)")
+    elif place:
         try:
             weather = weather_fetcher(place, day, region_arg, country_arg)
             if weather is not None:
@@ -434,12 +442,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--region", help="State or province to disambiguate the place.")
     parser.add_argument("--country", help="Two-letter country code to disambiguate the place.")
     parser.add_argument("--date", help="Forecast date YYYY-MM-DD (default today).")
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Never fetch weather; quota only. For runs without web access.",
+    )
     parser.add_argument("--json", action="store_true", help="JSON instead of a text report.")
     parser.add_argument("--out", help="Write to a file instead of stdout.")
     args = parser.parse_args(argv)
 
     day = date.fromisoformat(args.date) if args.date else datetime.now().date()
-    context = build(day, place=args.place, region=args.region, country=args.country)
+    context = build(
+        day, place=args.place, region=args.region, country=args.country, offline=args.offline
+    )
     payload = json.dumps(context, ensure_ascii=False, indent=2) if args.json else text_view(context)
     if args.out:
         Path(args.out).write_text(payload + "\n", encoding="utf-8")

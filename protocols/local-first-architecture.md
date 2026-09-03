@@ -189,7 +189,7 @@ The convention is to make the upstream link bidirectional at creation time and t
 - **Closure form is a backfill receipt** — when the executor completes an item, the corresponding planner row is rewritten as `- [x] <task> → backfilled <upstream-path>#<row> @YYYY-MM-DD`. Status (done) and provenance (where the work landed) travel together.
 - **Backfill happens in the same turn/commit as the close.** Closing the executor item without touching the planner is the bug; the two edits are a single atomic transaction.
 
-This convention is forward-looking — existing planner/executor pairs are not retrofitted. It crystallized from two instances where downstream work completed but upstream planning files lagged: a `<paths.travel>/honeymoon` booking thread on 2026-05-16 and the `<paths.travel>/26-japan-visa` project on 2026-05-17.
+This convention is forward-looking — existing planner/executor pairs are not retrofitted. It crystallized from two instances where downstream work completed but upstream planning files lagged: a `<paths.travel>/honeymoon` booking thread on 2026-05-16 and the `<paths.travel>`<paths.abroad>/<case>` project on 2026-05-17.
 
 A deferred primitive — `scripts/handoff_backfill_check.py` — would scan executor files with `upstream:` frontmatter and flag closed items whose upstream row is still unchecked. Marked `[deferred]` until rule-of-three: one more instance and the script becomes worth writing.
 

@@ -220,6 +220,25 @@ class ConfigPlaceTests(unittest.TestCase):
             self.assertEqual(seen[-1], ("Porto", None))
             self.assertEqual(explicit["weather"]["place_source"], "argument")
 
+    def test_offline_skips_the_fetch_and_says_why(self):
+        """A run whose allowlist grants no web access still gets the quota half."""
+        calls = []
+
+        def fake(place, day, region=None, country=None):
+            calls.append(place)
+            return {"place": place, "tmin": 1, "tmax": 2, "summary": "晴", "precip_probability": 0, "hours": []}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ov = Path(tmp)
+            (ov / "_meta").mkdir()
+            (ov / "_meta" / "digest.toml").write_text('[weather]\nplace = "Lisbon"\n', encoding="utf-8")
+            context = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov, weather_fetcher=fake, ov=ov, offline=True)
+            self.assertEqual(calls, [])
+            self.assertIsNone(context["weather"])
+            self.assertTrue(any("--offline" in w for w in context["warnings"]))
+            bare = dc.build(date(2026, 9, 2), place=None, now=NOW, claude_cache=ov, codex_sessions=ov / "none", weather_fetcher=fake, ov=ov / "none", offline=True)
+            self.assertFalse(any("--offline" in w for w in bare["warnings"]))
+
     def test_no_place_anywhere_means_no_weather_and_no_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             ov = Path(tmp)

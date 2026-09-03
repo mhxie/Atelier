@@ -422,7 +422,9 @@ class CollectTests(unittest.TestCase):
     def test_daily_updates_use_a_delivery_cursor_not_the_date_window(self):
         # The row was checked yesterday, after that morning's report. It must
         # land in today's daily artifact and then disappear from the next run.
-        manifest = rd.collect(self.vault, mode="daily", until="2099-01-31")
+        # --days 1 keeps this about the update cursor: the default daily
+        # selection would also carry yesterday's undelivered feed file.
+        manifest = rd.collect(self.vault, mode="daily", until="2099-01-31", days=1)
         self.assertEqual(manifest["counts"]["files"], 0)
         self.assertEqual(len(manifest["updates"]), 2)
         self.assertEqual(manifest["updates"][0]["values"]["Period"], "2099-01")
@@ -457,6 +459,62 @@ class CollectTests(unittest.TestCase):
         self.assertTrue(manifest["truncated"])
         self.assertEqual(manifest["counts"]["files"], 2)
 
+    def test_daily_carries_yesterdays_undelivered_file_and_says_so(self):
+        """A routine that finishes after the morning run writes a file dated
+        today; a strict one-day window tomorrow would never see it."""
+        manifest = rd.collect(self.vault, mode="daily", until="2099-01-31")
+        sources = [s for _, s in rd.iter_sources(manifest)]
+        self.assertEqual([s["name"] for s in sources], ["2099-01-30-feed.md"])
+        self.assertTrue(sources[0]["carried"])
+        self.assertEqual(
+            manifest["carry"], {"days": rd.DAILY_CARRY_DAYS, "files": 1, "already_delivered": 0}
+        )
+        # The reach is one day, not a backlog: the 01-28 scan is not carried
+        # into 01-30, and today's own files are never marked carried.
+        today = rd.collect(self.vault, mode="daily", until="2099-01-30")
+        names = [s["name"] for _, s in rd.iter_sources(today)]
+        self.assertEqual(names, ["2099-01-30-feed.md"])
+        self.assertNotIn("carried", next(s for _, s in rd.iter_sources(today)))
+        self.assertEqual(today["carry"]["files"], 0)
+
+    def test_delivered_file_is_not_carried_again_but_a_same_day_rerun_repeats(self):
+        first = rd.collect(self.vault, mode="daily", until="2099-01-30")
+        rd.write(self.vault, rd.render(first), first, routine_name="digest-writer")
+        state = json.loads(
+            (self.vault / rd.DIGEST_UPDATES_STATE).read_text(encoding="utf-8")
+        )
+        self.assertEqual(state["delivered"]["inbox/feed/2099-01-30-feed.md"], "2099-01-30")
+
+        rerun = rd.collect(self.vault, mode="daily", until="2099-01-30")
+        self.assertEqual([s["name"] for _, s in rd.iter_sources(rerun)], ["2099-01-30-feed.md"])
+
+        tomorrow = rd.collect(self.vault, mode="daily", until="2099-01-31")
+        self.assertEqual(tomorrow["counts"]["files"], 0)
+        self.assertEqual(tomorrow["carry"], {"days": 1, "files": 0, "already_delivered": 1})
+
+    def test_delivered_ledger_is_pruned_and_keeps_the_first_date(self):
+        state_path = self.vault / rd.DIGEST_UPDATES_STATE
+        state_path.write_text(
+            json.dumps({"schema": 1, "daily": {}, "delivered": {"old/file.md": "2098-12-01"}}),
+            encoding="utf-8",
+        )
+        first = rd.collect(self.vault, mode="daily", until="2099-01-30")
+        rd.write(self.vault, rd.render(first), first, routine_name="digest-writer")
+        later = rd.collect(self.vault, mode="daily", until="2099-01-31")
+        rd.write(self.vault, rd.render(later), later, routine_name="digest-writer")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("old/file.md", state["delivered"])
+        self.assertEqual(state["delivered"]["inbox/feed/2099-01-30-feed.md"], "2099-01-30")
+
+    def test_explicit_window_flags_disable_the_carry(self):
+        by_days = rd.collect(self.vault, mode="daily", until="2099-01-31", days=1)
+        self.assertEqual(by_days["counts"]["files"], 0)
+        self.assertNotIn("carry", by_days)
+        by_since = rd.collect(self.vault, mode="daily", since="2099-01-31", until="2099-01-31")
+        self.assertNotIn("carry", by_since)
+        weekly = rd.collect(self.vault, mode="weekly", until="2099-01-31")
+        self.assertNotIn("carry", weekly)
+
 
 class RenderTests(unittest.TestCase):
     def setUp(self):
@@ -475,6 +533,21 @@ class RenderTests(unittest.TestCase):
         self.assertEqual(rd.digest_title(daily), "Atelier Daily — 2099-01-30")
         backlog = rd.collect(self.vault, mode="weekly", until="2099-01-30", unacked=True)
         self.assertIn("backlog", rd.digest_title(backlog))
+
+    def test_carried_source_is_labelled_in_the_index(self):
+        manifest = rd.collect(self.vault, mode="daily", until="2099-01-31")
+        html = rd.render(manifest)
+        self.assertIn("补录", html)
+        self.assertNotIn("补录", rd.render(self.manifest))
+
+    def test_gaps_render_in_the_colophon_never_as_a_section(self):
+        overview = {"schema": 1, "headline": "h", "sections": [], "gaps": ["Readwise CLI unavailable"]}
+        html = rd.render(self.manifest, overview)
+        fold = html.index("以上 ")
+        self.assertGreater(html.index("Readwise CLI unavailable"), fold)
+        self.assertGreater(html.index("输入缺口"), fold)
+        self.assertNotIn("<h2 style=\"" + rd._S_H2 + "\">输入缺口", html)
+        self.assertNotIn("输入缺口", rd.render(self.manifest, {"schema": 1, "headline": "h", "sections": []}))
 
     def test_brief_renders_above_the_overview(self):
         """The action surface is the first screen, ahead of the intel overview."""
@@ -863,8 +936,8 @@ class CliTests(unittest.TestCase):
     def test_update_only_daily_manifest_still_writes(self):
         manifest_path = Path(self.tmp.name) / "updates.json"
         proc = self._run(
-            "collect", "--mode", "daily", "--until", "2099-01-31", "--json",
-            "--out", str(manifest_path),
+            "collect", "--mode", "daily", "--until", "2099-01-31", "--days", "1",
+            "--json", "--out", str(manifest_path),
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -1299,6 +1372,16 @@ class MarkdownSubsetTests(unittest.TestCase):
     def test_a_short_report_is_not_flagged_truncated(self):
         _html, truncated = rd.markdown_to_html("just a line", limit=500)
         self.assertFalse(truncated)
+
+    def test_leading_frontmatter_is_dropped_but_a_rule_is_kept(self):
+        """The raw-body fallback showed `date:` and `type:` as paragraphs."""
+        html, _ = rd.markdown_to_html(TECH_DIGEST)
+        self.assertNotIn("type: feed", html)
+        self.assertNotIn("item_count: 2", html)
+        self.assertIn("Daily Feed Digest", html)
+        ruled, _ = rd.markdown_to_html("para one\n\n---\n\npara two\n")
+        self.assertIn("para one", ruled)
+        self.assertIn("para two", ruled)
 
 
 class AttentionBudgetTests(unittest.TestCase):

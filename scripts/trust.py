@@ -636,7 +636,7 @@ def load_wiki(as_of: date, only: Path | None = None) -> list[WikiNote]:
 
     notes: list[WikiNote] = []
     # rglob (recursive): wiki entries live in domain subdirectories
-    # (ml-models/, rl-infra/, ...), not at the top level. A non-recursive
+    # (one directory per domain cluster), not at the top level. A non-recursive
     # glob silently scanned 0 entries after the corpus was reorganized into
     # subdirs. `excluded` matches by basename, so per-subdir index.md files
     # are skipped too.

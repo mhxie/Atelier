@@ -80,9 +80,13 @@ overrides that.
 
 Window semantics: `--mode daily` covers one effective day, `--mode weekly` the
 7 days ending on it. Before 03:00 local the effective day is the previous date,
-matching the day boundary the rest of the harness uses. `--unacked` ignores the
-window entirely and takes everything past each directory's ack, for clearing
-backlog.
+matching the day boundary the rest of the harness uses. The default daily
+selection also carries back files dated the previous day that no earlier daily
+digest delivered (a routine that finished after that morning's run); `write`
+records delivered paths in `_meta/digest_update_state.json`, and the manifest
+marks carried sources so the document can label them. `--days` or `--since`
+disables the carry. `--unacked` ignores the window entirely and takes
+everything past each directory's ack, for clearing backlog.
 
 Exit codes: 0 on success. An empty window is a success that writes nothing, by
 design: a digest with no content is worse than an absent one, and the routine
@@ -157,6 +161,10 @@ from routine_collect import (  # noqa: E402,F401  (re-exported public surface)
     load_context,
     load_retrospect,
     load_brief,
+    DAILY_CARRY_DAYS,
+    DELIVERED_RETENTION_DAYS,
+    load_delivered_state,
+    strip_frontmatter,
 )
 from routine_digest_core import (  # noqa: E402,F401  (re-exported public surface)
     MANIFEST_SCHEMA,
