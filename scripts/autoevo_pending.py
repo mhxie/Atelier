@@ -18,13 +18,32 @@ Subcommands (all print one JSON object):
   auto-dismiss --today D    Mark pending entries with surface_count >= 3 or
                             proposed_at older than --max-age-days (default
                             30) as auto-dismissed.
-  resolve --id X --status applied|dismissed [--reason R]
-                            Record a /autoevo-review decision (sets
-                            resolved_at, which anchors the dedupe window).
-  defer --id X              Increment surface_count, bump last_surfaced.
+  resolve --id X --status applied|dismissed --reason R
+                            Record a decision (sets resolved_at, which
+                            anchors the dedupe window) and write it to the
+                            decision ledger. The reason is mandatory: it is
+                            what turns a click into a precedent.
+  set-default --id X --action A
+                            Give one pending entry a default (stale-banner |
+                            dismiss) with a fresh veto window; used by the
+                            precedent judge (scripts/precedent.py).
+  defer --id X              Increment surface_count, bump last_surfaced, and
+                            push a pending default's veto deadline out again.
+  veto-expired --today D    Pending entries whose `default_at` has passed:
+                            the nightly applies their `default_action`.
+  stamp-defaults --today D  One-time migration: give already-pending eligible
+                            entries a default with a fresh window from today.
   list [--status S]         Entries, optionally filtered.
 
-Entry fields follow protocols/autoevo.md § Pending queue.
+Default-with-veto: an entry may carry `default_action` / `default_at`.
+`append --rule-defaults` stamps the fixed DEFAULT_ACTIONS rule (proposed_at
++ DEFAULT_VETO_DAYS) on eligible categories; without the flag, defaults come
+only from `set-default`, which the precedent judge calls after reading the
+ledger. The veto is the action that contradicts the default: skip (dismissed)
+vetoes `stale-banner`, apply vetoes `dismiss`; skipping a `dismiss` default
+agrees with it. Defer pushes the deadline; the nightly applies what nobody
+vetoed. Entry fields follow
+protocols/autoevo.md § Pending queue.
 """
 
 from __future__ import annotations
@@ -37,12 +56,25 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write as _atomic_write, tier_segments, vault_root  # noqa: E402
+from _paths import atomic_write as _atomic_write, parse_iso_date, tier_segments, vault_root  # noqa: E402
+import decisions  # noqa: E402  (the human-decision ledger; resolve/defer write one line each)
 
 REQUIRED = ("id", "category", "proposed_action", "evidence_summary", "proposed_at", "status")
 CATEGORIES = {"redundant", "time-stale-A", "time-stale-B", "contradicted", "low-signal"}
 STATUSES = {"pending", "applied", "dismissed", "auto-dismissed"}
 DEDUPE_STATUSES = STATUSES  # dedupe protects every resolved state, deliberately the same set
+DEFAULT_VETO_DAYS = 14
+DEFAULT_ACTIONS = {"time-stale-A": "stale-banner"}
+DEFAULT_ELIGIBLE_TIERS = ("wip", "research")
+SETTABLE_DEFAULTS = ("stale-banner", "dismiss")
+# Categories a precedent default may touch at all, for EITHER action. The
+# never-inferred list in protocols/decision-ledger.md § What is never inferred
+# carves out `contradicted` (a wiki rewrite needs human approval) and
+# `time-stale-B` (era judgments are intent-laden; protocols/autoevo.md § Log to
+# pending queue says never auto-act). An allowlist rather than a denylist so a
+# category added later stays human until someone decides otherwise.
+PRECEDENT_ELIGIBLE_CATEGORIES = ("redundant", "time-stale-A", "low-signal")
+LEDGER_VERDICT = {"applied": "apply", "dismissed": "dismiss"}
 
 
 def queue_path() -> Path:
@@ -91,7 +123,8 @@ def _toml_value(value: object) -> str:
 
 ENTRY_KEY_ORDER = (
     "id", "category", "proposed_action", "evidence_summary", "proposed_at",
-    "last_surfaced", "surface_count", "status", "peers", "dismiss_reason", "resolved_at",
+    "last_surfaced", "surface_count", "status", "default_action", "default_at",
+    "peers", "dismiss_reason", "resolved_at",
 )
 
 
@@ -149,10 +182,26 @@ def _norm_peers(peers: object) -> tuple[str, ...]:
 
 
 def _parse_date(value: object) -> date | None:
-    try:
-        return date.fromisoformat(str(value)[:10])
-    except (TypeError, ValueError):
+    return parse_iso_date(value)
+
+
+def default_eligible_prefixes() -> tuple[str, ...]:
+    segments = tier_segments()
+    return tuple(f"{segments.get(key, key)}/" for key in DEFAULT_ELIGIBLE_TIERS)
+
+
+def default_for(entry: dict) -> str | None:
+    """The default action an unvetoed entry receives, or None (stays human)."""
+    action = DEFAULT_ACTIONS.get(str(entry.get("category")))
+    if not action:
         return None
+    peers = _norm_peers(entry.get("peers"))
+    if not peers:
+        return None
+    prefixes = default_eligible_prefixes()
+    if not all(peer.startswith(prefixes) for peer in peers):
+        return None
+    return action
 
 
 def validate_entry(entry: dict) -> list[str]:
@@ -255,6 +304,11 @@ def cmd_append(args: argparse.Namespace) -> int:
             continue
         entry.setdefault("last_surfaced", entry["proposed_at"])
         entry.setdefault("surface_count", 0)
+        default_action = default_for(entry) if args.rule_defaults else None
+        if default_action:
+            proposed = _parse_date(entry["proposed_at"]) or today
+            entry["default_action"] = default_action
+            entry["default_at"] = (proposed + timedelta(days=args.veto_days)).isoformat()
         existing.append(entry)
         existing_ids.add(entry["id"])
         if peers:
@@ -310,27 +364,48 @@ def cmd_auto_dismiss(args: argparse.Namespace) -> int:
     return 0
 
 
+def resolve_entry(
+    path: Path, entry_id: str, status: str, reason: str, *, today: date,
+    source: str = "autoevo-review", by: str = "human", ledger: Path | None = None,
+    explicit_today: bool = False,
+) -> dict:
+    """Mark one entry applied or dismissed and write the decision ledger line."""
+    data = load(path)
+    for entry in data["pending"]:
+        if entry.get("id") != entry_id:
+            continue
+        if entry.get("status") != "pending":
+            return {"error": f"{entry_id} is {entry.get('status')}, not pending"}
+        entry["status"] = status
+        entry["resolved_at"] = today.isoformat()
+        entry["last_surfaced"] = today.isoformat()
+        entry["dismiss_reason"] = reason
+        atomic_write(path, render(data))
+        line = decisions.record_best_effort(
+            cls=f"autoevo/{entry.get('category')}",
+            subject=str(entry.get("id")),
+            verdict=LEDGER_VERDICT[status],
+            reason=reason,
+            features=decisions.autoevo_features(entry),
+            source=source,
+            by=by,
+            ts=f"{today.isoformat()}T00:00:00" if explicit_today else None,
+            path=ledger,
+        )
+        return {"queue": str(path), "resolved": entry_id, "status": status, "ledger": "recorded" if line else "skipped"}
+    return {"error": f"no entry with id {entry_id}"}
+
+
 def cmd_resolve(args: argparse.Namespace) -> int:
     """Mark one entry applied or dismissed (the /autoevo-review write path)."""
     path = queue_path() if args.queue is None else Path(args.queue)
-    data = load(path)
     today = _parse_date(args.today) or date.today()
-    for entry in data["pending"]:
-        if entry.get("id") != args.id:
-            continue
-        if entry.get("status") != "pending":
-            print(json.dumps({"error": f"{args.id} is {entry.get('status')}, not pending"}))
-            return 1
-        entry["status"] = args.status
-        entry["resolved_at"] = today.isoformat()
-        entry["last_surfaced"] = today.isoformat()
-        if args.reason:
-            entry["dismiss_reason"] = args.reason
-        atomic_write(path, render(data))
-        print(json.dumps({"queue": str(path), "resolved": args.id, "status": args.status}, sort_keys=True))
-        return 0
-    print(json.dumps({"error": f"no entry with id {args.id}"}))
-    return 1
+    result = resolve_entry(
+        path, args.id, args.status, args.reason, today=today, source=args.source, by=args.by,
+        ledger=Path(args.ledger) if args.ledger else None, explicit_today=bool(args.today),
+    )
+    print(json.dumps(result, sort_keys=True))
+    return 0 if "error" not in result else 1
 
 
 def cmd_defer(args: argparse.Namespace) -> int:
@@ -346,11 +421,147 @@ def cmd_defer(args: argparse.Namespace) -> int:
             return 1
         entry["surface_count"] = int(entry.get("surface_count", 0)) + 1
         entry["last_surfaced"] = today.isoformat()
+        payload = {"queue": str(path), "deferred": args.id, "surface_count": entry["surface_count"]}
+        if entry.get("default_at"):
+            # The user looked and asked for more time: a fresh veto window.
+            entry["default_at"] = (today + timedelta(days=DEFAULT_VETO_DAYS)).isoformat()
+            payload["default_at"] = entry["default_at"]
         atomic_write(path, render(data))
-        print(json.dumps({"queue": str(path), "deferred": args.id, "surface_count": entry["surface_count"]}, sort_keys=True))
+        if args.reason:
+            line = decisions.record_best_effort(
+                cls=f"autoevo/{entry.get('category')}", subject=str(entry.get("id")), verdict="defer",
+                reason=args.reason, features=decisions.autoevo_features(entry), source="autoevo-review",
+                by="human", path=Path(args.ledger) if args.ledger else None,
+            )
+            payload["ledger"] = "recorded" if line else "skipped"
+        print(json.dumps(payload, sort_keys=True))
         return 0
     print(json.dumps({"error": f"no entry with id {args.id}"}))
     return 1
+
+
+def cmd_set_default(args: argparse.Namespace) -> int:
+    """Give one pending entry a default with a fresh veto window."""
+    path = queue_path() if args.queue is None else Path(args.queue)
+    data = load(path)
+    today = _parse_date(args.today) or date.today()
+    for entry in data["pending"]:
+        if entry.get("id") != args.id:
+            continue
+        if entry.get("status") != "pending":
+            print(json.dumps({"error": f"{args.id} is {entry.get('status')}, not pending"}))
+            return 1
+        category = str(entry.get("category"))
+        if category not in PRECEDENT_ELIGIBLE_CATEGORIES:
+            print(json.dumps({"error": f"{args.id} category {category!r} is never inferred; it stays a human decision"}))
+            return 1
+        if args.action == "stale-banner" and default_for(entry) != "stale-banner":
+            print(json.dumps({"error": f"{args.id} is not eligible for stale-banner (category or tier)"}))
+            return 1
+        entry["default_action"] = args.action
+        entry["default_at"] = (today + timedelta(days=args.veto_days)).isoformat()
+        atomic_write(path, render(data))
+        payload = {"queue": str(path), "id": args.id, "default_action": args.action, "default_at": entry["default_at"]}
+        if args.reason:
+            line = decisions.record_best_effort(
+                cls=f"autoevo/{entry.get('category')}", subject=str(entry.get("id")),
+                verdict="apply" if args.action == "stale-banner" else "dismiss", reason=args.reason,
+                features=decisions.autoevo_features(entry), source=args.source, by=args.by,
+                ts=f"{today.isoformat()}T00:00:00" if args.today else None,
+                path=Path(args.ledger) if args.ledger else None,
+            )
+            payload["ledger"] = "recorded" if line else "skipped"
+        print(json.dumps(payload, sort_keys=True))
+        return 0
+    print(json.dumps({"error": f"no entry with id {args.id}"}))
+    return 1
+
+
+def cmd_veto_expired(args: argparse.Namespace) -> int:
+    """Pending entries whose veto window has closed.
+
+    Read-only unless --apply-dismissals: then `dismiss` defaults are resolved
+    here (no file op is involved) and only entries needing a git op are
+    returned under `expired`.
+    """
+    path = queue_path() if args.queue is None else Path(args.queue)
+    data = load(path)
+    today = _parse_date(args.today) or date.today()
+    expired, dismissed = [], []
+    changed = False
+    for entry in data["pending"]:
+        if entry.get("status") != "pending" or not entry.get("default_action"):
+            continue
+        deadline = _parse_date(entry.get("default_at"))
+        if deadline is None or deadline > today:
+            continue
+        if entry.get("default_action") == "dismiss" and args.apply_dismissals:
+            entry["status"] = "dismissed"
+            entry["resolved_at"] = today.isoformat()
+            entry["last_surfaced"] = today.isoformat()
+            entry["dismiss_reason"] = "default after veto window"
+            # An executed default is a resolution, and protocols/autoevo.md
+            # § Default after a veto window says every resolution lands in the
+            # ledger. The stale-banner path records one through `resolve_entry`;
+            # this path resolved in place and recorded nothing, so executed
+            # dismiss defaults were invisible to `decisions.py stats`.
+            decisions.record_best_effort(
+                cls=f"autoevo/{entry.get('category')}",
+                subject=str(entry.get("id")),
+                verdict=LEDGER_VERDICT["dismissed"],
+                reason="default after veto window",
+                features=decisions.autoevo_features(entry),
+                source="nightly",
+                by="rule",
+                ts=f"{today.isoformat()}T00:00:00" if args.today else None,
+                path=Path(args.ledger) if args.ledger else None,
+            )
+            dismissed.append(entry.get("id"))
+            changed = True
+            continue
+        expired.append(
+            {
+                key: entry.get(key)
+                for key in (
+                    "id", "category", "default_action", "default_at", "proposed_at",
+                    "proposed_action", "evidence_summary", "peers",
+                )
+            }
+        )
+    if changed:
+        atomic_write(path, render(data))
+    print(json.dumps({"queue": str(path), "today": today.isoformat(), "expired": expired, "dismissed": dismissed}, sort_keys=True, default=str))
+    return 0
+
+
+def cmd_stamp_defaults(args: argparse.Namespace) -> int:
+    """Stamp defaults on pending entries queued before defaults existed.
+
+    The window starts today, not at proposed_at: the user never saw a
+    deadline on these, so they get the full veto period.
+    """
+    path = queue_path() if args.queue is None else Path(args.queue)
+    data = load(path)
+    today = _parse_date(args.today) or date.today()
+    stamped = []
+    for entry in data["pending"]:
+        if entry.get("status") != "pending" or entry.get("default_action"):
+            continue
+        action = default_for(entry)
+        if not action:
+            continue
+        stamped.append({"id": entry.get("id"), "default_action": action})
+        if args.dry_run:
+            continue
+        entry["default_action"] = action
+        entry["default_at"] = (today + timedelta(days=args.veto_days)).isoformat()
+    if stamped and not args.dry_run:
+        atomic_write(path, render(data))
+    payload = {"queue": str(path), "stamped": stamped, "default_at": (today + timedelta(days=args.veto_days)).isoformat()}
+    if args.dry_run:
+        payload["dry_run"] = True
+    print(json.dumps(payload, sort_keys=True))
+    return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -366,12 +577,15 @@ def cmd_list(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--queue", help="Override queue path (tests).")
+    parser.add_argument("--ledger", help="Override the decision ledger path (tests).")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_append = sub.add_parser("append")
     p_append.add_argument("--entries", required=True, help="JSON file with a list of entries, or - for stdin")
     p_append.add_argument("--dedupe-days", type=int, default=90)
     p_append.add_argument("--today", default=None)
+    p_append.add_argument("--veto-days", type=int, default=DEFAULT_VETO_DAYS)
+    p_append.add_argument("--rule-defaults", action="store_true", help="Stamp the fixed DEFAULT_ACTIONS rule instead of waiting for the precedent judge.")
     p_append.set_defaults(func=cmd_append)
 
     p_ad = sub.add_parser("auto-dismiss")
@@ -387,14 +601,38 @@ def main(argv: list[str] | None = None) -> int:
     p_res = sub.add_parser("resolve")
     p_res.add_argument("--id", required=True)
     p_res.add_argument("--status", required=True, choices=["applied", "dismissed"])
-    p_res.add_argument("--reason", default=None)
+    p_res.add_argument("--reason", required=True, help="One sentence; becomes a precedent in the decision ledger.")
     p_res.add_argument("--today", default=None)
+    p_res.add_argument("--source", default="autoevo-review")
+    p_res.add_argument("--by", default="human", choices=decisions.BY_VALUES)
     p_res.set_defaults(func=cmd_resolve)
 
     p_def = sub.add_parser("defer")
     p_def.add_argument("--id", required=True)
     p_def.add_argument("--today", default=None)
+    p_def.add_argument("--reason", default=None, help="Optional; recorded as a defer precedent when given.")
     p_def.set_defaults(func=cmd_defer)
+
+    p_set = sub.add_parser("set-default")
+    p_set.add_argument("--id", required=True)
+    p_set.add_argument("--action", required=True, choices=SETTABLE_DEFAULTS)
+    p_set.add_argument("--today", default=None)
+    p_set.add_argument("--veto-days", type=int, default=DEFAULT_VETO_DAYS)
+    p_set.add_argument("--reason", default=None, help="Recorded in the ledger with --by (precedent | rule).")
+    p_set.add_argument("--by", default="precedent", choices=decisions.BY_VALUES)
+    p_set.add_argument("--source", default="nightly")
+    p_set.set_defaults(func=cmd_set_default)
+
+    p_veto = sub.add_parser("veto-expired")
+    p_veto.add_argument("--today", default=None)
+    p_veto.add_argument("--apply-dismissals", action="store_true", help="Resolve expired `dismiss` defaults in place.")
+    p_veto.set_defaults(func=cmd_veto_expired)
+
+    p_stamp = sub.add_parser("stamp-defaults")
+    p_stamp.add_argument("--today", default=None)
+    p_stamp.add_argument("--veto-days", type=int, default=DEFAULT_VETO_DAYS)
+    p_stamp.add_argument("--dry-run", action="store_true")
+    p_stamp.set_defaults(func=cmd_stamp_defaults)
 
     p_list = sub.add_parser("list")
     p_list.add_argument("--status", default=None)
@@ -405,6 +643,11 @@ def main(argv: list[str] | None = None) -> int:
         return args.func(args)
     except QueueError as exc:
         print(json.dumps({"error": str(exc)[:300], "appended": [], "skipped": [], "invalid": []}))
+        return 2
+    except SystemExit:
+        raise
+    except Exception as exc:  # keep the one-JSON-object contract for headless callers
+        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"[:300]}))
         return 2
 
 

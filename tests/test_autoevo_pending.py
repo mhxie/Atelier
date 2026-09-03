@@ -197,7 +197,7 @@ class ResolutionTest(unittest.TestCase):
             self.assertEqual(out2["appended"], [])
             self.assertIn("a (dismissed)", out2["skipped"][0]["reason"])
             # Resolving twice is refused.
-            out3 = _run(vault, queue, "resolve", "--id", "a", "--status", "applied")
+            out3 = _run(vault, queue, "resolve", "--id", "a", "--status", "applied", "--reason", "merge is right")
             self.assertIn("error", out3)
 
     def test_defer_increments_and_feeds_auto_dismiss(self) -> None:
@@ -230,6 +230,104 @@ class AutoDismissDryRunTest(unittest.TestCase):
             self.assertEqual(queue.read_text(encoding="utf-8"), before)
             statuses = {e["id"]: e["status"] for e in tomllib.loads(before)["pending"]}
             self.assertEqual(statuses["old"], "pending")
+
+
+
+class DefaultWithVetoTest(unittest.TestCase):
+    """time-stale-A entries under wip/research get a 14-day default; nothing else does."""
+
+    def _stale(self, eid: str, peers: list[str]) -> dict:
+        entry = _entry(eid, peers)
+        entry["category"] = "time-stale-A"
+        entry["proposed_action"] = "close or redate the lapsed plan"
+        return entry
+
+    def test_append_stamps_default_only_for_eligible_peers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, queue = Path(tmp), Path(tmp) / "q.toml"
+            entries = [
+                self._stale("e-wip", ["wip/plan.md"]),
+                self._stale("e-refl", ["reflections/2099-01-01-reflection.md"]),
+                _entry("e-redundant", ["wip/a.md", "wip/b.md"]),
+            ]
+            payload = json.dumps(entries)
+            out = _run(vault, queue, "append", "--entries", "-", "--today", "2099-01-01", "--rule-defaults", stdin=payload)
+            self.assertEqual(sorted(out["appended"]), ["e-redundant", "e-refl", "e-wip"])
+            rows = {e["id"]: e for e in tomllib.loads(queue.read_text())["pending"]}
+            self.assertEqual(rows["e-wip"]["default_action"], "stale-banner")
+            self.assertEqual(rows["e-wip"]["default_at"], "2099-01-15")
+            self.assertNotIn("default_at", rows["e-refl"])
+            self.assertNotIn("default_at", rows["e-redundant"])
+
+            before = _run(vault, queue, "veto-expired", "--today", "2099-01-14")
+            self.assertEqual(before["expired"], [])
+            due = _run(vault, queue, "veto-expired", "--today", "2099-01-15")
+            self.assertEqual([e["id"] for e in due["expired"]], ["e-wip"])
+            self.assertEqual(due["expired"][0]["peers"], ["wip/plan.md"])
+
+            deferred = _run(vault, queue, "defer", "--id", "e-wip", "--today", "2099-01-10")
+            self.assertEqual(deferred["default_at"], "2099-01-24")
+            self.assertEqual(_run(vault, queue, "veto-expired", "--today", "2099-01-15")["expired"], [])
+
+            vetoed = _run(vault, queue, "resolve", "--id", "e-wip", "--status", "dismissed",
+                          "--reason", "user skipped", "--today", "2099-01-25")
+            self.assertEqual(vetoed["status"], "dismissed")
+            self.assertEqual(_run(vault, queue, "veto-expired", "--today", "2099-02-01")["expired"], [])
+
+    def test_stamp_defaults_migrates_backlog_with_fresh_window(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, queue = Path(tmp), Path(tmp) / "q.toml"
+            _run(vault, queue, "append", "--entries", "-", "--today", "2099-01-01",
+                 stdin=json.dumps([self._stale("e-wip", ["wip/plan.md"]), self._stale("e-refl", ["reflections/r.md"])]))
+            dry = _run(vault, queue, "stamp-defaults", "--today", "2099-02-01", "--dry-run")
+            self.assertEqual([r["id"] for r in dry["stamped"]], ["e-wip"])
+            self.assertNotIn("default_at", {e["id"]: e for e in tomllib.loads(queue.read_text())["pending"]}["e-wip"])
+            out = _run(vault, queue, "stamp-defaults", "--today", "2099-02-01")
+            rows = {e["id"]: e for e in tomllib.loads(queue.read_text())["pending"]}
+            self.assertEqual(out["default_at"], "2099-02-15")
+            self.assertEqual(rows["e-wip"]["default_at"], "2099-02-15")
+            self.assertNotIn("default_at", rows["e-refl"])
+            self.assertEqual(_run(vault, queue, "stamp-defaults", "--today", "2099-02-02")["stamped"], [])
+
+    def test_append_without_rule_flag_leaves_defaults_to_the_judge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, queue = Path(tmp), Path(tmp) / "q.toml"
+            _run(vault, queue, "append", "--entries", "-", "--today", "2099-01-01",
+                 stdin=json.dumps([self._stale("e-wip", ["wip/plan.md"])]))
+            rows = tomllib.loads(queue.read_text())["pending"]
+            self.assertNotIn("default_action", rows[0])
+            ledger = Path(tmp) / "decisions.jsonl"
+            out = _run(vault, queue, "--ledger", str(ledger), "set-default", "--id", "e-wip", "--action", "dismiss",
+                       "--today", "2099-01-05", "--reason", "3 of 3 similar past entries were dismissed")
+            self.assertEqual(out["default_at"], "2099-01-19")
+            line = json.loads(ledger.read_text().splitlines()[-1])
+            self.assertEqual((line["by"], line["verdict"], line["class"]), ("precedent", "dismiss", "autoevo/time-stale-A"))
+            due = _run(vault, queue, "veto-expired", "--today", "2099-01-19", "--apply-dismissals")
+            self.assertEqual(due["dismissed"], ["e-wip"])
+            self.assertEqual(due["expired"], [])
+            row = tomllib.loads(queue.read_text())["pending"][0]
+            self.assertEqual((row["status"], row["dismiss_reason"]), ("dismissed", "default after veto window"))
+            refused = _run(vault, queue, "set-default", "--id", "e-wip", "--action", "dismiss", "--today", "2099-01-20")
+            self.assertIn("not pending", refused["error"])
+
+    def test_resolve_requires_a_reason_and_writes_the_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, queue, ledger = Path(tmp), Path(tmp) / "q.toml", Path(tmp) / "decisions.jsonl"
+            _run(vault, queue, "append", "--entries", "-", "--today", "2099-01-01",
+                 stdin=json.dumps([self._stale("e-wip", ["wip/plan.md"])]))
+            proc = subprocess.run(
+                [sys.executable, "scripts/autoevo_pending.py", "--queue", str(queue), "resolve", "--id", "e-wip", "--status", "dismissed"],
+                cwd=REPO_ROOT, env={**os.environ, "OV": str(vault)}, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(proc.returncode, 2, "resolve without --reason must be an argparse error")
+            out = _run(vault, queue, "--ledger", str(ledger), "resolve", "--id", "e-wip", "--status", "dismissed",
+                       "--reason", "plan is still active this quarter", "--today", "2099-01-03")
+            self.assertEqual(out["status"], "dismissed")
+            line = json.loads(ledger.read_text().splitlines()[-1])
+            self.assertEqual(line["verdict"], "dismiss")
+            self.assertEqual(line["reason"], "plan is still active this quarter")
+            self.assertEqual(line["features"]["tier"], "wip")
+            self.assertEqual(line["by"], "human")
 
 
 if __name__ == "__main__":

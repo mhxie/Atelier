@@ -62,7 +62,7 @@ redundant: 3
   [c] merge 4 notes in research/baz/* (scores 0.74-0.81)
 
 time-stale-A: 1
-  [d] wip/old-plan.md — content-stale ("by end of Q3 2025")
+  [d] wip/old-plan.md — content-stale ("by end of Q3 2025"); default stale-banner on 2026-06-05 unless skipped
 
 contradicted: 1 (Challenger confirmed)
   [e] wiki/Decision X.md [C2] vs reflections/2026-04-15.md
@@ -74,6 +74,13 @@ low-signal: 2
 Pick category to triage, or skip:
   [r]edundant | [t]ime-stale | [c]ontradicted | [l]ow-signal | [a]ll | [q]uit
 ```
+
+Entries carrying `default_action` / `default_at` (protocols/autoevo.md § Default
+after a veto window) show their deadline. The veto is whichever action
+contradicts the default: skip vetoes a `stale-banner` default, apply vetoes a
+`dismiss` default. Skipping a `dismiss` default agrees with it, and the ledger
+records it as a confirmation, so offer apply as the veto on those entries.
+Defer restarts the 14-day window; silence lets the nightly apply the default.
 
 Wait for user input. Default if unclear: walk all in order.
 
@@ -91,20 +98,26 @@ Proposed: <proposed_at>  Surfaced: <surface_count>x  Last: <last_surfaced>
 Action? [a]pply | [s]kip | [d]efer | [e]xplain | [q]uit
 ```
 
+Apply and skip both take one sentence of reason; it is mandatory and becomes
+a precedent in `$OV/_meta/decisions.jsonl` (`protocols/decision-ledger.md`).
+Offer these chips first, free text otherwise: `still active, not stale`,
+`intentionally separate`, `wrong peer / misread`, `agree, do it`,
+`superseded elsewhere`. Never accept an empty reason and never invent one.
+
 ### Apply
 
 Dispatch the relevant agent in normal (approval-mode) Curator or Challenger flow. The user reviews the agent's proposal as usual — `/autoevo-review` does NOT shortcut Curator's content-preservation gates. Then:
 
-- On user-confirmed write: `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status applied --today <RUN_DATE>`, append to audit log § "Applied via /autoevo-review", commit.
-- On user-rejected proposal: `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status dismissed --reason "user rejected Curator proposal" --today <RUN_DATE>`, commit.
+- On user-confirmed write: `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status applied --reason "<user's sentence>" --today <RUN_DATE>`, append to audit log § "Applied via /autoevo-review", commit.
+- On user-rejected proposal: `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status dismissed --reason "<user's sentence>" --today <RUN_DATE>`, commit.
 
 ### Skip
 
-Run `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status dismissed --reason "user skipped during /autoevo-review" --today <RUN_DATE>`, commit. Move to next item. (Never hand-edit the TOML: the helper sets `resolved_at`, which anchors the nightly dedupe window.)
+Run `uv run --quiet python3 scripts/autoevo_pending.py resolve --id <id> --status dismissed --reason "<user's sentence>" --today <RUN_DATE>`, commit. Move to next item. (Never hand-edit the TOML: the helper sets `resolved_at`, which anchors the nightly dedupe window.) For an entry whose default is `stale-banner` this is the veto; say so in one line. For an entry whose default is `dismiss`, skip AGREES with the default and is recorded as a confirmation, not a veto: say that instead, and name apply as the veto.
 
 ### Defer
 
-Run `uv run --quiet python3 scripts/autoevo_pending.py defer --id <id> --today <RUN_DATE>` (increments `surface_count`, sets `last_surfaced`). Optional snooze: ask "snooze for how many days? (default 7)". On a snooze ≥ 1, also call:
+Run `uv run --quiet python3 scripts/autoevo_pending.py defer --id <id> --today <RUN_DATE> [--reason "<sentence>"]` (increments `surface_count`, sets `last_surfaced`, and pushes `default_at` to today + 14 when the entry carries a default; a reason is optional here and recorded when given). Optional snooze: ask "snooze for how many days? (default 7)". On a snooze ≥ 1, also call:
 
 ```bash
 uv run scripts/cues.py snooze autoevo_pending --days <N>

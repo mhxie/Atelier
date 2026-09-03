@@ -193,21 +193,29 @@ def wiki_dirs() -> list[Path]:
     return dirs
 
 
-def atomic_write(path: Path, text: str, *, fsync: bool = True) -> None:
+def atomic_write(path: Path, text: str, *, fsync: bool = True, newline: str | None = None) -> None:
     """Write text atomically: unique temp name, optional fsync, os.replace.
 
     Eleven independent re-implementations of this existed by 2026-08-23; two
     used a FIXED temp name and could race concurrent invocations into
     FileNotFoundError, and five skipped fsync. One helper, one guarantee:
     concurrent writers cannot corrupt or cross-clobber, and a crash after
-    return cannot lose the write (fsync=True).
+    return cannot lose the write (fsync=True). An existing file keeps its
+    permission bits, so a private (0600) file stays private after a rewrite.
     """
     import os
 
     path.parent.mkdir(parents=True, exist_ok=True)
+    mode: int | None = None
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        mode = None
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
-        with temporary.open("w", encoding="utf-8") as handle:
+        with temporary.open("w", encoding="utf-8", newline=newline) as handle:
+            if mode is not None:
+                os.fchmod(handle.fileno(), mode)
             handle.write(text)
             if fsync:
                 handle.flush()
@@ -215,6 +223,26 @@ def atomic_write(path: Path, text: str, *, fsync: bool = True) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def parse_iso_date(value: object):
+    """`YYYY-MM-DD` (a longer ISO timestamp is truncated) to a date, else None.
+
+    Seven scripts each parsed dates with their own None-vs-exit failure mode;
+    the shared contract is: garbage in, None out, and the caller decides
+    whether None is fatal.
+    """
+    from datetime import date
+
+    if value is None:
+        return None
+    text = str(value).strip()
+    if len(text) < 10:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def fmt(p: Path) -> str:

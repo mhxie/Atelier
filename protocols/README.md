@@ -52,7 +52,8 @@ repo-conventions.md (GitHub-canonical $OV conventions; tooling layout, push poli
 backend-taxonomy.md (external systems + SOT carve-outs; per-backend contracts)
   └── remote-routines.md (cron-style remote agents + cue layer; $OV/_meta/ contract)
   └── drive-zk-ingestion.md (raw landing → $OV ingestion) → raw-indexing.md (wikilink indexes over raw archives)
-  └── intent-coverage.md (router-miss JSONL log; coverage feedback into harness/intents.toml)
+  └── intent-coverage.md (/hi route ledger; coverage feedback into the harness/intents.toml catalog)
+  └── decision-ledger.md (every human verdict with its reason; precedent judge that turns them into defaults)
   └── shadow-log.md (multi-leg dispatch correlation; cost + verdict-agreement reporting)
 analysis-signals.md (relevance-gated preflight) → analysis-signal-cache.md (fact-ledger reference) → local-first-architecture.md
 

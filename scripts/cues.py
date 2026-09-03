@@ -944,9 +944,20 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
     oldest_age = 0
     corrupt_dates = 0
     repeat_skips = 0
+    defaults = 0
+    earliest_default: date | None = None
     for e in pending:
         cat = str(e.get("category", "unknown"))
         counts[cat] = counts.get(cat, 0) + 1
+        if e.get("default_action"):
+            try:
+                deadline = date.fromisoformat(str(e.get("default_at")))
+            except (ValueError, TypeError):
+                deadline = None
+            if deadline is not None:
+                defaults += 1
+                if earliest_default is None or deadline < earliest_default:
+                    earliest_default = deadline
         proposed = e.get("proposed_at", "")
         try:
             proposed_date = date.fromisoformat(str(proposed))
@@ -976,6 +987,12 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
     age_note = f"oldest {oldest_age}d" if oldest_age > 0 else "fresh"
     corrupt_note = f"; {corrupt_dates} corrupt dates" if corrupt_dates > 0 else ""
     skip_note = f"; {repeat_skips} ≥3 skips" if repeat_skips > 0 else ""
+    default_note = ""
+    if defaults and earliest_default is not None:
+        default_note = (
+            f" 其中 {defaults} 条带默认动作 (stale 标记), 最早 {earliest_default.isoformat()} 由 nightly 自动执行; "
+            f"`/autoevo-review` 里 skip 即否决, defer 顺延 14 天."
+        )
     return (
         Cue(
             key="autoevo_pending",
@@ -983,10 +1000,10 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
             command_path=".claude/commands/autoevo-review.md",
             message=(
                 f"{len(pending)} pending autoevo decisions ({listing}; {age_note}{corrupt_note}{skip_note}). "
-                f"`/autoevo-review` to triage."
+                f"`/autoevo-review` to triage.{default_note}"
             ),
         ),
-        f"pending={len(pending)} oldest_age={oldest_age} corrupt={corrupt_dates} skips={repeat_skips}; {severity} cue",
+        f"pending={len(pending)} oldest_age={oldest_age} corrupt={corrupt_dates} skips={repeat_skips} defaults={defaults}; {severity} cue",
     )
 
 
@@ -1711,7 +1728,11 @@ def check_meta_reflection_due(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Every 5th session log in the trailing 30 days: meta-reflection is due.
 
     The protocol said "after every 5th session" with no counter anywhere;
-    38 logs accumulated and zero meta-reflections ran.
+    38 logs accumulated and zero meta-reflections ran. The headless
+    `meta-reflection-draft` routine (protocols/meta-reflection.md § Headless
+    draft) now writes the draft; when one exists in the trailing 30 days this
+    cue stays silent and the review-debt cue carries it. It fires only when
+    the draft is missing, which means the routine is not installed or failed.
     """
     sessions = ov / tier_segments().get("sessions", "sessions")
     if not sessions.is_dir():
@@ -1726,17 +1747,25 @@ def check_meta_reflection_due(ov: Path, today: date) -> tuple[Cue | None, str]:
             continue
     if recent == 0 or recent % 5 != 0:
         return None, f"{recent} session logs in 30d; not a positive multiple of 5"
+    drafts_dir = ov / tier_segments().get("agent_findings", "agent-findings") / "meta-reflection"
+    for path in sorted(drafts_dir.glob("*-meta-reflection-draft.md"), reverse=True):
+        try:
+            if date.fromisoformat(path.name[:10]) >= cutoff:
+                return None, f"{recent} logs in 30d; draft {path.name} exists, review-debt cue owns it"
+        except ValueError:
+            continue
     return (
         Cue(
             key="meta_reflection",
             severity="soft",
             command_path="protocols/meta-reflection.md",
             message=(
-                f"最近 30 天已积累 {recent} 个 session logs. "
-                f"按协议该跑一次 meta-reflection 了 (`uv run scripts/session_stats.py` 先看数据). 现在跑吗?"
+                f"最近 30 天已积累 {recent} 个 session logs, 但没有 meta-reflection 草稿. "
+                f"检查 `meta-reflection-draft` 例程 (protocols/meta-reflection.md § Headless draft), "
+                f"或手动跑 (`uv run scripts/session_stats.py` 先看数据)."
             ),
         ),
-        f"{recent} logs in 30d; multiple of 5",
+        f"{recent} logs in 30d; multiple of 5; no draft",
     )
 
 

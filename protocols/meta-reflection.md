@@ -4,10 +4,36 @@ Reflect on the reflection process itself. This is how the system becomes self-aw
 
 ## When to Run
 
-- After every 5th session (automatically triggered by session count)
+- After every 5th session: the headless draft routine below covers this
 - When session scores trend downward for 3+ sessions
 - When the user explicitly asks "how is the system doing?"
 - During Evolver runs
+
+## Headless draft
+
+The "after every 5th session" trigger used to be a session-start question
+("run it now?"). It is now a draft the system produces on its own; the human
+reviews a document instead of authorizing a run.
+
+- **Routine**: `meta-reflection-draft`, `execution = "local"`, profile
+  `local-synthesis`, weekly (Sunday early morning), invoked as
+  `/run-routine meta-reflection-draft` from its private prompt under
+  `<paths.routine_prompts>/`.
+- **Due rule**: at least 5 session logs in the trailing 30 days. Otherwise the
+  routine writes a one-paragraph no-op artifact at the same path pattern
+  (so the run is verifiable) and returns `noop`.
+- **Output**: `<paths.agent_findings>/meta-reflection/<YYYY-MM-DD>-meta-reflection-draft.md`,
+  the Step 5 report plus the Step 6 audit answers, with `## Evolution
+  Applied: pending review` and every prescription phrased as a proposal.
+  Read-only over sessions, reflections, and the harness; the draft is the
+  only write. It never edits protocols, agents, or commands.
+- **Bounds**: single pass, about 60K tokens, idempotent (an existing draft for
+  the run date is left alone; the run reports `noop`).
+- **Review**: the draft appears under the routine-outputs cue like any other
+  routine file. Reading it and acknowledging in `routine_acks.json` closes
+  the loop; applying a prescription is an ordinary harness change through
+  `protocols/evolution.md`. `scripts/cues.py check_meta_reflection_due`
+  fires only when the draft is missing, which points at the routine.
 
 ## The Meta-Reflection Process
 
