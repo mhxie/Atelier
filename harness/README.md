@@ -6,7 +6,7 @@ Provider-neutral registry files for the Atelier runtime layer.
 |---|---|
 | `commands.toml` | Portable workflow names mapped to `.claude/commands/*.md` sources; Codex exposes matching `$command` skills. |
 | `agents.toml` | Portable role names mapped to source files (typically `.claude/agents/*.md`; may be a script for script-driven roles like `external-reviewer`) and a per-role `voices = {leg = "model", ...}` table. Allowed leg keys: `native`, `direct`, `codex`. |
-| `intents.toml` | Intent router registry for `/hi`: trigger phrases mapped to one procedure path, bounded context budget, dispatch shape, and profile reads. |
+| `intents.toml` | Intent catalog for `/hi`: one-line `description` per row (the model classifies against it) mapped to one procedure path, bounded context budget, dispatch shape, and profile reads. |
 | `models.toml` | Model identity registry with runtime-neutral reasoning tiers (identity names like opus, sonnet, deepseek_pro_max; no provider bindings). Provider/model bindings live in gitignored `profile/models.toml` and merge at runtime. |
 | `capabilities.toml` | Runtime-neutral capability names and the Codex-side tool that implements each. The Claude Code mapping lives in `.claude/agents/*.md` `tools:` frontmatter (single source of truth). |
 | `runtimes.toml` | Native CLI registry and shipped Codex default; each runtime also declares its surface (instruction file, agent dir/format, skills dir, hooks file, supported primitives) for the edge renderer. A user can persist Claude in gitignored `runtime.local.toml`. |

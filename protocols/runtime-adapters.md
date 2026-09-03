@@ -28,7 +28,7 @@ Codex skill roots. Private names never enter `commands.toml`,
 `intents.toml`, or committed runtime adapters. The full ownership and
 activation contract is in `protocols/private-features.md`.
 
-`.claude/skills/` is a Claude Code-only surface holding **entry hints**, not authoritative dispatch. Claude Code matches a skill's frontmatter description against user phrasing semantically: the LLM judges relevance, not substring. On a match the skill forwards into `/hi`; the canonical intent router in `harness/intents.toml` is still the single decision point for which agents run. Codex does not read `.claude/skills/`; repo-scoped skills under `.agents/skills/` provide its native entry surface. `$atelier` handles broad routing and harness work, while explicit command skills such as `$weekly` and `$review` read the matching `.claude/commands/*.md` specification directly. Skill exposure is additive at both runtime edges and produces zero workflow duplication.
+`.claude/skills/` is a Claude Code-only surface holding **entry hints**, not authoritative dispatch. Claude Code matches a skill's frontmatter description against user phrasing semantically: the LLM judges relevance, not substring. On a match the skill forwards into `/hi`; the canonical intent catalog in `harness/intents.toml` is still the single decision point for which agents run. Codex does not read `.claude/skills/`; repo-scoped skills under `.agents/skills/` provide its native entry surface. `$atelier` handles broad routing and harness work, while explicit command skills such as `$weekly` and `$review` read the matching `.claude/commands/*.md` specification directly. Skill exposure is additive at both runtime edges and produces zero workflow duplication.
 
 `scripts/harness_lint.py` enforces structural invariants only: skill name matches its directory, frontmatter has a non-empty description that mentions `/hi` (delegation), and the skill name corresponds to an existing `intents.<name>` row. Coherence between the skill's prose description and the intent it exposes is human-curated — substring-checking an LLM-judged trigger surface would be the wrong tool.
 
@@ -55,8 +55,7 @@ Codex built-ins such as `/hooks` keep their slash form.
 
 Codex lifecycle hooks live in `.codex/hooks.json`. `SessionStart` reuses
 `scripts/cues.py --hook --runtime codex`; `UserPromptSubmit` optionally records
-the replay prompt, refreshes the session lock, and runs
-`scripts/intent_coverage.py intent-hook --runtime codex`; `Stop` optionally
+the replay prompt and refreshes the session lock; `Stop` optionally
 reconciles the replay snapshot and runs shared shadow-log cleanup. Claude Code
 keeps the corresponding behavior in `.claude/settings.json`, using both `Stop`
 and `SessionEnd` for optional replay reconciliation. Replay capture is disabled

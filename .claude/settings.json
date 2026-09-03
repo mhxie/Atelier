@@ -29,11 +29,6 @@
             "type": "command",
             "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/cues.py\" --touch-lock 2>/dev/null || true",
             "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/intent_coverage.py\" intent-hook --runtime claude-code",
-            "timeout": 5
           }
         ]
       }

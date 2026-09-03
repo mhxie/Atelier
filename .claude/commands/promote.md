@@ -4,8 +4,8 @@ description: Promote L2 working notes into a schema-compliant L4 wiki entry.
 # /promote — Create L4 wiki entry from L2 source notes
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi promote to wiki`, `/hi canonize this`,
-> `/hi create wiki entry`). See `harness/intents.toml` `[intents.promote]` for the full
-> pattern list. Both paths execute this same procedure.
+> `/hi create wiki entry`). See `harness/intents.toml` `[intents.promote]` for the row's
+> example phrases. Both paths execute this same procedure.
 
 Two-step workflow to promote existing L2 working notes (daily notes, reflections, agent findings, drafts) into a schema-compliant L4 wiki entry under `<paths.wiki>/`. Inspired by llm_wiki's analyze-then-generate ingest pipeline, adapted for atelier's claim-level trust architecture.
 

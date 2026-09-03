@@ -1,179 +1,154 @@
 # Intent Coverage
 
-Feedback loop for the shared hi intent router, invoked as `/hi` in Claude Code
-and `$hi` in Codex. It captures inputs the router was uncertain about so we can
-extend `harness/intents.toml` based on real usage instead of guesswork.
+Feedback loop for the shared `/hi` (Claude Code) and `$hi` (Codex) router.
+Routing is model judgment over the `description` of each `harness/intents.toml`
+row (`scripts/intent_coverage.py catalog`); this protocol defines the ledger
+that records every route and the review that turns recurring unrouted
+requests into catalog work.
 
-## Live route projection
+## Route ledger
 
-For every explicit contextual `/hi`, `/reflect`, `$hi`, or `$reflect`
-invocation, the shared `UserPromptSubmit` hook runs the deterministic matcher
-once and injects its result as:
+After routing and before dispatch, the orchestrator appends one line per
+contextual invocation with `scripts/intent_coverage.py intent-log`. Kinds:
 
-```text
-ATELIER_INTENT_ROUTE {"schema":2,"source":"harness/intents.toml",...}
-```
-
-The packet projects only fields needed by the live command: `name`, `mode`,
-`procedure`, `context_budget_bytes`, `agents`, `profile_reads`, `priority`,
-`matched_pattern`, `parallel`, `fallback`, and `ambiguous`. An ambiguous result also carries
-`tied_candidates` with the same route fields. It contains registry data only:
-never the raw user input, session ID, transcript path, or resolved filesystem
-paths.
-
-`harness/intents.toml` remains canonical. The packet is computed from the live
-file at prompt-submit time and is bounded by
-`INTENT_ROUTE_MAX_CONTEXT_BYTES` (currently 1 KiB). If matching fails or the
-packet would exceed that bound, the hook emits nothing and the command reads
-the full registry. Shape-based and low-confidence overrides remain model
-judgment; `.claude/commands/hi.md` defines when they require the full file.
-
-This reuses work the hook already performs. The normal route adds no model or
-tool call and replaces an unconditional full-registry read with at most 1 KiB
-of projected context on each contextual invocation.
-
-## What gets logged
-
-A miss is any Claude `/hi <text>` or Codex `$hi <text>` invocation where the
-orchestrator could not classify the intent with high confidence. Three kinds:
-
-| Kind | Trigger |
+| Kind | Meaning |
 |---|---|
-| `fallback` | No `patterns` matched; `intents.general` (priority 0, empty patterns) handed the request to semantic routing. |
-| `ambiguous` | 2+ non-fallback intents tied at the top priority; orchestrator used `AskUserQuestion` to disambiguate. |
-| `low_confidence` | A short generic substring matched inside a longer message whose primary intent looked different under `.claude/commands/hi.md` § Contextual routing. Orchestrator used `AskUserQuestion` to confirm. |
+| `routed` | One row fit with confidence; `intent` names it. |
+| `general` | Nothing fit; `intents.general` handed the request to the runtime's ordinary routing. `final_dispatch` may name what ran. |
+| `clarified` | The orchestrator asked the user to choose; `candidates` lists what was offered and `clarified_to` what was picked. |
+| `corrected` | A confident route the user redirected after the announcement: `intent` is the announced row, `clarified_to` the one that should have run. Logged as a second line after the original `routed` line; this is the false-hit signal, and `corrected / routed` is the false-hit rate in `scripts/eval_run.py`. |
 
-The happy path (high-confidence single winner) is logged separately and
-hashed: `$OV/_meta/intent_hits/YYYY-MM-DD.jsonl` records intent, matched
-pattern, and a sha256 of the normalized text (never the raw text), giving the
-miss log a denominator. The miss log itself stays the coverage feedback
-channel, not a session history.
-
-## Where the log lives
-
-`$OV/_meta/intent_misses/YYYY-MM-DD.jsonl` — one JSON object per line, one line per miss. Falls back to `~/.cache/atelier/intent_misses/` when `$OV` is unset (test / fresh-checkout environments).
-
-The filename's date is `date.today()` at write time (calendar-naive local). This deliberately diverges from the `<effective-date>` late-sleep rule (`CLAUDE.md`: before 03:00 local, "today" = previous calendar day) used by daily notes and reflections. Rationale: the miss log is a fire-time audit trail, not a user-authored work surface; aligning bucket timestamps with wall-clock simplifies sort, dedup, and `--since` aggregation. The orchestrator MUST NOT pass an effective-date timestamp here.
+Location: `$OV/_meta/intent_routes/YYYY-MM-DD.jsonl`, falling back to
+`~/.cache/atelier/intent_routes/` when `$OV` is unset. The filename date is
+wall-clock `date.today()` at write time, not the late-sleep effective date:
+this is an audit trail, not a user-authored surface. The legacy
+`$OV/_meta/intent_misses/` log written by the retired substring router is
+still read; every line there counts as a miss.
 
 Schema:
 
 ```json
 {
-  "timestamp": "2026-05-22T00:02:38",
+  "timestamp": "2026-09-02T10:12:03",
   "runtime": "claude-code",
-  "raw_input": "improve the repo, so when I use /hi ...",
-  "match_kind": "fallback",
-  "initial_match": {
-    "name": "general",
-    "priority": 0,
-    "matched_pattern": "<fallback: no patterns matched>"
-  },
-  "ambiguity_candidates": [{"name": "...", "priority": 35, "matched_pattern": "..."}],
-  "ambiguity_candidates_raw": "(raw string when --candidates failed JSON parse; mutually exclusive with the parsed array above)",
+  "raw_input": "improve the repo so that ...",
+  "match_kind": "general",
+  "intent": "general",
+  "candidates": ["reading", "explore"],
   "clarified_to": "reading",
-  "final_dispatch": "reading",
-  "notes": "user typed URL inline; clarification needed because 'should I' also matched"
+  "final_dispatch": "engineering-task",
+  "notes": "free text"
 }
 ```
 
-Field key for `ambiguity_candidates[].matched_pattern` deliberately matches the key produced by `scripts/intent_coverage.py intent --json` (the matcher returns `matched_pattern`, never `pattern`); the orchestrator passes candidates straight through without renaming. `ambiguity_candidates`, `ambiguity_candidates_raw`, `clarified_to`, `final_dispatch`, and `notes` are all optional. `initial_match.name/priority/matched_pattern` may be null when the orchestrator didn't have a clean initial match to attribute (rare; usually present even for fallback). `priority` is dropped to null silently when `--initial-priority` fails to parse as int.
+`candidates`, `clarified_to`, `final_dispatch`, and `notes` are optional. The
+write is best-effort: empty input is skipped with a stderr note, an OSError is
+swallowed, and the command always exits 0 so a slow or unmounted `$OV` never
+blocks a live invocation. Entries stay under the POSIX append atomicity bound;
+the reader drops any torn line.
 
-## Producer side: route plus dual-path logging
+## Review
 
-Two producers feed the same JSONL, partitioned by `match_kind`:
+```
+uv run scripts/intent_coverage.py intent-misses [--since YYYY-MM-DD] [--match-kind <kind>] [--runtime claude-code|codex] [--top N] [--propose] [--json]
+```
 
-| Producer | Surface | Captures | Token cost into orchestrator |
-|---|---|---|---|
-| `intent-hook` | `UserPromptSubmit` hook (`.claude/settings.json` and `.codex/hooks.json`) | Compact route for every contextual invocation; logs `fallback` and `ambiguous` via `match_intents()` | At most 1 KiB of high-signal route context; no extra model or tool call |
-| `intent-log` | In-band `Bash:` call by the orchestrator | `low_confidence` — heuristic LLM judgment over message shape under `.claude/commands/hi.md` § Contextual routing | ~200-300 tokens per call (Bash command + result) |
+A miss is any event whose kind is not `routed`. The report prints counts by
+kind, the top unrouted phrases (NFKC-normalized, casefolded, 200 chars), and
+the coverage signal: phrases recurring on at least
+`INTENT_MISS_DISTINCT_DAYS_THRESHOLD` (3) distinct file dates. `--propose`
+lists those repeaters with their clarified or dispatched target; `--json`
+carries the same rows under `proposals` for `/triage`. `--since` filters at
+file-date granularity.
 
-The hook projects every deterministic route and captures the bulk of misses
-(fallback is purely "no patterns matched"; ambiguous is purely "2+ tied at
-top priority" — both deterministic). The orchestrator's in-band call covers
-only the LLM-judged `low_confidence` branch plus any clarification-time
-enrichment that the hook cannot observe.
+`scripts/eval_run.py` records route coverage (confident routes over all
+routes in the last 30 days) as the `routing` component of each eval snapshot,
+and `scripts/cues.py check_intent_misses` raises a soft cue at 5+ unrouted
+requests in 14 days. Coverage is not correctness; see the judged eval below.
 
-Codex uses its native `UserPromptSubmit` hook for explicit `$hi` and `$reflect`
-skill invocations. Both runtimes therefore receive the same route packet and
-hook-log `fallback` and `ambiguous`; only `low_confidence` remains an in-band
-orchestrator call. Hook-produced rows carry
-`"logged_by": "user_prompt_submit_hook"`; orchestrator-produced rows omit that
-field, which preserves producer attribution in the report.
+## Judged routing eval
 
-For the low-confidence branch, use this best-effort in-band shape after the
-route is clarified:
+Coverage says how often a route was confident, not whether it was right.
+Correctness is checked by a cheap model acting as the classifier: dispatch a
+`general-purpose` subagent (model `sonnet`) with the prompt below, then fold
+its verdict into the eval snapshot. Run it after any change to a
+`description`, before `/system-review` on a routing change, or when the
+coverage cue fires. It costs about 45k subagent tokens and a minute; nothing
+enters the main context except the verdict.
+
+Two case sets feed it: the public fixture, and the private regression set at
+`$OV/_meta/evals/routing_cases.json` (`{"cases": [{"id", "input", "label"?}]}`,
+seeded from the retired substring router's real misses). Cases with a
+`label` score accuracy; cases without one report the pick distribution and
+the clarify rate. Append new `corrected` and `clarified` ledger phrases to it
+when they recur.
+
+Prompt (verbatim, fill the two paths):
+
+```text
+You are the /hi intent classifier for the repo at <repo root>. Judged routing
+eval: classify each fixture input against the intent catalog using ONLY the
+row descriptions.
+1. Run exactly `uv run scripts/intent_coverage.py catalog`. Do NOT pass
+   --examples, do NOT open harness/intents.toml, and do NOT open anything
+   under tests/ except the fixture below; examples would leak answers.
+2. Read `.claude/commands/hi.md` § Contextual routing.
+3. Read `tests/fixtures/routing_evalset.json` (cases: [{input, expected}]).
+4. For each case write your pick BEFORE reading its `expected`; use `general`
+   when no row fits. Note whether hi.md's clarify rule would have fired.
+5. Write ONLY this JSON to <verdict path>: {"model": "sonnet", "cases": N,
+   "passed": N, "catalog_bytes": N, "misses": [{"input": ..., "expected":
+   ..., "got": ..., "why": one sentence, "suggest": reworded description}],
+   "collisions": [{"rows": ["a", "b"], "why": ...}]}
+Do not modify any other file.
+```
+
+Then:
 
 ```bash
-uv run scripts/intent_coverage.py intent-log \
-  --input "<raw hi text>" \
-  --match-kind low_confidence \
-  --runtime <claude-code-or-codex> \
-  --initial-name <intent-name> \
-  --initial-priority <priority> \
-  --initial-pattern "<matched-pattern>" \
-  --clarified-to <selected-intent> \
-  --final-dispatch <selected-intent>
+uv run scripts/eval_run.py --no-semantic --judged-routing <verdict path>
 ```
 
-The shared hook entry is wired with the runtime label appropriate to each edge:
+The snapshot records `judged.routing` (`cases`, `passed`, `score`, `misses`,
+`model`), and `scripts/cues.py check_eval_regression` compares it across
+consecutive snapshots alongside route coverage. Act on `misses` and
+`collisions` exactly as on a recurring phrase below: the fix is always a
+sharper description, never priority machinery.
 
-```
-{"type": "command",
- "command": "uv run scripts/intent_coverage.py intent-hook --runtime claude-code",
- "timeout": 5}
+## Acting on a recurring phrase
 
-{"type": "command",
- "command": "uv run scripts/intent_coverage.py intent-hook --runtime codex",
- "timeout": 5}
-```
+1. **Sharpen a description.** The request belongs to an existing row whose
+   `description` did not make that obvious. Edit the description; it is the
+   whole routing contract. Adding the phrase to `examples` (canonical, or the
+   gitignored `harness/intents.local.toml` overlay for private phrasing) is
+   secondary and informational.
+2. **Add a row.** The request is a workflow `/hi` does not model yet. Write
+   the procedure first, then the row; decide whether it also deserves a direct
+   command in `harness/commands.toml`.
+3. **Add a private row.** The request is a private feature or private
+   command the public catalog cannot name. In `harness/intents.local.toml`:
 
-The first lives in `.claude/settings.json`; the second lives in `.codex/hooks.json`.
+   ```toml
+   [intents.my-feature]
+   description = "One line the classifier routes on."
+   procedure = "my-feature/SKILL.md"   # absolute, $OV-relative, or under <paths.private_features>
+   examples = ["optional phrasing"]
+   ```
 
-Route injection and miss-log writes fail independently. The write is best-effort — `scripts/intent_coverage.py intent-log` always returns exit code 0 (orchestrator Bash calls can ignore the exit code with confidence):
+   The row appears in the catalog marked `(private)` with the defaults of a
+   solo, script-free route (`mode = "private-feature"`, no profile reads);
+   `mode`, `agents`, `profile_reads`, `context_budget_bytes` may be set.
+   Requests for private capabilities that reach `general` are the largest
+   source of false hits into neighbouring public rows; this is the fix.
+4. **Accept the miss.** One-off engineering, app, or tool requests belong to
+   the general handoff. The recurring count is the audit trail; no edit.
 
-- An empty `--input`, a malformed `--candidates` JSON, or a non-int `--initial-priority` each degrade silently (warning to stderr) without aborting the call. Malformed candidates are preserved verbatim under `ambiguity_candidates_raw` so a later batch-review can still see the orchestrator's intent.
-- The script silently no-ops on OSError so a slow or unmounted `$OV` never blocks a live hi invocation.
-- One `f.write(json.dumps(...) + "\n")` per entry. On POSIX with `O_APPEND`, this is atomic up to `PIPE_BUF` (4 KiB on Linux, 512 B on macOS for some filesystems). The expected entry size (≤1 KB) keeps every write safely under that ceiling. Larger payloads may interleave; the consumer's per-line `json.JSONDecodeError` handler drops any malformed lines so a torn write degrades to lost data, never corrupted reports.
-- No locking; concurrent writers from parallel Codex sessions are rare in practice and an occasional interleave doesn't matter for batch aggregation.
-
-## Consumer side — batch review
-
-```
-uv run scripts/intent_coverage.py intent-misses [--since YYYY-MM-DD] [--match-kind <kind>] [--runtime claude-code|codex] [--top N] [--json]
-```
-
-`--since` filters at **file-date** granularity (the log file's `YYYY-MM-DD` stem), not at event-timestamp granularity. A TZ-skewed event near midnight is grouped with its file's date, so `--since 2026-05-15` reads the whole `2026-05-15.jsonl` file even when only late-evening events are wanted.
-
-Output:
-
-- Counts by `match_kind` (how often we fall back vs disambiguate).
-- Top distinct phrases (lowercased, ≤200 chars) with count, distinct days, and which kinds they hit.
-- Coverage signal: phrases recurring across at least the distinct-days threshold defined in `scripts/intent_coverage.py` as `INTENT_MISS_DISTINCT_DAYS_THRESHOLD` (currently 3) are flagged as candidate triggers — strong enough that user is hitting the gap repeatedly, not just once.
-- A note line `(N event(s) had empty raw_input — counted in by-kind totals, omitted from the phrase table)` appears when applicable; `kind_counts` and `phrase_stats` deliberately disagree by N in that case so a fire-time logging glitch is visible in the audit, not silently dropped.
-
-Run cadence: opportunistic. No automated cue exists; check during
-`/system-review` or before sprints of harness work. Add a cue when traffic
-justifies it, using the `check_routine_outputs` shape: directory existence,
-recent entry count, and acknowledgement state under `$OV/_meta/`.
-
-## Acting on the report
-
-Three outcomes per recurring phrase:
-
-1. **Add a pattern to an existing intent.** The user's phrasing is a synonym for an intent that already exists, just not enumerated. Edit the matching `patterns = [...]` list in `harness/intents.toml`. Cheap, low-risk; the substring matcher handles it immediately.
-2. **Add a new intent.** The phrase describes a workflow `hi` doesn't model yet (e.g., a recurring engineering directive pattern). Decide whether Claude `/hi` and Codex `$hi` are the right surfaces, or whether the workflow belongs as a direct registered command with both native edges, or as a semantic Claude entry hint in `.claude/skills/`.
-3. **Confirm it stays a miss.** Some misses are correct. One-off app, tool, or engineering requests should use the general semantic handoff rather than grow the deterministic registry. Document the call by leaving the entry in the log; the recurring count itself is the audit trail.
-
-Do NOT add patterns that would steal from another intent's substring space. The TOML header has cautionary notes (`"read"` would snag `"curate readwise"`, etc.); the lesson generalizes — prefer phrase-shaped patterns (`"improve the repo"`) over single-token patterns (`"improve"`).
-
-## Lifecycle
-
-The log accumulates indefinitely. There is no rotation / compaction policy yet — the file sizes are small (each entry ≤1KB; 100 misses per day = <100KB/day) and the JSONL format reads incrementally. If the log ever grows large enough to matter, move yearly logs into a `archive/` subdirectory; the `intent-misses` report only globs `*.jsonl` at the top level and will ignore them.
+Descriptions must stay disjoint. When two rows attract the same phrase, the
+fix is to narrow one description, never to add priority machinery.
 
 ## Related
 
-- `harness/intents.toml` — canonical intent registry; misses feed pattern additions here.
-- `.claude/commands/hi.md` § Contextual routing — heuristic for when to flag as `low_confidence`.
-- This protocol's producer section — exact `intent-log` command shape.
-- `scripts/intent_coverage.py` — `intent-log` and `intent-misses` subcommands; source of truth for the path and the distinct-days threshold. `intent-misses --propose` renders candidate rows for the gitignored `harness/intents.local.toml` overlay (patterns merge into existing intents at load; the overlay cannot invent new intents). `cues.py check_intent_misses` surfaces 5+ misses in 14 days at session start, closing the loop that ran producer-only for three months.
-- `protocols/shadow-log.md` — sibling JSONL-append + report system. Different write target (canonical to `$OV/` here, redacted mirror skeleton there) but a useful precedent if this log ever grows multi-leg / verdict-aggregation needs.
+- `harness/intents.toml`: the catalog; `description` is the routing contract.
+- `.claude/commands/hi.md` § Contextual routing: when to clarify, what to log.
+- `scripts/intent_coverage.py`: `catalog`, `intent-log`, `intent-misses`.
+- `protocols/shadow-log.md`: sibling JSONL-append and report system.

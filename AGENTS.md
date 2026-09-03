@@ -10,7 +10,7 @@ session start for the shared safety, knowledge, and writing contract. Load
   and scripts. Runtime syntax stays in `.claude/`, `.codex/`, and this adapter.
 - User commands are Claude `/name` and Codex `$name`. A Codex command skill
   reads the matching `.claude/commands/<name>.md`; never start nested Codex.
-- `$hi` consumes the hook route packet from `harness/intents.toml`, then reads
+- `$hi` classifies against the `harness/intents.toml` catalog, then reads
   only the selected `procedure`. Direct skills skip the universal router.
 - Native roles use `.codex/agents/<role>.toml`, which points to the shared
   `.claude/agents/<role>.md` brief. If dispatch is unavailable, run that brief

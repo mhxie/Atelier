@@ -24,11 +24,11 @@ Trigger only when the URL, wikilink, or "read this" phrase IS the request payloa
 
 Forward the user's input verbatim into `/hi <user-text>`. The intent router in `.claude/commands/hi.md` prints `Routing as intents.reading → reader, researcher`, then dispatches Reader (lens-based read of the content) plus Researcher (related notes from `$OV/`) in parallel.
 
-Do not bypass `/hi`. Do not call Reader directly. The router applies the same priority math (intents.reading is priority 40, weekly is 45, energy-audit is 43) — bypassing it would break the priority ordering when a user's reading-shaped phrase happens to contain "this week" or "burnt out".
+Do not bypass `/hi`. Do not call Reader directly. The router weighs every catalog row's description against the whole message, so a reading-shaped phrase that is really about "this week" or feeling "burnt out" still lands on weekly or energy-audit; bypassing it would lose that judgment.
 
 ## Why entry hint, not authoritative dispatch
 
-Skill auto-trigger is semantic — Claude Code matches this skill's frontmatter description against the user's phrasing, judging relevance with the model itself rather than literal patterns. Intent matching inside `/hi` is exact (TOML `patterns` plus priority resolution against other intents). The two stages have different precision properties: the skill widens the natural-language entry surface; the router stays the single decision point for what runs.
+Skill auto-trigger is semantic — Claude Code matches this skill's frontmatter description against the user's phrasing. Routing inside `/hi` is also model judgment, but against the whole catalog at once: every `harness/intents.toml` row's `description` competes. The skill widens the natural-language entry surface; the router stays the single decision point for what runs.
 
 This division is documented in `protocols/runtime-adapters.md` § Runtime
 Surfaces. Codex does not read `.claude/skills/`; Codex reaches the same flow

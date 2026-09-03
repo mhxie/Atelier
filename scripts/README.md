@@ -21,7 +21,7 @@ Executable tooling for the Atelier knowledge layer. All scripts are stdlib-only 
 | `harness_lint.py` | Claude Code and Codex portability lint — root instructions, model profiles, capability mappings, command and agent registries | ops | stdlib |
 | `harness_smoke.py` | Smoke test for native command skills, agent adapters, hooks, and lint JSON | ops | stdlib |
 | `atelier_runtime.py` | Native runtime selector: resolves the Codex or Claude default, persists a gitignored local preference, and launches registered workflows without generating adapter prompts | ops | stdlib |
-| `intent_coverage.py` | Deterministic Claude `/hi` and Codex `$hi` intent diagnostics, miss logging, hook entry, and batch coverage report | ops | stdlib |
+| `intent_coverage.py` | `/hi` and `$hi` intent catalog projection (`catalog`), per-route ledger (`intent-log`), and unrouted-request review (`intent-misses`) | ops | stdlib |
 | `privacy_check.py` | Scans public-bound pathnames, worktree files, and divergent staged blobs for private vault titles plus exact local terms from gitignored `profile/private_terms.txt`; deliberate public opt-outs live in `privacy_allowlist.txt`; wired into `/lint` Phase 0c | ops | stdlib |
 | `zk_audit.py` | Post-ingestion hygiene audit for `$OV/`: missing READMEs, raw-without-digest, archive↔working overlap, root orphans, suspicious dirs; wired into `/lint` Phase 0b | ops | stdlib |
 | `staleness.py` | L2 staleness scoring — surfaces dormant, stale, and promotion-candidate notes | D | stdlib |

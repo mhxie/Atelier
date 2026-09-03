@@ -5,7 +5,7 @@ description: Lightweight decision journal with analysis proportional to the stak
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi should I take the offer`,
 > `/hi help me decide`, `/hi torn between`). See `harness/intents.toml`
-> `[intents.decision]` for the full pattern list. Both paths execute this same procedure.
+> `[intents.decision]` for the row's example phrases. Both paths execute this same procedure.
 
 Capture a choice, the reason behind it, and what should cause it to be revisited.
 

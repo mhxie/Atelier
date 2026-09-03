@@ -1,5 +1,5 @@
 {
-  "description": "Deterministic routing eval: generic inputs only (no private phrases). Expected = intent name the substring matcher must pick, or 'general' for the semantic-handoff fallback. Shared by tests/test_intent_routing.py and scripts/eval_run.py.",
+  "description": "Routing evalset: generic inputs only (no private phrases). Expected = the harness/intents.toml row a classifier should pick, or 'general' for the semantic handoff. Routing is model judgment, so this is the seed for a judged routing eval; tests/test_intent_routing.py checks that every expected row exists.",
   "cases": [
     {"input": "记一下 今天把周报写完了", "expected": "capture"},
     {"input": "log this: finished the draft", "expected": "capture"},

@@ -16,7 +16,7 @@ When the system needs a new behavior, choose the lightest primitive that covers 
 
 | Primitive | When | Trigger | Examples in this repo |
 |---|---|---|---|
-| **Hook** (`.claude/settings.json` or `.codex/hooks.json`) | Programmatic event handler. Safety gate, mechanical lint, session-start cue. Always-on, no model judgment. | Runtime lifecycle or tool event | SessionStart cues via `scripts/cues.py`; intent coverage via `scripts/intent_coverage.py`; shadow-log cleanup via `scripts/shadow.py` |
+| **Hook** (`.claude/settings.json` or `.codex/hooks.json`) | Programmatic event handler. Safety gate, mechanical lint, session-start cue. Always-on, no model judgment. | Runtime lifecycle or tool event | SessionStart cues via `scripts/cues.py`; shadow-log cleanup via `scripts/shadow.py` |
 | **Skill** (`.claude/skills/<name>/SKILL.md`) | Thin entry hint that auto-triggers on semantic match against user phrasing. Lowers friction of typing `/hi` first. Skills here forward to `/hi`; the canonical intent router (`harness/intents.toml`) stays the decision point. | Model judges the description matches user input | `.claude/skills/capture/`, `.claude/skills/reading/` |
 | **Command** (`.claude/commands/<name>.md`) | Explicit `/slash` invocation. User names the operation. | User types `/<name>` | `/curate`, `/sync`, `/lint`, `/promote`, `/hi` |
 | **Agent** (`.claude/agents/<name>.md`) | Delegated subprocess with isolated context. Use when the task needs research or tool use that would bloat main context, or when role/voice separation matters (Reviewer's voice is not Challenger's voice). | Orchestrator dispatches via the `Agent` tool | The cercle (Researcher, Reviewer, Challenger, Curator, ...) |
@@ -47,7 +47,7 @@ No-branching contract: `pattern` is documentation. No code path in `scripts/`, n
 ## Session Startup Checks
 
 Route before loading personal context. After selecting the intent, run
-`scripts/context_bundle.py` with the intent key or injected route packet. Use
+`scripts/context_bundle.py --intent <name>` when the row declares profile reads. Use
 that projection as the shared startup context; do not separately reread the
 same profile, reflection, or session files.
 
@@ -62,11 +62,11 @@ same profile, reflection, or session files.
    by the route. If one is older than 7 days, suggest `/introspect`. Routes
    with empty `profile_reads` do not inspect profile freshness.
 
-The selected intent declares a 4, 6, or 8 KB default budget in
-`harness/intents.toml`; an explicit workflow may raise it to at most 20 KB.
-Daily capture and full source files are explicit additions, not generic
-startup context. The complete contract is in
-`protocols/session-continuity.md`.
+The selected intent declares an 8 or 32 KB ceiling in `harness/intents.toml`
+(32 KB when profile files are preloaded, so they land whole); an explicit
+workflow may raise it to at most 64 KB. Daily capture and full source files
+are explicit additions, not generic startup context. The complete contract
+is in `protocols/session-continuity.md`.
 
 ## Criteria-First Dispatch
 
@@ -133,22 +133,10 @@ Otherwise dispatch **Reader**.
 ## Session Flow
 
 ### Phase 1: Gather (parallel where possible)
-Launch agents based on command type:
-
-| Command | Agents Launched |
-|---------|----------------|
-| `/hi` general fallback | No fixed agent; semantic handoff via `protocols/intent-general.md` |
-| `/daily-reflection` or `/hi daily reflection` | None at start (context bundle + inline semantic queries); Thinker optional at Step 4; Scribe at pre-output capture |
-| `/review` or `/hi review my goals` | None (inline retrieval and synthesis) |
-| `/weekly` or `/hi weekly review` | None (inline retrieval) |
-| `/decision` or `/hi should I…` | Thinker (dual-leg); retrieval inline |
-| `/explore` or `/hi explore` | None (inline wide-net searches) |
-| `/energy-audit` or `/hi I'm drained` | None (inline retrieval; include amenity floor check) |
-| `/prm` | Researcher (daily-note scanning for DL0-1 mentions) + Challenger (vulnerability probing) |
-| Read mode (via `/hi`) | Reader (1-4 instances by lens) + Researcher + Scout + Thinker (parallel) |
-| Work meeting transcript | Meeting (Executive mode — action items + decisions) |
-| `/curate` or `/hi triage inbox` | Ad-hoc agent (goal-aware Readwise triage — see `commands/curate.md`) |
-| `/forget` (intent) or `/hi scan my wip` | Forgetter (mid-tier voices; bounded sweep, decay report under `<paths.agent_findings>/`) |
+Which agents a route launches is declared once, in `harness/intents.toml`
+(`agents`, `parallel`) and each command's own procedure; read the catalog
+(`scripts/intent_coverage.py catalog`) rather than a table here, so the
+dispatch shape cannot drift from the registry that lint validates.
 
 ### Phase 2: Synthesize
 - Synthesizer takes Researcher's brief and produces structured output

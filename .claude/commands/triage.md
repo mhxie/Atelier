@@ -70,12 +70,12 @@ work.
 | Recurring obligations | `recurring.py` | one overdue/due-soon obligation | entries with `status` overdue or due-soon |
 | Aggregate freshness | `aggregate_freshness.py` | one stale aggregate | `stale_count` |
 | Routine health | `routine_audit.py` plus fired routine cues | one anomaly or failed cycle | `counts.with_failure_diagnostic` + `counts.no_recovery` + `counts.schedule_disagreements` |
-| Intent coverage | `intent_coverage.py` | one proposed local pattern | `len(proposals)` (`phrases` are observe) |
+| Intent coverage | `intent_coverage.py` | one recurring unrouted request | `len(proposals)` (`phrases` are observe) |
 
 Dashboard columns: lane, cue severity, actionable count, oldest item or latest
 failure, and the next safe action. Distinguish `actionable`, `observe`, and
-`unavailable`. For intent coverage, raw misses are `observe`; only proposed
-patterns count as actionable. For routine health, a recovered historical
+`unavailable`. For intent coverage, raw misses are `observe`; only recurring
+proposals count as actionable. For routine health, a recovered historical
 failure is `observe`, not a retry candidate.
 
 After the dashboard, ask for a lane and optional batch size. Default to the
@@ -167,9 +167,15 @@ show at most `BATCH_SIZE` entries of its `proposals` array (phrase, target
 intent, count, distinct days). `phrases` is the raw miss table and stays
 observe-only. If `proposals` is empty, report the lane clear even when raw
 misses exist.
-For accepted patterns, preview the additive change to
-`harness/intents.local.toml`; write only approved rows and do not modify the
-canonical `harness/intents.toml` from this workflow.
+For each accepted proposal, say which fix applies: sharpen a row's
+`description`, add the phrase as an `examples` entry, add a private row for a
+private capability, or write a new procedure.
+Preview any additive `examples` change to `harness/intents.local.toml`; write
+only approved rows and do not modify the canonical `harness/intents.toml` from
+this workflow. Record each accepted or rejected proposal with its one-sentence
+reason: `uv run scripts/decisions.py record --class triage/intent-coverage
+--subject "<phrase>" --verdict <accept|reject> --reason "<sentence>"
+--feature target=<intent>` (`protocols/decision-ledger.md`).
 
 ## Phase 3: batch close
 

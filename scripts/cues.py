@@ -1587,78 +1587,123 @@ def check_career_growth(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_eval_regression(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Compare the two most recent eval snapshots; cue on a routing drop.
+    """Compare the two most recent eval snapshots; cue on a route-coverage drop.
 
     The eval harness exists so evolution is measured; a snapshot that scores
-    below its predecessor must reach the user, not sit in a directory.
+    below its predecessor must reach the user, not sit in a directory. The
+    routing score is the share of `/hi` routes that landed on a catalog row
+    with confidence (see scripts/eval_run.py).
     """
+    import re
+
     evals_dir = _meta_dir(ov) / "evals"
     if not evals_dir.is_dir():
         return None, "no evals recorded; skip"
-    snapshots = sorted(evals_dir.glob("*.json"))[-2:]
+    # scripts/eval_run.py writes `<date>-<sha>.json`. The directory also holds
+    # working files (routing_cases.json), and those sort AFTER every dated name,
+    # so a bare glob would always pick one as the newer snapshot and the cue
+    # could never fire.
+    dated = re.compile(r"^\d{4}-\d{2}-\d{2}-[^/]+\.json$")
+    snapshots = sorted(s for s in evals_dir.glob("*.json") if dated.match(s.name))[-2:]
     if len(snapshots) < 2:
-        return None, f"{len(snapshots)} snapshot(s); need 2 to compare"
+        return None, f"{len(snapshots)} dated snapshot(s); need 2 to compare"
     try:
-        prev, curr = (json.loads(p.read_text(encoding="utf-8")) for p in snapshots)
+        prev, curr = (json.loads(s.read_text(encoding="utf-8")) for s in snapshots)
     except (OSError, json.JSONDecodeError) as exc:
         return None, f"snapshot unreadable: {exc!r}"
-    p_score = prev.get("routing", {}).get("score")
-    c_score = curr.get("routing", {}).get("score")
-    if not isinstance(p_score, (int, float)) or not isinstance(c_score, (int, float)):
+    tracked = (
+        ("route coverage", lambda snap: snap.get("routing") or {}),
+        ("judged routing", lambda snap: (snap.get("judged") or {}).get("routing") or {}),
+    )
+    drops: list[str] = []
+    incomparable: list[str] = []
+    seen = 0
+    for label, pick in tracked:
+        p_block, c_block = pick(prev), pick(curr)
+        p_score, c_score = p_block.get("score"), c_block.get("score")
+        if not isinstance(p_score, (int, float)) or not isinstance(c_score, (int, float)):
+            continue
+        # A snapshot predating the metric label measured something else under the
+        # same key. Comparing across metrics manufactures a regression instead of
+        # reporting one.
+        if p_block.get("metric") != c_block.get("metric"):
+            incomparable.append(
+                f"{label} ({p_block.get('metric') or 'unlabelled'} vs {c_block.get('metric') or 'unlabelled'})"
+            )
+            continue
+        seen += 1
+        if c_score < p_score:
+            drops.append(f"{label} {p_score:.0%} -> {c_score:.0%}")
+    if seen == 0:
+        if incomparable:
+            return None, f"no comparable routing scores; metric changed: {'; '.join(incomparable)}"
         return None, "no comparable routing scores"
-    if c_score >= p_score:
-        return None, f"routing {p_score} -> {c_score}; no regression"
+    if not drops:
+        return None, f"{seen} routing metric(s) held; no regression"
     return (
         Cue(
             key="eval_regression",
             severity="hard",
             command_path="scripts/eval_run.py",
             message=(
-                f"Eval regression: routing {p_score:.0%} -> {c_score:.0%} "
+                f"Eval regression: {'; '.join(drops)} "
                 f"({snapshots[0].name} -> {snapshots[1].name}). "
-                f"看 `{snapshots[1].name}` 里的 misses, 修复或有意接受后重跑 eval."
+                f"看 `{snapshots[1].name}` 里的 misses, 补 catalog 或有意接受后重跑 eval."
             ),
         ),
-        f"routing {p_score} -> {c_score}",
+        "; ".join(drops),
     )
 
 
 def check_intent_misses(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Router coverage feedback: recurring fallback phrases deserve a pattern.
+    """Catalog coverage feedback: recurring unrouted `/hi` requests need a row.
 
-    The miss log had a producer for three months with no consumer; the same
-    fallback class recurred the whole time. Soft cue at 5+ misses in 14 days.
+    Reads the route ledger (`intent_routes/`, every kind except `routed`)
+    plus the legacy miss log (`intent_misses/`, all lines). Soft cue at 5+
+    unrouted requests in 14 days.
     """
-    miss_dir = _meta_dir(ov) / "intent_misses"
-    if not miss_dir.is_dir():
-        return None, "no miss log; skip"
+    dirs = [_meta_dir(ov) / "intent_routes", _meta_dir(ov) / "intent_misses"]
+    if not any(d.is_dir() for d in dirs):
+        return None, "no route log; skip"
     cutoff = today - timedelta(days=14)
     recent = 0
-    for path in sorted(miss_dir.glob("*.jsonl")):
-        try:
-            day = date.fromisoformat(path.stem)
-        except ValueError:
+    for log_dir in dirs:
+        if not log_dir.is_dir():
             continue
-        if day < cutoff:
-            continue
-        try:
-            recent += sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-        except OSError:
-            continue
+        for path in sorted(log_dir.glob("*.jsonl")):
+            try:
+                day = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if day < cutoff:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    kind = json.loads(line).get("match_kind")
+                except (json.JSONDecodeError, AttributeError):
+                    continue
+                if kind != "routed":
+                    recent += 1
     if recent < 5:
-        return None, f"{recent} misses in 14d < 5; silent"
+        return None, f"{recent} unrouted in 14d < 5; silent"
     return (
         Cue(
             key="intent_misses",
             severity="soft",
             command_path="protocols/intent-coverage.md",
             message=(
-                f"过去 14 天有 {recent} 次 `/hi` 未命中确定路由. "
+                f"过去 14 天有 {recent} 次 `/hi` 没一次命中 (general / clarified / corrected). "
                 f"跑 `uv run scripts/intent_coverage.py intent-misses --propose` "
-                f"看候选 pattern, 采纳的加进 `harness/intents.local.toml`."
+                f"看反复出现的请求, 该补 description、加 example 还是写新 procedure."
             ),
         ),
-        f"{recent} misses in 14d",
+        f"{recent} unrouted in 14d",
     )
 
 

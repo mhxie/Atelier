@@ -4,8 +4,8 @@ description: Build or refresh profile files from local notes and reading pattern
 # Introspect
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi rebuild profile`, `/hi who am I`,
-> `/hi refresh profile`). See `harness/intents.toml` `[intents.introspect]` for the full
-> pattern list. Both paths execute this same procedure.
+> `/hi refresh profile`). See `harness/intents.toml` `[intents.introspect]` for the row's
+> example phrases. Both paths execute this same procedure.
 
 Build or refresh your self-model by examining your local notes, session history, and reading patterns. Produces three profile files that the rest of the system consults.
 

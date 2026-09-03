@@ -1,203 +1,147 @@
-# Portable intent router registry.
+# Intent catalog for `/hi <context>` (Claude Code) and `$hi <context>` (Codex).
 #
-# Canonical registry of `/hi <context>` intent rules. Each row maps a set of
-# trigger phrases / format markers to a routing decision: which mode of /hi to
-# invoke, which agents the orchestrator should expect to dispatch, and which
-# profile files to pre-read.
+# The orchestrator classifies the request against every row's `description`
+# and executes exactly one `procedure`. Classification is model judgment: no
+# field here is substring-matched and no row outranks another. Write each
+# description so it is precise and disjoint from its siblings; that text is
+# the whole routing contract.
 #
-# Source of truth: this file. `.claude/commands/hi.md` consumes the selected
-# row; the prose does not duplicate trigger phrases, procedures, or agent
-# lists. To add or change a route, edit this file and the selected procedure.
-#
-# Discoverability: Codex and other tools read this TOML directly; no helper
-# subcommand. The orchestrator surfaces the matched intent inline on every
-# `/hi` dispatch (see hi.md § Load and dispatch); there is no
-# opt-in flag.
+# The gitignored overlay `harness/intents.local.toml` may extend `examples`
+# for existing rows and may add private rows (`description` + `procedure`
+# pointing at an existing local file, typically a private feature's
+# SKILL.md) that this public catalog must never carry. It cannot change any
+# other field of a canonical row.
 #
 # Schema:
-#   patterns                  list of trigger phrases / format markers (case
-#                             insensitive, substring-match by default; the
-#                             dispatch helper treats list members as ORed)
-#   mode                      string identifier of a /hi sub-mode (e.g.,
-#                             "capture-fast-path", "read-and-discuss")
+#   description               one line: which requests this row serves. The
+#                             classifier reads only this field.
+#   examples                  optional short phrases in any language that
+#                             illustrate the row; informational, never matched
+#   mode                      string identifier of the /hi sub-mode
 #   procedure                 authoritative project-relative workflow file;
 #                             the router reads only this file after selection
-#   context_budget_bytes      default serialized context projection budget;
-#                             operational rows are skipped by /hi even though
-#                             the helper retains a small diagnostic budget
-#   agents                    list of agent keys from harness/agents.toml
-#                             that the orchestrator expects to dispatch
-#                             (informational; not a hard contract)
-#   profile_reads             list of filenames under profile/ that the
-#                             orchestrator should pre-read before dispatch
-#   priority                  int; higher = more specific, matched first.
-#                             The fallback intent is priority = 0.
-#   pattern                   coordination pattern (one of:
-#                             "orchestrator-subagent", "generator-verifier",
-#                             "agent-team", "shared-state", "solo")
-#   expected_subagent_count   int hint for review tooling and dispatch-shape
-#                             reasoning. 1 if a single agent; otherwise the
-#                             typical-case count.
-#   parallel                  bool; whether the agents dispatch in parallel
-#                             (informational; the actual dispatch shape is
-#                             still the orchestrator's call)
+#   context_budget_bytes      whole-output ceiling for scripts/context_bundle.py;
+#                             32768 when profile files are preloaded (they land
+#                             whole), 8192 for continuity-only rows
+#   agents                    agent keys from harness/agents.toml the
+#                             procedure typically dispatches (informational)
+#   profile_reads             filenames under profile/ to pre-read before
+#                             dispatch; empty means no context bundle
+#   pattern                   coordination pattern annotation; the closed
+#                             value set and the no-branching rule are defined
+#                             once in harness/agents.toml
+#   expected_subagent_count   typical dispatch count hint for review tooling
+#   parallel                  whether the initial agents dispatch in one batch
 #
-# Design note: keep the schema minimal and stable. Resist fields that encode
-# current-model assumptions (model ids, token budgets, specific tool names).
-# `pattern` is annotation only — see `protocols/orchestrator.md` § Pattern
-# field contract for the no-branching rule and the closed 5-value enum.
-#
-# Coverage feedback loop: unclassified `/hi` inputs are logged for batch
-# review. Phrases recurring above the threshold are candidate triggers for
-# rows here. Contract, schema, threshold, and report workflow live in
-# `protocols/intent-coverage.md` (single source of truth — do not restate
-# path / threshold here).
+# Keep the schema minimal and stable. Resist fields that encode current-model
+# assumptions. Route logging and coverage review: protocols/intent-coverage.md.
 
-# Capture also matches on input shape, not only literal phrases: a date-prefixed
-# factual narrative without analytical question (e.g., `5/4 早上去了 X, 中午
-#吃了 Y`) routes here even though no `patterns` substring matches. The
-# orchestrator decides on shape via `.claude/commands/hi.md` § Contextual
-# routing. Keep `patterns` for
-# explicit phrases; do not add structural placeholders here.
-#
-# Entry-hint skill: `.claude/skills/capture/SKILL.md` (forwards into `/hi`;
-# see `protocols/runtime-adapters.md` § Runtime Surfaces).
+# Capture matches on shape as well as phrase: a date-prefixed factual narrative
+# with no analytical question is capture even when nothing below appears.
+# Entry-hint skill: `.claude/skills/capture/SKILL.md` (forwards into `/hi`).
 [intents.capture]
-patterns = [
+description = "Record what the user dictates, verbatim: an explicit 记一下 / log this / save this, or a date-prefixed factual narrative of events with no analytical question."
+examples = [
     "记一下",
     "记录",
     "log this",
     "just write down",
-    "just save this",
     "save this",
+    "5/4 早上去了 X, 中午吃了 Y",
 ]
 mode = "capture-fast-path"
 procedure = "protocols/intent-capture.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["scribe"]
 profile_reads = []
-priority = 50
 pattern = "solo"
 expected_subagent_count = 1
 parallel = false
 
-# Reading routes to `.claude/commands/read.md`. Initial dispatch is
-# Reader + Researcher; Reviewer + Challenger fire later as a write-back gate
-# (not the routing announcement chain). `agents` here = the initial dispatch
-# only, matching what the routing announcement claims is happening.
-#
-# Pattern note: do NOT add bare `"read"` here. Substring matching means a bare
-# `"read"` snags compound phrases that belong to lower-priority intents:
-# `"curate readwise"`, `"curate my reading"`, `"readwise triage"`, `"open
-# threads"` (intents.curate, intents.explore). Use phrase-shaped variants
-# (`"read this"`, `"read it"`, `"let's read"`, `"read with"`) so the reading
-# intent fires on natural-language reading triggers without stealing other
-# intents' phrases.
-#
-# Entry-hint skill: `.claude/skills/reading/SKILL.md` (forwards into `/hi`;
-# see `protocols/runtime-adapters.md` § Runtime Surfaces). The skill's
-# description enumerates "do NOT trigger" cases because URL presence alone is
-# not a clean primary-intent signal.
+# Reading routes to `.claude/commands/read.md`. Initial dispatch is Reader +
+# Researcher; Reviewer + Challenger fire later as a write-back gate. A URL or
+# wikilink that is merely part of a larger request (a day's events, an inbox
+# triage, a question with a citation) is not reading.
+# Entry-hint skill: `.claude/skills/reading/SKILL.md` (forwards into `/hi`).
 [intents.reading]
-patterns = [
-    "http://",
-    "https://",
-    "[[",
-    "let's read",
-    "read this",
-    "read it",
-    "read with",
-    "discuss this",
+description = "Read and discuss a written article, paper, or note the user supplies as the main payload: a URL, a [[wikilink]], pasted text, or 'read this' / 'discuss this'."
+examples = [
+    "read this https://example.com/post",
+    "let's read [[Some Note]]",
     "discuss this article",
-    "let's discuss",
+    "read with me",
 ]
 mode = "read-and-discuss"
 procedure = ".claude/commands/read.md"
-context_budget_bytes = 6144
+context_budget_bytes = 32768
 agents = ["reader", "researcher"]
 profile_reads = ["identity.md"]
-priority = 40
 pattern = "agent-team"
 expected_subagent_count = 2
 parallel = true
 
 [intents.finance-analysis]
-patterns = [
+description = "Analyze a company, earnings report, cash flow, or capital expenditure, or an investing signal tied to specific securities or sectors (财报, 自由现金流, hyperscaler capex); general AI-industry news, talent moves, or research trends are not this row."
+examples = [
     "财报",
-    "公司现金流",
     "自由现金流",
     "资本开支",
     "股票分析",
-    "市场信号",
-    "earnings report",
     "earnings results",
-    "quarterly results",
     "free cash flow",
-    "company cash flow",
-    "capital expenditure",
-    "market signal",
-    "hyperscaler",
-    "ai cycle",
+    "hyperscaler capex",
 ]
 mode = "finance-analysis"
 procedure = "protocols/analysis-signals.md"
-context_budget_bytes = 6144
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["expertise.md"]
-priority = 46
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
 [intents.meeting]
-patterns = [
-    "meeting",
+description = "Process a work meeting (standup, 1:1, team call) transcript or notes into structured notes with decisions, action items, and next steps."
+examples = [
+    "meeting notes",
     "standup",
     "1:1",
-    "meeting notes",
+    "process this meeting transcript",
 ]
 mode = "meeting-process"
 procedure = "protocols/intent-meeting.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["meeting", "challenger", "curator"]
 profile_reads = []
-priority = 30
 pattern = "orchestrator-subagent"
 expected_subagent_count = 3
 parallel = false
 
-# Talk/transcript routes to `.claude/commands/read.md`, which dispatches 1 Reader
-# (Critical lens, with auto-transcript preprocessing) + 1 Researcher (related
-# notes) in parallel.
+# Talk / transcript routes to `.claude/commands/read.md`, which dispatches one
+# Reader (Critical lens, transcript preprocessing) + one Researcher in parallel.
 [intents.talk]
-patterns = [
+description = "Read and discuss a talk, seminar, lecture, podcast, or video (or its transcript) as learning material; not a work meeting, not a written article."
+examples = [
     "seminar",
-    "talk",
-    "transcript",
+    "talk transcript",
     "podcast",
     "video",
 ]
 mode = "transcript-read"
 procedure = ".claude/commands/read.md"
-context_budget_bytes = 6144
+context_budget_bytes = 32768
 agents = ["reader", "researcher"]
 profile_reads = ["identity.md"]
-priority = 20
 pattern = "agent-team"
 expected_subagent_count = 2
 parallel = true
 
-# Sync digests the mobile-capture submodule $OV/zettelm/ into the persistent
-# L2 destinations (daily-notes/<date>.md for narrative; <domain>/raw/ for
-# attachments), enriches with backlinks, appends a 3-prompt footer to the
-# most recent daily note, then stages zettelm deletions for the user to
-# commit. Procedure: .claude/commands/sync.md.
-#
-# Priority 28: between explore (22) and forget (25) on one side and meeting
-# (30) on the other, so explicit "sync" / "digest zettelm" beats the
-# general fallback but does not steal from meeting / reading / capture.
+# Sync digests the mobile-capture submodule $OV/zettelm/ into daily notes and
+# raw attachments, enriches with backlinks, then stages zettelm deletions for
+# the user to commit. Procedure: .claude/commands/sync.md.
 [intents.sync]
-patterns = [
+description = "Ingest the mobile-capture submodule zettelm (fleeting notes from the phone) into the vault and stage its deletions; not the mailed digest report."
+examples = [
     "sync",
     "digest zettelm",
     "digest mobile",
@@ -207,330 +151,259 @@ patterns = [
 ]
 mode = "sync"
 procedure = ".claude/commands/sync.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["researcher", "curator", "challenger", "scribe", "reviewer"]
 profile_reads = []
-priority = 28
 pattern = "orchestrator-subagent"
 expected_subagent_count = 5
 parallel = false
 
-# Forget routes to a Forgetter decay sweep over a bounded scope. Default
-# scope is $OV/wip/ unless the user names a different path. Forgetter
-# proposes; never deletes. See .claude/agents/forgetter.md.
+# Forget routes to a Forgetter decay sweep over a bounded scope. Default scope
+# is $OV/wip/ unless the user names a path. Forgetter proposes; never deletes.
 [intents.forget]
-patterns = [
+description = "Decay sweep over a bounded scope: find notes that are redundant, stale, contradicted, or low-signal and propose what to forget, prune, or clean up."
+examples = [
     "forget",
-    "decay",
     "scan for decay",
     "what should I forget",
     "clean up notes",
     "prune",
     "scan my wip",
-    "scan my drafts",  # legacy alias; pre-rename muscle memory
 ]
 mode = "decay-scan"
 procedure = "protocols/intent-forget.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["forgetter"]
 profile_reads = []
-priority = 25
 pattern = "generator-verifier"
 expected_subagent_count = 1
 parallel = false
 
 # Sub-mode intents (/weekly, /review, /decision, /energy-audit, /explore,
-# /curate, /introspect, /lint, /promote): reachable as direct slashes for
-# muscle memory, and via `/hi <natural language>`. Each row's `procedure`
-# points directly at the authoritative workflow file.
+# /curate, /digest, /introspect, /lint, /promote) stay reachable as direct
+# slashes for muscle memory and via `/hi <natural language>`. Each row's
+# `procedure` points at the authoritative workflow file.
 
-# Weekly review of the past 7 days. Procedure: .claude/commands/weekly.md.
-# Higher priority than `reading` (40) so explicit "weekly" / "this week"
-# beats the bare "read"/"https://" patterns when both could match.
 [intents.weekly]
-patterns = [
+description = "Reflect on the past 7 days (this week, past week, 周复盘): patterns, energy, and follow-through. Multi-day scope; a single day is reflection."
+examples = [
     "weekly review",
     "this week",
     "past 7 days",
     "past week",
     "weekly check-in",
-    "run weekly",
 ]
 mode = "weekly-review"
 procedure = ".claude/commands/weekly.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-priority = 45
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Energy audit across physical / mental / emotional / social dimensions.
-# Procedure: .claude/commands/energy-audit.md. Sits in the "Plan" cluster
-# alongside review/decision; priority 43 between weekly (45) and review (42)
-# so a direct phrase like "energy audit" beats the goal-review keywords.
 [intents.energy-audit]
-patterns = [
+description = "Audit physical, mental, emotional, and social energy when the user feels drained, burnt out, or exhausted, or asks for an energy check."
+examples = [
     "energy audit",
-    "drained",
+    "I'm so drained",
     "burnt out",
-    "burned out",
     "exhausted",
     "energy check",
 ]
 mode = "energy-audit"
 procedure = ".claude/commands/energy-audit.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-priority = 43
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Goal review: quarterly full review or monthly light pulse. Procedure:
-# .claude/commands/review.md. Retrieval and synthesis run inline; no dispatch. Patterns are deliberately specific
-# ("review my goals" not bare "review") so they never collide with reading
-# patterns ("read", "discuss", URLs) at priority 40.
 [intents.review]
-patterns = [
+description = "Goal review against directions: a quarterly full review or a monthly pulse on whether the stated goals still hold."
+examples = [
     "review my goals",
     "goal review",
     "check directions",
     "goal pulse",
-    "goal check",
     "quarterly review",
 ]
 mode = "goal-review"
 procedure = ".claude/commands/review.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-priority = 42
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Decision journal: structured framework cross-validation for a hard choice.
-# Procedure: .claude/commands/decision.md. Retrieval runs inline; the only
-# dispatch is the Thinker (dual-leg at this call site).
+# Decision journal: retrieval runs inline; the only dispatch is the Thinker
+# (dual-leg at this call site).
 [intents.decision]
-patterns = [
-    "should I",
+description = "Help decide a hard personal or professional choice with structured framework cross-validation: should I, torn between, help me think this through."
+examples = [
+    "should I take the offer",
     "help me decide",
     "help me think through",
     "torn between",
-    "torn on whether",
     "decision journal",
-    "make a decision",
 ]
 mode = "decision-journal"
 procedure = ".claude/commands/decision.md"
-context_budget_bytes = 6144
+context_budget_bytes = 32768
 agents = ["thinker"]
 profile_reads = ["identity.md", "directions.md"]
-priority = 35
 pattern = "orchestrator-subagent"
 expected_subagent_count = 1
 parallel = false
 
-# Open exploration: surface forgotten threads, cross-domain links, evolution
-# of thinking. Procedure: .claude/commands/explore.md. The orchestrator runs
-# the wide net of semantic + grep + time-shifted searches inline.
 [intents.explore]
-patterns = [
+description = "Open exploration of the vault: forgotten threads, cross-domain links, what the user is missing, and how their thinking has evolved."
+examples = [
     "explore",
     "wander",
     "what am I missing",
     "forgotten connections",
     "open threads",
-    "what's interesting",
 ]
 mode = "open-exploration"
 procedure = ".claude/commands/explore.md"
-context_budget_bytes = 6144
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md"]
-priority = 22
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Curate Readwise inbox against active goals. Procedure:
-# .claude/commands/curate.md. Dispatches a general-purpose ad-hoc agent
-# (not a named cercle role), so `agents = []`; pattern is solo.
-#
-# Priority 23: above explore (22) so Readwise-specific patterns ("recent
-# saves", "my saves") win over explore's generic "what's interesting" when
-# both could substring-match. All curate patterns are inbox/readwise-scoped,
-# so false positives against explore are structurally unlikely.
+# Curate dispatches a general-purpose ad-hoc agent, not a named cercle role,
+# so `agents = []`.
 [intents.curate]
-patterns = [
+description = "Score and triage the Readwise inbox or recent saves against active goals."
+examples = [
     "triage inbox",
-    "curate inbox",
-    "curate my reading",
     "curate readwise",
-    "readwise triage",
     "score my inbox",
     "recent saves",
-    "my saves",
     "browse saves",
-    "browse inbox",
-    "readwise saves",
 ]
 mode = "curate-inbox"
 procedure = ".claude/commands/curate.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-priority = 23
 pattern = "solo"
 expected_subagent_count = 1
 parallel = false
 
-# Daily / weekly digest: action surface above the fold, routine intel below,
-# written to $OV and mailed. Procedure: .claude/commands/digest.md. The
-# orchestrator does the judgment inline (overview, decisions, article scoring)
-# and the deterministic work belongs to routine_digest.py / daily_brief.py, so
-# `agents = []` and no subagent is dispatched.
-#
-# Priority 26: above curate (23) because a digest run also reads the Readwise
-# inbox, and below sync (28) so sync keeps its explicit "digest zettelm" /
-# "digest mobile" phrases. Bare "digest" is deliberately not a pattern: it is a
-# short generic substring that would swallow "digest this article". Note that
-# "日报" has the same defect and is still listed: it matched "read wip的日报周报
-# 开发" on 2026-08-31, a request to read this feature's source rather than run
-# it. Narrowing it needs a routing decision, not just an edit here.
-#
-# "周报" routes here rather than to intents.weekly (45). Weekly review keeps its
-# own explicit English patterns plus the /weekly command name; move this pattern
-# if the Chinese term should mean the reflection review instead.
+# Digest: judgment inline, deterministic work in routine_digest.py and
+# daily_brief.py, so no subagent is dispatched. 周报 means this digest, not
+# the weekly reflection review.
 [intents.digest]
-patterns = [
+description = "Produce or mail the daily or weekly routine digest report (日报 / 周报): the action surface above the fold plus routine intel below."
+examples = [
     "日报",
     "周报",
     "今日简报",
     "routine digest",
     "daily digest",
-    "weekly digest",
     "汇总 routine",
-    "routine 汇总",
     "digest 邮件",
-    "邮件 digest",
 ]
 mode = "digest"
 procedure = ".claude/commands/digest.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-priority = 26
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Promote L2 notes into a schema-compliant L4 wiki entry. Procedure:
-# .claude/commands/promote.md. Researcher (Phase 1 candidate gather) then
-# Curator (Phase 2 draft); sequential, so parallel = false.
+# Promote: Researcher (candidate gather) then Curator (draft); sequential.
 [intents.promote]
-patterns = [
+description = "Promote L2 notes into a schema-compliant L4 wiki entry: canonize, create or promote a wiki entry."
+examples = [
     "promote to wiki",
-    "promote this",
-    "L4 entry",
     "canonize this",
     "create wiki entry",
-    "wiki promote",
+    "L4 entry",
 ]
 mode = "promote"
 procedure = ".claude/commands/promote.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["researcher", "curator"]
 profile_reads = []
-priority = 14
 pattern = "orchestrator-subagent"
 expected_subagent_count = 2
 parallel = false
 
-# Wiki + harness lint suite. Procedure: .claude/commands/lint.md. Purely
-# script-driven (harness_lint.py, lint.py, staleness.py, privacy_check.py,
-# zk_audit.py, auto_memory_audit.py); no subagent dispatch, hence
-# `agents = []` and expected_subagent_count = 0.
+# Lint is purely script-driven; no subagent dispatch.
 [intents.lint]
-patterns = [
+description = "Run the wiki and harness lint suite: orphans, structural checks, privacy and staleness audits."
+examples = [
     "lint the wiki",
     "wiki audit",
-    "structural checks",
     "wiki orphans",
     "run lint",
-    "wiki lint",
 ]
 mode = "lint"
 procedure = ".claude/commands/lint.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = []
 profile_reads = []
-priority = 12
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
-# Build / refresh profile/ self-model from local notes. Procedure:
-# .claude/commands/introspect.md. The orchestrator does most of the
-# walking; agents fire as a quality gate (Reviewer + Challenger in
-# parallel at Step 5), hence pattern = generator-verifier.
+# Introspect: the orchestrator walks the notes; Reviewer + Challenger fire in
+# parallel as the quality gate.
 [intents.introspect]
-patterns = [
+description = "Build or refresh the profile/ self-model from local notes and reading history: who am I, rebuild or refresh profile."
+examples = [
     "introspect",
     "rebuild profile",
     "who am I",
-    "self-model",
-    "build my profile",
     "refresh profile",
 ]
 mode = "introspect"
 procedure = ".claude/commands/introspect.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = ["reviewer", "challenger"]
 profile_reads = []
-priority = 10
 pattern = "generator-verifier"
 expected_subagent_count = 2
 parallel = true
 
-# Daily reflection is explicit. Unclassified requests belong to the semantic
-# handoff below instead of silently starting a reflection workflow.
-# `agents` lists the roles the procedure can dispatch: Thinker (optional,
-# Step 4) and Scribe (pre-output capture). Retrieval runs inline; the
-# typical session dispatches one of the two, hence expected_subagent_count.
+# Daily reflection is explicit. It is never the default for a request that
+# fits nothing else; that is `general`.
 [intents.reflection]
-patterns = [
+description = "Reflect on a single day, today or a named date (每日复盘, let's reflect on today), requested as such. Never the default for an unclassified request."
+examples = [
     "daily reflection",
     "let's reflect",
-    "reflect on",
     "每日复盘",
     "复盘今天",
     "反思一下",
 ]
 mode = "daily-reflection"
 procedure = ".claude/commands/daily-reflection.md"
-context_budget_bytes = 8192
+context_budget_bytes = 32768
 agents = ["thinker", "scribe"]
 profile_reads = ["identity.md", "directions.md"]
-priority = 10
 pattern = "orchestrator-subagent"
 expected_subagent_count = 1
 parallel = false
 
-# Fallback: the deterministic registry has no high-confidence match. Hand the
-# request back to the active runtime's semantic skill / app / tool routing.
+# Handoff: no Atelier workflow fits. The runtime's ordinary skill, app, agent,
+# or tool routing handles the request.
 [intents.general]
-patterns = []
+description = "No Atelier workflow above fits: hand the request to the runtime's ordinary skill, app, agent, or tool routing (engineering tasks, questions, one-off requests)."
+examples = []
 mode = "semantic-handoff"
 procedure = "protocols/intent-general.md"
-context_budget_bytes = 4096
+context_budget_bytes = 8192
 agents = []
 profile_reads = []
-priority = 0
 pattern = "solo"
 expected_subagent_count = 0
 parallel = false

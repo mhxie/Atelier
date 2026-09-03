@@ -4,8 +4,8 @@ description: Run harness, privacy, structural, and staleness checks.
 # /lint — Structural + corpus-level checks over `<paths.wiki>/`
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi lint the wiki`, `/hi wiki audit`,
-> `/hi wiki orphans`). See `harness/intents.toml` `[intents.lint]` for the full pattern
-> list. Both paths execute this same procedure.
+> `/hi wiki orphans`). See `harness/intents.toml` `[intents.lint]` for the row's example
+> phrases. Both paths execute this same procedure.
 
 Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint.py` is the single source of truth, mirroring the `scripts/trust.py` pattern.
 

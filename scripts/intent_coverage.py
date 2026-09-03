@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""Deterministic intent matching, routing projection, and coverage logging.
+"""Intent catalog, route logging, and coverage review for `/hi` and `$hi`.
 
-Claude invokes command specs with ``/command`` and Codex invokes repo skills
-with ``$command``. Their shared ``UserPromptSubmit`` hook projects the matched
-``harness/intents.toml`` row into compact context for the live ``hi`` flow.
+Routing is model judgment: the orchestrator reads the catalog emitted by
+``catalog`` (one line per ``harness/intents.toml`` row), picks the row whose
+``description`` fits the request, and executes that row's ``procedure``.
+Nothing here matches text. This module owns the catalog projection, the
+per-route ledger written by ``intent-log``, and the ``intent-misses`` review
+that turns recurring unrouted requests into catalog work.
 """
 
 from __future__ import annotations
@@ -11,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 import textwrap
 import tomllib
@@ -23,153 +25,23 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 INTENTS_PATH = ROOT / "harness" / "intents.toml"
 
-INTENT_MISS_FALLBACK_DIR = Path.home() / ".cache" / "atelier" / "intent_misses"
-INTENT_MISS_KINDS = ("fallback", "ambiguous", "low_confidence")
+ROUTE_LOG_FALLBACK_DIR = Path.home() / ".cache" / "atelier" / "intent_routes"
+ROUTE_KINDS = ("routed", "general", "clarified", "corrected")
+PRIVATE_ROW_DEFAULTS = {
+    "mode": "private-feature",
+    "context_budget_bytes": 8192,
+    "agents": [],
+    "profile_reads": [],
+    "pattern": "solo",
+    "expected_subagent_count": 0,
+    "parallel": False,
+}
+LEGACY_MISS_KINDS = ("fallback", "ambiguous", "low_confidence")
+INTENT_MISS_KINDS = ROUTE_KINDS + LEGACY_MISS_KINDS
 INTENT_MISS_RUNTIMES = ("claude-code", "codex")
 INTENT_MISS_DISTINCT_DAYS_THRESHOLD = 3
-INTENT_MISS_KINDS_COL_WIDTH = len(",".join(sorted(INTENT_MISS_KINDS)))
-INTENT_ROUTE_SCHEMA_VERSION = 2
-INTENT_ROUTE_CONTEXT_PREFIX = "ATELIER_INTENT_ROUTE "
-INTENT_ROUTE_MAX_CONTEXT_BYTES = 1024
-
-
-def load_intents() -> dict[str, dict[str, Any]]:
-    intents = _load_intents_canonical()
-    overlay = ROOT / "harness" / "intents.local.toml"
-    if overlay.is_file():
-        try:
-            with overlay.open("rb") as handle:
-                local = tomllib.load(handle).get("intents", {})
-        except (OSError, tomllib.TOMLDecodeError):
-            return intents  # a broken overlay must never break routing
-        for name, row in local.items():
-            if not isinstance(row, dict) or name not in intents:
-                continue  # overlay extends existing intents; it cannot invent new ones
-            extra = [p for p in row.get("patterns", []) if isinstance(p, str)]
-            merged = list(intents[name].get("patterns", []))
-            merged.extend(p for p in extra if p not in merged)
-            intents[name]["patterns"] = merged
-    return intents
-
-
-def _load_intents_canonical() -> dict[str, dict[str, Any]]:
-    intents = load_table(INTENTS_PATH, "intents")
-    if not isinstance(intents, dict):
-        raise SystemExit("atelier: harness/intents.toml has no [intents] table")
-    return intents
-
-
-def match_intents(
-    text: str, intents: dict[str, dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Match user text against intents.toml patterns.
-
-    Substring match, case-insensitive. Returns matched intents sorted by
-    descending priority. The fallback intent (empty patterns, priority 0) is
-    included in results ONLY when no other intent matched, mirroring the
-    "no specific intent matched" branch in hi.md.
-    """
-    text_lc = text.lower()
-    matched: list[dict[str, Any]] = []
-    fallback: dict[str, Any] | None = None
-    for name, row in intents.items():
-        if not isinstance(row, dict):
-            continue
-        patterns = row.get("patterns") or []
-        priority = int(row.get("priority", 0))
-        entry = {
-            "name": name,
-            "mode": str(row.get("mode", "")),
-            "procedure": str(row.get("procedure", "")),
-            "context_budget_bytes": int(row.get("context_budget_bytes", 0)),
-            "agents": list(row.get("agents") or []),
-            "profile_reads": list(row.get("profile_reads") or []),
-            "priority": priority,
-            "pattern": str(row.get("pattern", "")),
-            "parallel": bool(row.get("parallel", False)),
-            "expected_subagent_count": int(row.get("expected_subagent_count", 0)),
-        }
-        if not patterns:
-            fallback = entry
-            continue
-        if not isinstance(patterns, list):
-            continue
-        hit = next(
-            (p for p in patterns if isinstance(p, str) and p.lower() in text_lc), None
-        )
-        if hit:
-            entry["matched_pattern"] = hit
-            matched.append(entry)
-    matched.sort(key=lambda e: -int(e["priority"]))
-    if not matched and fallback is not None:
-        fallback["matched_pattern"] = "<fallback: no patterns matched>"
-        matched.append(fallback)
-    return matched
-
-
-def build_intent_route_projection(
-    matches: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    """Project matcher output into the fields needed by the live ``hi`` flow.
-
-    The projection contains registry data only. It never includes the raw user
-    input, session metadata, or filesystem paths. Ambiguous top-priority rows
-    are preserved so the orchestrator can clarify instead of trusting the
-    stable-sort winner.
-    """
-    if not matches:
-        return None
-
-    def route_fields(match: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "name": str(match.get("name", "")),
-            "mode": str(match.get("mode", "")),
-            "procedure": str(match.get("procedure", "")),
-            "context_budget_bytes": int(match.get("context_budget_bytes", 0)),
-            "agents": list(match.get("agents") or []),
-            "profile_reads": list(match.get("profile_reads") or []),
-            "priority": int(match.get("priority", 0)),
-            "matched_pattern": str(match.get("matched_pattern", "")),
-            "parallel": bool(match.get("parallel", False)),
-        }
-
-    first = matches[0]
-    top_priority = int(first.get("priority", 0))
-    is_fallback = str(first.get("matched_pattern", "")).startswith("<fallback")
-    top_matches = [
-        match
-        for match in matches
-        if int(match.get("priority", 0)) == top_priority
-        and not str(match.get("matched_pattern", "")).startswith("<fallback")
-    ]
-    projection: dict[str, Any] = {
-        "schema": INTENT_ROUTE_SCHEMA_VERSION,
-        "source": "harness/intents.toml",
-        **route_fields(first),
-        "fallback": is_fallback,
-        "ambiguous": len(top_matches) > 1,
-    }
-    if projection["ambiguous"]:
-        projection["tied_candidates"] = [route_fields(match) for match in top_matches]
-    return projection
-
-
-def _emit_intent_route_projection(projection: dict[str, Any]) -> None:
-    """Inject one bounded route packet through the shared hook protocol."""
-    context = INTENT_ROUTE_CONTEXT_PREFIX + json.dumps(
-        projection,
-        ensure_ascii=False,
-        separators=(",", ":"),
-    )
-    if len(context.encode("utf-8")) > INTENT_ROUTE_MAX_CONTEXT_BYTES:
-        return
-    payload = {
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": context,
-        }
-    }
-    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+INTENT_MISS_KINDS_COL_WIDTH = max(len(k) for k in INTENT_MISS_KINDS)
+FALLBACK_INTENT = "general"
 
 
 def load_table(path: Path, table: str) -> dict[str, Any]:
@@ -182,217 +54,223 @@ def load_table(path: Path, table: str) -> dict[str, Any]:
     return value
 
 
-def cmd_intent(args: argparse.Namespace) -> int:
-    """Match user text against the shared intent router for diagnostics.
+def _load_intents_canonical() -> dict[str, dict[str, Any]]:
+    """The validated shared loader; tests may point ROOT at a copied harness."""
+    from registries import RegistryError, load_intents as _load
 
-    Mirrors the substring + priority matcher hi.md describes. Returns the
-    winning intent + its dispatch shape (mode, agents, parallel). When
-    multiple non-fallback intents match (ambiguity), all winners are listed
-    and the caller should ask for clarification.
+    try:
+        return _load(ROOT)
+    except RegistryError as exc:
+        raise SystemExit(f"atelier: {exc}") from exc
+
+
+def resolve_private_procedure(value: Any) -> Path | None:
+    """Where a private row's procedure lives: absolute, `$OV`-relative, or
+    `<paths.private_features>`-relative (so `my-feature/SKILL.md` works)."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = Path(value.strip()).expanduser()
+    candidates = [raw] if raw.is_absolute() else []
+    ov = os.environ.get("OV")
+    if ov and not raw.is_absolute():
+        candidates.append(Path(ov) / raw)
+        try:
+            from _paths import tier_segments
+
+            candidates.append(Path(ov) / tier_segments().get("private_features", "_tools/features") / raw)
+        except Exception:  # noqa: BLE001  (registry problems must not break routing)
+            pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def validate_private_row(name: str, row: Any) -> list[str]:
+    """Problems that make an overlay-only row unusable (empty = accepted)."""
+    problems: list[str] = []
+    if not isinstance(row, dict):
+        return [f"{name}: not a table"]
+    if not isinstance(row.get("description"), str) or not row["description"].strip():
+        problems.append(f"{name}: needs a one-line description")
+    if resolve_private_procedure(row.get("procedure")) is None:
+        problems.append(f"{name}: procedure must be an existing file (absolute, $OV-relative, or under the private features tier)")
+    examples = row.get("examples", [])
+    if not isinstance(examples, list) or any(not isinstance(e, str) for e in examples):
+        problems.append(f"{name}: examples must be a list of strings")
+    return problems
+
+
+def merge_overlay(
+    intents: dict[str, dict[str, Any]], overlay: Path
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Apply `intents.local.toml`: extra ``examples`` on canonical rows, and
+    private rows (description + procedure) the public catalog must not carry.
+
+    A canonical row's other fields cannot be overridden. A broken overlay or
+    an invalid private row never breaks routing; problems are returned.
+    Legacy overlays that still say ``patterns`` are read as ``examples``.
     """
-    text = " ".join(args.text).strip()
-    if not text:
-        raise SystemExit(
-            "atelier: intent requires a text argument. Example: intent 'review my goals'"
-        )
-    intents = load_intents()
-    matches = match_intents(text, intents)
+    problems: list[str] = []
+    if not overlay.is_file():
+        return intents, problems
+    try:
+        with overlay.open("rb") as handle:
+            local = tomllib.load(handle).get("intents", {})
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return intents, [f"overlay unreadable: {exc}"]
+    if not isinstance(local, dict):
+        return intents, ["overlay [intents] is not a table"]
+    for name, row in local.items():
+        if not isinstance(row, dict):
+            problems.append(f"{name}: not a table")
+            continue
+        if name in intents:
+            extra = row.get("examples", row.get("patterns", []))
+            if not isinstance(extra, list):
+                problems.append(f"{name}: examples must be a list")
+                continue
+            merged = [e for e in intents[name].get("examples", []) if isinstance(e, str)]
+            merged.extend(e for e in extra if isinstance(e, str) and e not in merged)
+            intents[name]["examples"] = merged
+            continue
+        row_problems = validate_private_row(name, row)
+        if row_problems:
+            problems.extend(row_problems)
+            continue
+        private = dict(PRIVATE_ROW_DEFAULTS)
+        private.update({k: v for k, v in row.items() if k in PRIVATE_ROW_DEFAULTS or k in ("description", "examples", "procedure")})
+        private["procedure"] = str(resolve_private_procedure(row["procedure"]))
+        private["private"] = True
+        intents[name] = private
+    return intents, problems
 
-    if not matches:
-        # Shouldn't happen since fallback is included on empty, but defend.
-        payload: dict[str, Any] = {
-            "input": text,
-            "matched": [],
-            "ambiguous": False,
-            "fallback": True,
-        }
-        if args.json:
-            print(json.dumps(payload, indent=2))
-        else:
-            print(f"input: {text}\n(no intent matched and no fallback declared)")
-        return 0
 
-    is_fallback = matches[0].get("matched_pattern", "").startswith("<fallback")
-    top_priority = int(matches[0]["priority"])
-    top_matches = [
-        m
-        for m in matches
-        if int(m["priority"]) == top_priority
-        and not m.get("matched_pattern", "").startswith("<fallback")
-    ]
-    ambiguous = len(top_matches) > 1
+def overlay_path() -> Path:
+    return ROOT / "harness" / "intents.local.toml"
 
-    payload = {
-        "input": text,
-        "winner": matches[0]["name"],
-        "mode": matches[0]["mode"],
-        "procedure": matches[0]["procedure"],
-        "context_budget_bytes": matches[0]["context_budget_bytes"],
-        "agents": matches[0]["agents"],
-        "parallel": matches[0]["parallel"],
-        "profile_reads": matches[0]["profile_reads"],
-        "matched_pattern": matches[0].get("matched_pattern", ""),
-        "priority": top_priority,
-        "ambiguous": ambiguous,
-        "fallback": is_fallback,
-        "all_matches": [
+
+def load_intents() -> dict[str, dict[str, Any]]:
+    """Canonical rows merged with the gitignored overlay (see merge_overlay)."""
+    intents, problems = merge_overlay(_load_intents_canonical(), overlay_path())
+    for problem in problems:
+        sys.stderr.write(f"atelier: intents.local.toml skipped: {problem}\n")
+    return intents
+
+
+def catalog_rows(intents: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """The fields the orchestrator needs to classify and announce a route."""
+    rows: list[dict[str, Any]] = []
+    for name, row in intents.items():
+        rows.append(
             {
-                "name": m["name"],
-                "mode": m["mode"],
-                "procedure": m["procedure"],
-                "context_budget_bytes": m["context_budget_bytes"],
-                "priority": int(m["priority"]),
-                "matched_pattern": m.get("matched_pattern", ""),
-                "agents": m["agents"],
-                "parallel": m["parallel"],
+                "name": name,
+                "description": str(row.get("description", "")).strip(),
+                "mode": str(row.get("mode", "")),
+                "procedure": str(row.get("procedure", "")),
+                "agents": [a for a in (row.get("agents") or []) if isinstance(a, str)],
+                "profile_reads": [
+                    p for p in (row.get("profile_reads") or []) if isinstance(p, str)
+                ],
+                "parallel": bool(row.get("parallel", False)),
+                "examples": [e for e in (row.get("examples") or []) if isinstance(e, str)],
+                "private": bool(row.get("private", False)),
             }
-            for m in matches
-        ],
-    }
-
-    if args.json:
-        print(json.dumps(payload, indent=2))
-        return 0
-
-    print(f"input:    {text}")
-    print(
-        f"winner:   intents.{payload['winner']}  (priority {top_priority}, mode {payload['mode']})"
-    )
-    if payload["matched_pattern"]:
-        print(f"matched:  {payload['matched_pattern']}")
-    print(f"workflow: {payload['procedure']}")
-    print(f"context:  {payload['context_budget_bytes']} bytes")
-    if payload["agents"]:
-        agent_list = ", ".join(payload["agents"])
-        para = " (parallel)" if payload["parallel"] else " (sequential)"
-        print(f"agents:   {agent_list}{para}")
-    else:
-        print("agents:   (none — script-driven or solo orchestrator)")
-    if payload["profile_reads"]:
-        print(f"profile:  {', '.join(payload['profile_reads'])}")
-    if is_fallback:
-        print()
-        print("note: no specific patterns matched; entered the semantic handoff.")
-        print("      clarify only when semantic routing is materially ambiguous.")
-    if ambiguous:
-        print()
-        print(
-            f"AMBIGUOUS: {len(top_matches)} intents at priority {top_priority} match this input:"
         )
-        for m in top_matches:
-            print(
-                f"  - intents.{m['name']}  (pattern: {m.get('matched_pattern', '')}, mode: {m['mode']})"
-            )
-        print("ask the user which intent they meant before dispatching.")
+    return rows
+
+
+def render_catalog(rows: list[dict[str, Any]], *, examples: bool) -> str:
+    """One line per intent: ``name: description`` plus a compact dispatch tag."""
+    lines: list[str] = []
+    for row in rows:
+        agents = ", ".join(row["agents"]) or "-"
+        tag = f"[{agents}{' (parallel)' if row['parallel'] else ''}; {row['procedure']}]"
+        marker = " (private)" if row["private"] else ""
+        lines.append(f"{row['name']}{marker}: {row['description']} {tag}")
+        if examples and row["examples"]:
+            lines.append("  e.g. " + " | ".join(row["examples"]))
+    return "\n".join(lines) + "\n"
+
+
+def cmd_catalog(args: argparse.Namespace) -> int:
+    rows = catalog_rows(load_intents())
+    if args.json:
+        print(json.dumps(rows, ensure_ascii=False, indent=2))
+        return 0
+    sys.stdout.write(render_catalog(rows, examples=args.examples))
     return 0
 
 
-def resolve_intent_hit_dir() -> Path:
-    """Sibling of the miss log; single high-confidence routes, hashed."""
-    return resolve_intent_miss_dir().parent / "intent_hits"
+def resolve_route_log_dir() -> Path:
+    """Where per-route JSONL files live.
 
-
-def write_intent_hit(runtime: str, match: dict[str, Any], text: str) -> None:
-    """One JSONL line per happy-path route: intent, pattern, sha256 of the
-    normalized text. No raw text: this is a denominator, not a history."""
-    import hashlib
-
-    try:
-        directory = resolve_intent_hit_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        line = json.dumps(
-            {
-                "timestamp": datetime.now().isoformat(timespec="seconds"),
-                "runtime": runtime,
-                "intent": match.get("name"),
-                "matched_pattern": match.get("matched_pattern"),
-                "text_sha256": hashlib.sha256(_normalize_phrase(text).encode("utf-8")).hexdigest(),
-            },
-            sort_keys=True,
-        )
-        path = directory / f"{date.today().isoformat()}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-    except OSError:
-        pass  # best-effort; never block a live invocation
-
-
-def resolve_intent_miss_dir() -> Path:
-    """Where intent-miss JSONL files live.
-
-    Prefers `$OV/_meta/intent_misses/` when `$OV` is set (the durable Atelier
-    location alongside `shadow_logs/`). Falls back to
-    `~/.cache/atelier/intent_misses/` otherwise so tests / CI / fresh checkouts
-    without `$OV` can still exercise the round trip.
+    Prefers `$OV/_meta/intent_routes/` when `$OV` is set. Falls back to
+    `~/.cache/atelier/intent_routes/` so tests and fresh checkouts without
+    `$OV` still exercise the round trip.
     """
     ov = os.environ.get("OV")
     if ov:
         from _paths import tier_segments
 
-        return Path(ov) / tier_segments().get("meta", "_meta") / "intent_misses"
-    return INTENT_MISS_FALLBACK_DIR
+        return Path(ov) / tier_segments().get("meta", "_meta") / "intent_routes"
+    return ROUTE_LOG_FALLBACK_DIR
 
 
-def write_intent_miss(payload: dict[str, Any]) -> Path | None:
-    """Append one JSONL line to today's intent-miss log.
+def resolve_intent_miss_dir() -> Path:
+    """Legacy miss-only log written by the retired substring router."""
+    return resolve_route_log_dir().parent / "intent_misses"
+
+
+def route_log_dirs() -> list[Path]:
+    """Directories the review reads: the live route ledger plus legacy misses."""
+    return [resolve_route_log_dir(), resolve_intent_miss_dir()]
+
+
+def write_route_event(payload: dict[str, Any]) -> Path | None:
+    """Append one JSONL line to today's route log.
 
     Returns the file path on success, or None on OSError. Never raises:
-    miss logging is best-effort and must not block a live hi flow.
+    logging is best-effort and must not block a live `/hi` flow.
     """
-    miss_dir = resolve_intent_miss_dir()
+    log_dir = resolve_route_log_dir()
     try:
-        miss_dir.mkdir(parents=True, exist_ok=True)
-        log_file = miss_dir / f"{date.today().isoformat()}.jsonl"
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"{date.today().isoformat()}.jsonl"
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
         return log_file
     except OSError:
         return None
 
 
 def cmd_intent_log(args: argparse.Namespace) -> int:
-    """Record an unclassified native hi invocation for coverage review.
+    """Record one `/hi` route decision.
 
-    Called by the orchestrator after deciding routing. Three trigger cases
-    (see `.claude/commands/hi.md` → "Miss Logging"):
-      - fallback: `intents.general` won by default; nothing else matched.
-      - ambiguous: 2+ non-fallback intents tied at the top priority.
-      - low_confidence: a generic substring matched inside a longer message
-        whose primary intent looked different; orchestrator used
-        `AskUserQuestion` to confirm.
+    Called by the orchestrator after routing, on every contextual invocation:
+      - routed: one catalog row fit with confidence.
+      - general: nothing fit; `intents.general` handed the request off
+        (`--final-dispatch` names what actually ran when known).
+      - clarified: the orchestrator asked the user to pick among candidates.
+      - corrected: a confident route the user redirected after the
+        announcement; `--intent` is the wrong row, `--clarified-to` the
+        right one. This is the false-hit signal.
     """
     raw = args.input.strip()
     if not raw:
         sys.stderr.write("atelier: intent-log skipped (empty --input)\n")
         return 0
-    try:
-        priority_val: int | None = (
-            int(args.initial_priority) if args.initial_priority is not None else None
-        )
-    except (TypeError, ValueError):
-        sys.stderr.write(
-            f"atelier: intent-log dropping --initial-priority (not an int: {args.initial_priority!r})\n"
-        )
-        priority_val = None
     payload: dict[str, Any] = {
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "runtime": args.runtime,
         "raw_input": raw,
         "match_kind": args.match_kind,
-        "initial_match": {
-            "name": args.initial_name or None,
-            "priority": priority_val,
-            "matched_pattern": args.initial_pattern or None,
-        },
+        "intent": args.intent or (FALLBACK_INTENT if args.match_kind == "general" else None),
     }
     if args.candidates:
-        try:
-            payload["ambiguity_candidates"] = json.loads(args.candidates)
-        except json.JSONDecodeError as e:
-            sys.stderr.write(
-                f"atelier: intent-log dropping malformed --candidates (preserved as raw string): {e}\n"
-            )
-            payload["ambiguity_candidates_raw"] = args.candidates
+        candidates = [c.strip() for c in args.candidates.split(",") if c.strip()]
+        if candidates:
+            payload["candidates"] = candidates
     if args.clarified_to:
         payload["clarified_to"] = args.clarified_to
     if args.final_dispatch:
@@ -400,137 +278,99 @@ def cmd_intent_log(args: argparse.Namespace) -> int:
     if args.notes:
         payload["notes"] = args.notes
 
-    path = write_intent_miss(payload)
+    path = write_route_event(payload)
     if path is None:
         sys.stderr.write(
             "atelier: intent-log write failed; skipped (best-effort, never blocks hi)\n"
         )
         return 0
+    if args.match_kind in ("clarified", "corrected") and args.clarified_to:
+        # A clarification or correction is a human routing decision: it
+        # enters the ledger so the precedent judge can learn what "this
+        # kind of request" means, and so false hits have a record.
+        import decisions
+
+        if args.match_kind == "clarified":
+            reason = args.notes or f"user chose {args.clarified_to} over {', '.join(payload.get('candidates', [])) or 'the offered rows'}"
+        else:
+            reason = args.notes or f"user redirected {args.intent or 'the announced route'} to {args.clarified_to}"
+        decisions.record_best_effort(
+            cls="hi/route",
+            subject=_normalize_phrase(raw),
+            verdict=f"{args.match_kind}:{args.clarified_to}",
+            reason=reason,
+            features={"candidates": payload.get("candidates", []), "announced": args.intent, "runtime": args.runtime},
+            source="hi",
+            by="human",
+        )
     if not args.quiet:
         print(f"intent-log: {path}")
-    return 0
-
-
-def _intent_text_from_hook_prompt(prompt: str, runtime: str) -> str | None:
-    """Extract the routed text from a Claude or Codex Atelier entry prompt.
-
-    Claude Code submits `/hi <text>` or `/reflect <text>`. Codex submits the
-    equivalent explicit skills as `$hi <text>` or `$reflect <text>`. An entry
-    with no routed text opens the command's menu and therefore returns None.
-    """
-    stripped = prompt.strip()
-    prefix = r"/(?:hi|reflect)" if runtime == "claude-code" else r"\$(?:hi|reflect)"
-    match = re.fullmatch(
-        rf"{prefix}(?:\s+(.+))?",
-        stripped,
-        re.IGNORECASE | re.DOTALL,
-    )
-    if match:
-        text = (match.group(1) or "").strip()
-        return text or None
-    return None
-
-
-def cmd_intent_hook(args: argparse.Namespace) -> int:
-    """`UserPromptSubmit` hook entry: route projection plus miss capture.
-
-    Reads the hook's stdin JSON (`prompt`, `session_id`, `transcript_path`,
-    etc), detects the runtime's native Atelier entry shape, and injects a
-    bounded projection of the deterministic registry match. It also auto-logs
-    mechanically identifiable fallback or ambiguous branches.
-
-    Cases the hook CANNOT classify (intentional carve-out — the orchestrator
-    retains the in-band `intent-log` path for these):
-      - `low_confidence`: heuristic over message shape; LLM judgment lives
-        in `.claude/commands/hi.md` § Clarify before dispatching.
-      - Post-clarification enrichment (`clarified_to`, `final_dispatch`):
-        only known after `AskUserQuestion` resolves.
-
-    Best-effort throughout: every failure path returns 0. Oversize route
-    projections stay silent so the command can fall back to reading the full
-    registry. A broken hook must never block a live command invocation.
-    """
-    try:
-        data = json.loads(sys.stdin.read())
-    except (json.JSONDecodeError, OSError, ValueError):
-        return 0
-    if not isinstance(data, dict):
-        return 0
-    prompt = str(data.get("prompt", ""))
-    user_text = _intent_text_from_hook_prompt(prompt, args.runtime)
-    if user_text is None:
-        return 0
-    try:
-        intents = load_intents()
-        matches = match_intents(user_text, intents)
-    except (OSError, ValueError, KeyError, tomllib.TOMLDecodeError):
-        return 0
-    if not matches:
-        return 0
-    projection = build_intent_route_projection(matches)
-    if projection is None:
-        return 0
-    is_fallback = matches[0].get("matched_pattern", "").startswith("<fallback")
-    top_priority = int(matches[0]["priority"])
-    top_matches = [
-        m
-        for m in matches
-        if int(m["priority"]) == top_priority
-        and not m.get("matched_pattern", "").startswith("<fallback")
-    ]
-    is_ambiguous = len(top_matches) > 1
-    if is_fallback or is_ambiguous:
-        payload: dict[str, Any] = {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "runtime": args.runtime,
-            "raw_input": user_text,
-            "match_kind": "fallback" if is_fallback else "ambiguous",
-            "initial_match": {
-                "name": matches[0]["name"],
-                "priority": top_priority,
-                "matched_pattern": matches[0].get("matched_pattern", ""),
-            },
-            "logged_by": "user_prompt_submit_hook",
-        }
-        if is_ambiguous:
-            payload["ambiguity_candidates"] = [
-                {
-                    "name": m["name"],
-                    "priority": int(m["priority"]),
-                    "matched_pattern": m.get("matched_pattern", ""),
-                }
-                for m in top_matches
-            ]
-        if data.get("session_id"):
-            payload["session_id"] = str(data["session_id"])
-        write_intent_miss(payload)
-    if len(matches) == 1 and matches[0].get("matched_pattern") not in (None, "", "<fallback: no patterns matched>"):
-        write_intent_hit(args.runtime, matches[0], user_text)
-
-    _emit_intent_route_projection(projection)
     return 0
 
 
 def _normalize_phrase(raw: Any) -> str:
     """Normalize a raw_input string for recurrence aggregation.
 
-    NFKC unifies width / form differences (full-width vs half-width CJK
-    punctuation, ligatures); collapsing whitespace + casefold makes
-    `"improve  the repo"` and `"Improve The Repo"` aggregate together.
-    Trailing length cap matches the original ≤200-char clamp. Punctuation
-    is NOT stripped — `url.com` and `Yes.` should not collide.
+    NFKC unifies width and form differences; collapsing whitespace plus
+    casefold makes `"improve  the repo"` and `"Improve The Repo"` aggregate
+    together. Punctuation is kept so `url.com` and `Yes.` do not collide.
     """
     s = unicodedata.normalize("NFKC", str(raw))
     return " ".join(s.split()).casefold()[:200]
 
 
-def cmd_intent_misses(args: argparse.Namespace) -> int:
-    """Aggregate the intent-miss log for batch coverage review.
+def is_miss(event: dict[str, Any]) -> bool:
+    """Every kind except a confident route counts as a coverage miss."""
+    return str(event.get("match_kind", "")) != "routed"
 
-    Use to spot phrases that recur often enough to become trigger candidates
-    for an existing or new intent. Signal: same phrase logged on
-    INTENT_MISS_DISTINCT_DAYS_THRESHOLD+ distinct file-dates → strong
-    candidate for a `harness/intents.toml` pattern addition.
+
+def load_route_events(
+    since: date | None = None, dirs: list[Path] | None = None
+) -> list[tuple[date, dict[str, Any]]]:
+    """Every (file_date, event) pair across the route ledger and legacy misses.
+
+    file_date is the consumer-side ground truth for `--since` and for the
+    distinct-days signal, which keeps both axes consistent against TZ slips
+    between writer wall-clock and event timestamps.
+    """
+    events: list[tuple[date, dict[str, Any]]] = []
+    for log_dir in dirs if dirs is not None else route_log_dirs():
+        if not log_dir.is_dir():
+            continue
+        for path in sorted(log_dir.glob("*.jsonl")):
+            try:
+                file_date = date.fromisoformat(path.stem)
+            except ValueError:
+                continue
+            if since and file_date < since:
+                continue
+            try:
+                lines = path.read_text(encoding="utf-8").splitlines()
+            except OSError:
+                continue
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append((file_date, event))
+    return events
+
+
+def _proposal_target(stats: dict[str, Any]) -> str | None:
+    return stats.get("clarified") or stats.get("dispatched") or None
+
+
+def cmd_intent_misses(args: argparse.Namespace) -> int:
+    """Aggregate unrouted `/hi` requests for catalog review.
+
+    A phrase logged as general or clarified on
+    INTENT_MISS_DISTINCT_DAYS_THRESHOLD+ distinct days is a recurring gap:
+    sharpen a row's description, add an example, or write a new procedure.
     """
     try:
         since = date.fromisoformat(args.since) if args.since else None
@@ -538,106 +378,81 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
         raise SystemExit(
             f"atelier: --since must be YYYY-MM-DD (got {args.since!r})"
         ) from None
-    miss_dir = resolve_intent_miss_dir()
-    if not miss_dir.is_dir():
+    dirs = route_log_dirs()
+    if not any(d.is_dir() for d in dirs):
         if args.json:
-            print(
-                json.dumps(
-                    {"events": [], "since": args.since, "miss_dir": str(miss_dir)}
-                )
-            )
+            print(json.dumps({"events": [], "since": args.since, "log_dirs": [str(d) for d in dirs]}))
         else:
-            print(f"intent-misses: no log directory at {miss_dir}")
-            print("Nothing logged yet. Directory is created on first miss.")
+            print(f"intent-misses: no route log under {dirs[0].parent}")
+            print("Nothing logged yet. The directory is created on the first `/hi` route.")
         return 0
 
-    # Pair every event with the date of the file it came from. file_date is
-    # the consumer-side ground truth for the "distinct days" coverage signal
-    # AND for --since filtering — keeps both axes consistent, defending the
-    # signal against TZ slips between writer wall-clock and event timestamps.
-    events: list[tuple[date, dict[str, Any]]] = []
-    for p in sorted(miss_dir.glob("*.jsonl")):
-        try:
-            file_date = date.fromisoformat(p.stem)
-        except ValueError:
-            continue
-        if since and file_date < since:
-            continue
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(ev, dict):
-                    events.append((file_date, ev))
-        except OSError:
-            continue
-
+    events = load_route_events(since, dirs)
     if args.match_kind:
         events = [(d, e) for (d, e) in events if e.get("match_kind") == args.match_kind]
     if args.runtime:
         events = [(d, e) for (d, e) in events if e.get("runtime") == args.runtime]
 
     kind_counts: dict[str, int] = {}
+    routed_count = 0
     phrase_stats: dict[str, dict[str, Any]] = {}
     empty_phrase_count = 0
-    for file_date, ev in events:
-        kind = str(ev.get("match_kind", "(unknown)"))
+    for file_date, event in events:
+        kind = str(event.get("match_kind", "(unknown)"))
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
-        phrase = _normalize_phrase(ev.get("raw_input", ""))
+        if not is_miss(event):
+            routed_count += 1
+            continue
+        phrase = _normalize_phrase(event.get("raw_input", ""))
         if not phrase:
             empty_phrase_count += 1
             continue
         entry = phrase_stats.setdefault(
             phrase,
-            {
-                "count": 0,
-                "first_seen": None,
-                "last_seen": None,
-                "kinds": set(),
-                "days": set(),
-            },
+            {"count": 0, "first_seen": None, "last_seen": None, "kinds": set(), "days": set()},
         )
         entry["count"] += 1
         entry["kinds"].add(kind)
         entry["days"].add(file_date.isoformat())
-        if isinstance(ev.get("clarified_to"), str) and ev["clarified_to"]:
-            entry["clarified"] = ev["clarified_to"]
-        ts = ev.get("timestamp")
+        if isinstance(event.get("clarified_to"), str) and event["clarified_to"]:
+            entry["clarified"] = event["clarified_to"]
+        if isinstance(event.get("final_dispatch"), str) and event["final_dispatch"]:
+            entry["dispatched"] = event["final_dispatch"]
+        ts = event.get("timestamp")
         if isinstance(ts, str):
             if entry["first_seen"] is None or ts < entry["first_seen"]:
                 entry["first_seen"] = ts
             if entry["last_seen"] is None or ts > entry["last_seen"]:
                 entry["last_seen"] = ts
 
+    sorted_phrases = sorted(phrase_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
+    repeaters = [
+        (phrase, pc)
+        for phrase, pc in sorted_phrases
+        if len(pc["days"]) >= INTENT_MISS_DISTINCT_DAYS_THRESHOLD
+    ]
+    miss_count = len(events) - routed_count
+
     if args.json:
         payload = {
             "since": args.since,
-            "miss_dir": str(miss_dir),
+            "log_dirs": [str(d) for d in dirs],
             "total_events": len(events),
+            "routed_events": routed_count,
+            "miss_events": miss_count,
             "by_kind": kind_counts,
             "events_with_empty_phrase": empty_phrase_count,
             "proposal_threshold_days": INTENT_MISS_DISTINCT_DAYS_THRESHOLD,
-            # Same rows the text mode prints under --propose, so a caller reading
-            # JSON (the /triage overview) sees the same actionable set instead
-            # of an always-empty lane.
             "proposals": [
                 {
                     "phrase": phrase,
-                    "target": pc.get("clarified") or None,
+                    "target": _proposal_target(pc),
                     "count": pc["count"],
                     "distinct_days": len(pc["days"]),
                 }
-                for phrase, pc in sorted(
-                    phrase_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0])
-                )
-                if len(pc["days"]) >= INTENT_MISS_DISTINCT_DAYS_THRESHOLD
+                for phrase, pc in repeaters
             ]
-            if getattr(args, "propose", False)
+            if args.propose
             else None,
             "phrases": [
                 {
@@ -648,69 +463,61 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
                     "last_seen": pc["last_seen"],
                     "kinds": sorted(pc["kinds"]),
                 }
-                for phrase, pc in sorted(
-                    phrase_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0])
-                )
+                for phrase, pc in sorted_phrases
             ],
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"Intent miss log: {miss_dir}")
+    print(f"Route log: {dirs[0]} (+ legacy {dirs[1].name}/)")
     print(
-        f"Total events: {len(events)}"
+        f"Total events: {len(events)}  routed: {routed_count}  misses: {miss_count}"
         + (f"  (since {args.since})" if args.since else "")
     )
     print()
     print("By match kind:")
     if not kind_counts:
         print("  (none)")
-    for k in sorted(kind_counts.keys()):
-        print(f"  {k}: {kind_counts[k]}")
+    for kind in sorted(kind_counts):
+        print(f"  {kind}: {kind_counts[kind]}")
     print()
     if not phrase_stats:
-        print("No phrases logged.")
+        print("No unrouted phrases logged.")
         return 0
-    sorted_phrases = sorted(
-        phrase_stats.items(), key=lambda kv: (-kv[1]["count"], kv[0])
-    )
     if empty_phrase_count:
         print(
-            f"({empty_phrase_count} event(s) had empty raw_input — counted in by-kind totals, omitted from the phrase table below.)"
+            f"({empty_phrase_count} miss event(s) had empty raw_input; counted above, omitted below.)"
         )
-    print(f"Top phrases (showing up to {args.top}):")
+    print(f"Top unrouted or corrected phrases (showing up to {args.top}):")
     col_w = INTENT_MISS_KINDS_COL_WIDTH
     print(f"  count  days  {'kinds'.ljust(col_w)}  phrase")
     for phrase, pc in sorted_phrases[: args.top]:
         kinds_str = ",".join(sorted(pc["kinds"])).ljust(col_w)
-        days_str = f"{len(pc['days']):>4}"
-        count_str = f"{pc['count']:>5}"
-        print(f"  {count_str}  {days_str}  {kinds_str}  {phrase}")
-    repeaters = [
-        (phrase, pc)
-        for phrase, pc in sorted_phrases
-        if len(pc["days"]) >= INTENT_MISS_DISTINCT_DAYS_THRESHOLD
-    ]
+        print(f"  {pc['count']:>5}  {len(pc['days']):>4}  {kinds_str}  {phrase}")
     if repeaters:
         print()
         print(
             f"Coverage signal: {len(repeaters)} phrase(s) recurred across "
             f"{INTENT_MISS_DISTINCT_DAYS_THRESHOLD}+ distinct days."
         )
-        print("Consider adding a trigger to harness/intents.toml for these.")
-    if getattr(args, "propose", False):
+    if args.propose:
         print()
-        if repeaters:
-            print("# --- proposed overlay rows for harness/intents.local.toml (review before adopting) ---")
-            for phrase, pc in repeaters:
-                target = pc.get("clarified") or "<intent-name>"
-                safe = phrase.replace("\\", "\\\\").replace('"', '\\"')
-                print(f"# seen {len(pc['days'])} distinct days, {pc['count']} events; clarified_to={pc.get('clarified')}")
-                print(f"[intents.{target}]")
-                print(f'patterns = ["{safe}"]')
-                print()
-        else:
+        if not repeaters:
             print("# no phrases cleared the distinct-days threshold; nothing to propose")
+            return 0
+        print("# --- recurring unrouted requests (review before acting) ---")
+        print("# Per phrase: sharpen the target row's description, add the phrase as an")
+        print("# example in harness/intents.local.toml, or write a new procedure + row.")
+        for phrase, pc in repeaters:
+            target = _proposal_target(pc) or "<intent-name>"
+            safe = phrase.replace("\\", "\\\\").replace('"', '\\"')
+            print(
+                f"# seen {len(pc['days'])} distinct days, {pc['count']} events; "
+                f"target={_proposal_target(pc)}"
+            )
+            print(f"[intents.{target}]")
+            print(f'examples = ["{safe}"]')
+            print()
     return 0
 
 
@@ -718,104 +525,73 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="scripts/intent_coverage.py",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        description="Inspect and log Atelier hi intent coverage for Claude `/hi` and Codex `$hi`.",
+        description="Intent catalog, route ledger, and coverage review for Claude `/hi` and Codex `$hi`.",
         epilog=textwrap.dedent(
             """\
             Examples:
-              python3 scripts/intent_coverage.py intent "review my goals"
-              python3 scripts/intent_coverage.py intent "https://arxiv.org/abs/2501.12345"
-              python3 scripts/intent_coverage.py intent "5/4 早上去了 X" --json
+              python3 scripts/intent_coverage.py catalog
+              python3 scripts/intent_coverage.py intent-log --input "review my goals" \\
+                --match-kind routed --runtime claude-code --intent review --quiet
               python3 scripts/intent_coverage.py intent-log --input "improve the repo" \\
-                --match-kind fallback --runtime claude-code \\
-                --initial-name reflection --initial-priority 0 \\
-                --initial-pattern "<fallback>" --final-dispatch "engineering-task"
-              python3 scripts/intent_coverage.py intent-misses --since 2026-05-01
+                --match-kind general --runtime claude-code --final-dispatch engineering-task
+              python3 scripts/intent_coverage.py intent-misses --since 2026-05-01 --propose
             """
         ),
     )
     sub = parser.add_subparsers(dest="subcommand", required=True)
 
-    intent = sub.add_parser(
-        "intent",
-        help="Inspect text against the shared hi intent rules.",
+    catalog = sub.add_parser(
+        "catalog",
+        help="Print the intent catalog the orchestrator classifies against.",
         description=(
-            "Diagnostic for harness/intents.toml. Runs the substring-and-priority "
-            "matcher described by hi.md and reports the matched intent (or AMBIGUOUS "
-            "when multiple priority-tied intents match). Interactive command execution "
-            "does not use this utility."
+            "One line per harness/intents.toml row: name, description, and a "
+            "compact dispatch tag. This is the routing input for /hi and $hi."
         ),
     )
-    intent.add_argument(
-        "text", nargs="+", help="User text to match against intent patterns."
+    catalog.add_argument("--json", action="store_true", help="Emit JSON rows.")
+    catalog.add_argument(
+        "--examples", action="store_true", help="Include example phrases under each row."
     )
-    intent.add_argument("--json", action="store_true", help="Emit JSON.")
-    intent.set_defaults(func=cmd_intent)
+    catalog.set_defaults(func=cmd_catalog)
 
     intent_log = sub.add_parser(
         "intent-log",
-        help="Record an unclassified native hi invocation for batch coverage review.",
+        help="Record one /hi route decision.",
         description=(
-            "Append one JSONL line to $OV/_meta/intent_misses/YYYY-MM-DD.jsonl "
-            "(falls back to ~/.cache/atelier/intent_misses/ when $OV is unset). "
-            "Call from the orchestrator after a native hi invocation that fell back, "
-            "was ambiguous, or was clarified due to low confidence. "
-            "See protocols/intent-coverage.md."
+            "Append one JSONL line to $OV/_meta/intent_routes/YYYY-MM-DD.jsonl "
+            "(falls back to ~/.cache/atelier/intent_routes/ when $OV is unset). "
+            "Call after every contextual /hi or $hi route. See protocols/intent-coverage.md."
         ),
     )
-    intent_log.add_argument(
-        "--input",
-        required=True,
-        help="Raw text following Claude /hi or Codex $hi.",
-    )
+    intent_log.add_argument("--input", required=True, help="Raw text following /hi or $hi.")
     intent_log.add_argument(
         "--match-kind",
         required=True,
-        choices=INTENT_MISS_KINDS,
-        help="Why this counted as a miss.",
+        choices=ROUTE_KINDS,
+        help="routed (confident), general (handoff), clarified (asked the user), corrected (user redirected a confident route).",
     )
     intent_log.add_argument(
-        "--runtime",
-        required=True,
-        choices=INTENT_MISS_RUNTIMES,
-        help="Which orchestrator runtime logged the miss.",
+        "--runtime", required=True, choices=INTENT_MISS_RUNTIMES, help="Which runtime routed."
     )
     intent_log.add_argument(
-        "--initial-name",
+        "--intent",
         default=None,
-        help="Name of the initial matched intent (e.g., 'general' for fallback).",
-    )
-    intent_log.add_argument(
-        "--initial-priority", default=None, help="Priority of the initial match."
-    )
-    intent_log.add_argument(
-        "--initial-pattern",
-        default=None,
-        help="Pattern that matched (or '<fallback>' for the fallback case).",
+        help="Selected intent name (defaults to 'general' for --match-kind general).",
     )
     intent_log.add_argument(
         "--candidates",
         default=None,
-        help=(
-            "For ambiguous: JSON array of {name, priority, matched_pattern}. "
-            "Key name matches `intent --json` output verbatim — pass the matcher's "
-            "objects straight through without renaming."
-        ),
+        help="For clarified: comma-separated intent names offered to the user.",
     )
     intent_log.add_argument(
-        "--clarified-to",
-        default=None,
-        help="Intent name the user picked from the clarification menu.",
+        "--clarified-to", default=None, help="Intent name the user picked."
     )
     intent_log.add_argument(
         "--final-dispatch",
         default=None,
-        help="What was actually dispatched (intent name, or free-text label like 'engineering-task').",
+        help="What actually ran (intent name, or a free-text label like 'engineering-task').",
     )
-    intent_log.add_argument(
-        "--notes",
-        default=None,
-        help="Free-text orchestrator note about why this was a miss.",
-    )
+    intent_log.add_argument("--notes", default=None, help="Free-text orchestrator note.")
     intent_log.add_argument(
         "--quiet", action="store_true", help="Don't print the appended path on success."
     )
@@ -823,59 +599,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     intent_misses = sub.add_parser(
         "intent-misses",
-        help="Aggregate the intent-miss log for batch coverage review.",
+        help="Aggregate unrouted /hi requests for catalog review.",
         description=(
-            "Print counts by match_kind and the top distinct phrases from the "
-            "intent-miss log. Phrases recurring across 3+ distinct days are "
-            "flagged as candidate triggers for harness/intents.toml."
+            "Print counts by match_kind and the top unrouted phrases from the route "
+            "ledger (plus the legacy miss log). Phrases recurring across 3+ distinct "
+            "days are flagged as catalog work."
         ),
     )
     intent_misses.add_argument(
         "--since",
-        help=(
-            "YYYY-MM-DD; only include events from this date forward. "
-            "Filter applies at FILE-DATE granularity (the log file's filename "
-            "date), not at event-timestamp granularity — a TZ-skewed event "
-            "near midnight is grouped with its file's date."
-        ),
+        help="YYYY-MM-DD; include events from this file date forward (file-date granularity).",
     )
     intent_misses.add_argument(
-        "--match-kind",
-        choices=INTENT_MISS_KINDS,
-        help="Filter to one match_kind (vocabulary matches intent-log --match-kind).",
+        "--match-kind", choices=INTENT_MISS_KINDS, help="Filter to one match_kind."
     )
     intent_misses.add_argument(
         "--runtime", choices=INTENT_MISS_RUNTIMES, help="Filter to one runtime."
     )
     intent_misses.add_argument(
-        "--top",
-        type=int,
-        default=20,
-        help="Top-N distinct phrases to display (default 20).",
+        "--top", type=int, default=20, help="Top-N unrouted phrases to display (default 20)."
     )
     intent_misses.add_argument("--json", action="store_true", help="Emit JSON.")
-    intent_misses.add_argument("--propose", action="store_true", help="Emit candidate overlay rows for harness/intents.local.toml")
+    intent_misses.add_argument(
+        "--propose",
+        action="store_true",
+        help="List recurring unrouted phrases as candidate catalog work.",
+    )
     intent_misses.set_defaults(func=cmd_intent_misses)
-
-    intent_hook = sub.add_parser(
-        "intent-hook",
-        help="UserPromptSubmit hook entry: compact route projection plus miss capture.",
-        description=(
-            "Wire as a Claude Code or Codex UserPromptSubmit hook command. Reads the "
-            "hook's stdin JSON, detects the runtime's hi/reflect entry shape, runs the deterministic "
-            "matcher, injects a bounded registry projection for the live command, "
-            "and auto-logs fallback/ambiguous to "
-            "$OV/_meta/intent_misses/YYYY-MM-DD.jsonl. "
-            "Best-effort: every failure returns 0."
-        ),
-    )
-    intent_hook.add_argument(
-        "--runtime",
-        required=True,
-        choices=INTENT_MISS_RUNTIMES,
-        help="Which orchestrator runtime is firing this hook.",
-    )
-    intent_hook.set_defaults(func=cmd_intent_hook)
 
     return parser
 

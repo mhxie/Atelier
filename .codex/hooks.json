@@ -25,11 +25,6 @@
             "type": "command",
             "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/cues.py\" --touch-lock",
             "timeout": 3
-          },
-          {
-            "type": "command",
-            "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/intent_coverage.py\" intent-hook --runtime codex",
-            "timeout": 5
           }
         ]
       }

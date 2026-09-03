@@ -5,7 +5,7 @@ description: Digest the mobile-capture submodule into the persistent L2 destinat
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi sync`, `/hi digest zettelm`,
 > `/hi process zettelm`, `/hi sync mobile notes`). See `harness/intents.toml`
-> `[intents.sync]` for the full pattern list. Both paths execute this procedure.
+> `[intents.sync]` for the row's example phrases. Both paths execute this procedure.
 
 Digest the mobile-capture submodule `<paths.zettelm>/` into the persistent L2 destinations. Each markdown file is enriched (light typo fixes, backlink injection) and merged into `<paths.daily_notes>/YYYY/MM/<date>.md`; each attachment is routed to the right `$OV/<domain>/raw/`; a 3-prompt footer is appended to the most recent daily note; the originals in zettelm are staged for deletion for you to commit.
 

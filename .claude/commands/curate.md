@@ -4,8 +4,8 @@ description: Goal-aware content curation and inbox triage.
 # Curate
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi triage inbox`, `/hi curate readwise`,
-> `/hi score my inbox`). See `harness/intents.toml` `[intents.curate]` for the full pattern
-> list. Both paths execute this same procedure.
+> `/hi score my inbox`). See `harness/intents.toml` `[intents.curate]` for the row's
+> example phrases. Both paths execute this same procedure.
 
 Goal-aware content curation. Pulls from content sources, scores against your active goals and directions, and routes items into tiers.
 

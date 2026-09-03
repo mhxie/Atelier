@@ -17,7 +17,7 @@ If the user's input is *not* a clean capture shape (mixes a record-this clause w
 
 ## Why entry hint, not authoritative dispatch
 
-Skill auto-trigger is semantic — Claude Code matches this skill's frontmatter description against the user's phrasing, judging relevance with the model itself rather than literal patterns. Intent matching inside `/hi` is exact (TOML `patterns` plus a documented shape detector for `intents.capture`). The two stages have different precision properties: the skill widens the natural-language entry surface; the router stays the single decision point for what runs.
+Skill auto-trigger is semantic — Claude Code matches this skill's frontmatter description against the user's phrasing. Routing inside `/hi` is also model judgment, but against the whole catalog at once: every `harness/intents.toml` row's `description` competes, so a request that mixes capture with a question lands where its primary intent lies. The skill widens the natural-language entry surface; the router stays the single decision point for what runs.
 
 This division is documented in `protocols/runtime-adapters.md` § Runtime
 Surfaces. Codex does not read `.claude/skills/`; Codex reaches the same flow
@@ -25,4 +25,4 @@ through `$hi <user-text>`.
 
 ## Maintenance
 
-The intent's `patterns` list and shape-detector documentation in `harness/intents.toml` describe what counts as capture. If you change the *concept* of capture there (e.g., narrow it to dining only, broaden it to include inbox-clip pasting), update this skill's frontmatter description so semantic triggering stays aligned. `scripts/harness_lint.py` checks structural invariants (description present, `/hi` mentioned, intent row exists) but does not — and should not — substring-check trigger phrases; the trigger surface is LLM-judged prose, not a list.
+The row's `description` in `harness/intents.toml` defines what counts as capture. If you change the *concept* of capture there (e.g., narrow it to dining only, broaden it to include inbox-clip pasting), update this skill's frontmatter description so the two prose surfaces stay aligned. `scripts/harness_lint.py` checks structural invariants (description present, `/hi` mentioned, intent row exists) but does not — and should not — substring-check trigger phrases; both surfaces are LLM-judged prose.

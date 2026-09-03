@@ -16,7 +16,9 @@ Claude Code and Codex:
   8. Codex has repo-scoped command skills, native agent adapters, and hooks.
  9. Intent/agent registry coherence: every `intents.<name>.agents[*]`
      resolves to an agent in `harness/agents.toml`; pattern values in
-     both registries are drawn from the allowed set; `agents.<name>.used_by`
+     both registries are drawn from the allowed set; every intent carries
+     the one-line `description` the model classifier routes on, and
+     `examples` (when present) is a list of strings; `agents.<name>.used_by`
      is consistent with the intents/commands walk; orphans flagged.
  10. Every intent declares an existing procedure and a bounded context budget;
      every `intents.<name>.profile_reads` filename exists at `profile/<name>`.
@@ -49,7 +51,7 @@ ROOT = Path(__file__).resolve().parents[1]
 from render_runtime_edges import TIER_TO_EFFORT  # noqa: E402  (single owner of the tier map)
 
 SEVERITY_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
-MAX_CONTEXT_BUDGET_BYTES = 20 * 1024
+MAX_CONTEXT_BUDGET_BYTES = 64 * 1024
 
 # Allowed coordination-pattern values for both `agents.<name>.pattern` (in
 # harness/agents.toml) and `intents.<name>.pattern` (in harness/intents.toml).
@@ -1175,7 +1177,6 @@ def check_codex_hooks() -> list[Finding]:
         ("SessionStart", ("scripts/cues.py", "--hook", "--runtime codex")),
         ("UserPromptSubmit", ("scripts/session_replay.py", "hook --runtime codex")),
         ("UserPromptSubmit", ("scripts/cues.py", "--touch-lock")),
-        ("UserPromptSubmit", ("scripts/intent_coverage.py", "intent-hook", "--runtime codex")),
         ("Stop", ("scripts/session_replay.py", "hook --runtime codex")),
         ("Stop", ("scripts/shadow.py", "gc")),
     )
@@ -1228,10 +1229,6 @@ def check_claude_hooks() -> list[Finding]:
         ("SessionStart", ("scripts/cues.py", "--hook", "--runtime claude")),
         ("UserPromptSubmit", ("scripts/session_replay.py", "hook --runtime claude-code")),
         ("UserPromptSubmit", ("scripts/cues.py", "--touch-lock")),
-        (
-            "UserPromptSubmit",
-            ("scripts/intent_coverage.py", "intent-hook", "--runtime claude-code"),
-        ),
         ("Stop", ("scripts/session_replay.py", "hook --runtime claude-code")),
         ("SessionEnd", ("scripts/session_replay.py", "hook --runtime claude-code")),
         ("SessionEnd", ("scripts/shadow.py", "gc")),
@@ -2002,12 +1999,13 @@ def check_intents_registry(
     claude_agents: dict[str, Any],
     harness_agents: dict[str, Any],
 ) -> list[Finding]:
-    """Validate intent rows: agent references resolve, pattern values valid.
+    """Validate intent rows: agent references resolve, pattern values valid,
+    and every row carries the `description` the classifier routes on.
 
-    Cross-intent pattern overlap detection (e.g., bare `"discuss"` in one
-    intent shadowing another's natural-language phrase) is intentionally NOT
-    in scope here — the priority graph resolves overlaps deterministically,
-    and a separate substring-collision lint would belong in its own pass.
+    Routing is model judgment over `description`, so there is no substring
+    or priority machinery to lint. Retired keys (`patterns`, `priority`)
+    are flagged so a stale overlay or merge does not silently reintroduce
+    them.
 
     Agent references must resolve against BOTH registries:
       - `claude_agents` from `load_claude_agents()` (`.claude/agents/*.md`):
@@ -2106,38 +2104,135 @@ def check_intents_registry(
                 )
             )
 
-    # (f) priority collisions: only exact-duplicate phrases at same priority
-    by_priority: dict[int, list[tuple[str, set[str]]]] = {}
-    for intent_name, entry in intents.items():
+    # (d) classifier contract: description required; examples optional list[str];
+    # retired substring-router keys must not come back.
+    for intent_name, entry in sorted(intents.items()):
         if not isinstance(entry, dict):
             continue
-        priority = entry.get("priority")
-        if not isinstance(priority, int):
-            continue
-        patterns = entry.get("patterns", []) or []
-        if not isinstance(patterns, list):
-            continue
-        normalized = {p.lower() for p in patterns if isinstance(p, str) and p.strip()}
-        if not normalized:
-            continue
-        by_priority.setdefault(priority, []).append((intent_name, normalized))
-
-    for priority, rows in by_priority.items():
-        for i in range(len(rows)):
-            for j in range(i + 1, len(rows)):
-                name_a, set_a = rows[i]
-                name_b, set_b = rows[j]
-                overlap = sorted(set_a & set_b)
-                if overlap:
-                    findings.append(
-                        Finding(
-                            "WARN",
-                            "intents-priority-collision",
-                            "harness/intents.toml",
-                            f"intents `{name_a}` and `{name_b}` share priority={priority} and overlapping patterns: {overlap}",
-                        )
+        description = entry.get("description")
+        if not isinstance(description, str) or not description.strip():
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "intents-description-missing",
+                    "harness/intents.toml",
+                    f"intent `{intent_name}` needs a non-empty one-line `description` (the classifier routes on it)",
+                )
+            )
+        elif "\n" in description.strip():
+            findings.append(
+                Finding(
+                    "WARN",
+                    "intents-description-multiline",
+                    "harness/intents.toml",
+                    f"intent `{intent_name}` description should be one line",
+                )
+            )
+        examples = entry.get("examples")
+        if examples is not None and (
+            not isinstance(examples, list) or any(not isinstance(e, str) for e in examples)
+        ):
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "intents-examples-shape",
+                    "harness/intents.toml",
+                    f"intent `{intent_name}` `examples` must be a list of strings",
+                )
+            )
+        for retired in ("patterns", "priority"):
+            if retired in entry:
+                findings.append(
+                    Finding(
+                        "ERROR",
+                        "intents-retired-key",
+                        "harness/intents.toml",
+                        f"intent `{intent_name}` still declares `{retired}`; the substring router is gone, use `description` / `examples`",
                     )
+                )
 
+    return findings
+
+
+def check_intents_overlay() -> list[Finding]:
+    """The gitignored `intents.local.toml`, when present, must merge cleanly.
+
+    Private rows that fail validation are skipped at load time; this surfaces
+    them as WARN so a typo in a private procedure path does not silently
+    drop a route.
+    """
+    overlay = ROOT / "harness" / "intents.local.toml"
+    if not overlay.is_file():
+        return []
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from intent_coverage import merge_overlay, load_table
+    except ImportError as exc:
+        return [Finding("WARN", "intents-overlay-unchecked", rel(overlay), f"cannot import router: {exc}")]
+    try:
+        canonical = {k: v for k, v in load_table(ROOT / "harness" / "intents.toml", "intents").items() if isinstance(v, dict)}
+    except SystemExit as exc:
+        return [Finding("WARN", "intents-overlay-unchecked", rel(overlay), str(exc))]
+    _merged, problems = merge_overlay(canonical, overlay)
+    return [Finding("WARN", "intents-overlay-row", rel(overlay), problem) for problem in problems]
+
+
+def check_autoevo_band_sync() -> list[Finding]:
+    """Trust-band thresholds exist once, in autoevo_run.BAND_RULES.
+
+    protocols/autoevo.md must render the same numbers (it is the explanation),
+    and no other prose surface may restate them; the nightly command and the
+    Forgetter brief point at the protocol instead.
+    """
+    sys.path.insert(0, str(ROOT / "scripts"))
+    try:
+        from autoevo_run import BAND_RULES
+    except ImportError as exc:
+        return [Finding("WARN", "autoevo-band-unchecked", "scripts/autoevo_run.py", f"cannot import BAND_RULES: {exc}")]
+    findings: list[Finding] = []
+    protocol_path = ROOT / "protocols" / "autoevo.md"
+    try:
+        protocol = _read(protocol_path)
+    except FileNotFoundError:
+        return [Finding("ERROR", "autoevo-band-protocol-missing", rel(protocol_path), "protocols/autoevo.md missing")]
+    high, low = BAND_RULES["redundant-high"], BAND_RULES["low-signal-high"]
+    expected = (
+        f"{high['min_peers']}+ peers ≥ {high['min_score']}",
+        f"untouched > {high['cold_days']}d",
+        f"mode `{high['mode']}`",
+        f"All {low['conditions']} Forgetter conditions",
+        f"untouched > {low['cold_days']}d",
+    )
+    for needle in expected:
+        if needle not in protocol:
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "autoevo-band-drift",
+                    rel(protocol_path),
+                    f"§ Trust bands does not state `{needle}` as scripts/autoevo_run.py BAND_RULES defines it",
+                )
+            )
+    restating = (
+        ROOT / ".claude" / "commands" / "autoevo-nightly.md",
+        ROOT / ".claude" / "agents" / "forgetter.md",
+    )
+    markers = (f"≥ {high['min_score']}", f">= {high['min_score']}", f"> {low['cold_days']}d", f"{low['cold_days']}d ago")
+    for path in restating:
+        try:
+            text = _read(path)
+        except FileNotFoundError:
+            continue
+        hits = [m for m in markers if m in text]
+        if hits:
+            findings.append(
+                Finding(
+                    "ERROR",
+                    "autoevo-band-restated",
+                    rel(path),
+                    f"restates trust-band thresholds {hits}; point at protocols/autoevo.md § Trust bands instead",
+                )
+            )
     return findings
 
 

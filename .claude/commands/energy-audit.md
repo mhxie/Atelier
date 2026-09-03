@@ -4,8 +4,8 @@ description: Assessment of physical, mental, emotional, and social energy patter
 # Energy Audit
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi I'm drained`, `/hi energy audit`,
-> `/hi burnt out`). See `harness/intents.toml` `[intents.energy-audit]` for the full
-> pattern list. Both paths execute this same procedure.
+> `/hi burnt out`). See `harness/intents.toml` `[intents.energy-audit]` for the row's
+> example phrases. Both paths execute this same procedure.
 
 Deep assessment of where your energy goes — physical, mental, emotional, and social. Identifies energy drains and sources to optimize for sustainable high performance.
 
