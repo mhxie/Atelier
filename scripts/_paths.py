@@ -110,14 +110,14 @@ def _registry() -> dict:
     return merged
 
 
-def _resolve_segment(segment: str) -> Path:
-    """Resolve a registry segment to an absolute Path under $OV.
+def _resolve_segment(segment: str, root: Path | None = None) -> Path:
+    """Resolve a registry segment to an absolute Path under `root` ($OV by default).
 
     Absolute segments (rare; used for sandbox overrides) pass through.
     """
     if segment.startswith("/"):
         return Path(segment).expanduser().resolve()
-    return vault_root() / segment
+    return (root if root is not None else vault_root()) / segment
 
 
 def tier(name: str) -> Path:

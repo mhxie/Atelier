@@ -15,6 +15,13 @@ from pathlib import Path
 
 from _paths import tier
 from _git import run_git  # noqa: E402
+from autoevo_preflight import (  # noqa: E402
+    PreflightError,
+    _in_scope,
+    _is_autoevo_state,
+    _status_entries,
+    autoevo_scope_prefixes,
+)
 
 SAFE_CYCLE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 RUN_HEADING = re.compile(r"(?m)^## Autoevo Run:")
@@ -249,17 +256,61 @@ def _verify_sidecars(
     }
 
 
-def _git_commit(vault: Path, output: Path) -> str:
+def _is_protected(path: str, protected: set[str]) -> bool:
+    """Git collapses a wholly untracked directory into one `dir/` entry, so a
+    plan-time entry ending in `/` covers every path beneath it."""
+    return path in protected or any(
+        entry.endswith("/") and path.startswith(entry) for entry in protected
+    )
+
+
+def leftover_paths(
+    entries: list[tuple[str, str]], prefixes: list[str], protected: set[str]
+) -> list[str]:
+    """Dirty paths the bot, not the user, answers for after a cycle.
+
+    Same split as the preflight: autoevo state under `_meta/autoevo_*.toml`
+    is always the bot's; an in-scope content path is the bot's unless the
+    plan recorded it as protected user dirt; every other path is the user's.
+    """
+    leftovers = {
+        path
+        for _code, path in entries
+        if _is_autoevo_state(path)
+        or (_in_scope(path, prefixes) and not _is_protected(path, protected))
+    }
+    return sorted(leftovers)
+
+
+def _protected_paths(vault: Path, run_id: str) -> tuple[set[str], bool]:
+    """(protected paths recorded by `plan`, whether the list existed)."""
+    path = _tier_path(vault, "cache", "cache") / f"autoevo-{run_id}-protected.txt"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return set(), False
+    return {line.strip() for line in lines if line.strip()}, True
+
+
+def _git_commit(vault: Path, output: Path, run_id: str) -> str:
     relative = output.relative_to(vault).as_posix()
     result = run_git(vault, "log", "-1", "--format=%H", "--", relative, timeout=30)
     commit = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise VerificationError("audit output has no Git commit")
-    status = run_git(vault, "status", "--porcelain=v1", timeout=30)
-    if status.returncode != 0:
-        raise VerificationError("cannot inspect final vault worktree")
-    if status.stdout:
-        raise VerificationError("vault worktree is not clean after the cycle")
+    try:
+        entries = _status_entries(vault)
+    except PreflightError as exc:
+        raise VerificationError("cannot inspect final vault worktree") from exc
+    protected, listed = _protected_paths(vault, run_id)
+    leftovers = leftover_paths(entries, autoevo_scope_prefixes(vault), protected)
+    if leftovers:
+        raise VerificationError(
+            "bot-owned paths are dirty after the cycle"
+            + ("" if listed else " (no protected list for this run)")
+            + ": "
+            + ", ".join(leftovers[:5])
+        )
     return commit
 
 
@@ -382,7 +433,7 @@ def verify_cycle(
         dict(audit["coverage"]),
         dict(audit["lint_counts"]),
     )
-    commit = _git_commit(vault, output)
+    commit = _git_commit(vault, output, str(audit["run_id"]))
     reports = _verify_reports(
         vault,
         output,

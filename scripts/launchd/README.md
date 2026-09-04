@@ -404,7 +404,8 @@ python3 scripts/autoevo_verify.py --cycle "$(date +%Y-%m-%d)" --json
 For autoevo, `status = "completed"` additionally requires
 `verification = "passed"`. The wrapper has then proved a real Forgetter sweep,
 one committed decay report per returned sweep envelope, matching audit
-sidecars, a committed clean vault, ordered claim-owned event markers, and
+sidecars, a committed audit with no bot-owned dirt left behind, ordered
+claim-owned event markers, and
 final Git evidence. Verification runs while the claim is
 `completion-uncertain` with `verification = "pending"` so interruption cannot
 leave a false success. A failed verification remains

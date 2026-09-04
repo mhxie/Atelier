@@ -55,7 +55,7 @@ def autoevo_scope_prefixes(vault: Path) -> list[str]:
         segment = segments.get(name)
         if not segment:
             continue
-        resolved = _resolve_segment(segment)  # same resolver as tier(); never re-implement it
+        resolved = _resolve_segment(segment, vault)  # same resolver as tier(); never re-implement it
         try:
             rel = resolved.resolve().relative_to(vault.resolve()).as_posix()
         except ValueError:

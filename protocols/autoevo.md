@@ -145,7 +145,8 @@ rejects a wrapper-level `noop`. A passing cycle must have:
 - an outcomes sidecar whose exact scope map matches that audit section;
 - a lint sidecar whose counts match the audit;
 - empty Skipped and Errors sections;
-- a committed audit and clean vault worktree;
+- a committed audit and no dirty bot-owned path afterwards: `_meta/autoevo_*.toml`
+  state, or an in-scope path outside the cycle's recorded `protected_paths`;
 - a claim-owned cache event journal with ordered markers proving deterministic
   preflight passed before Codex started, delivery was validated, and the lock
   was released;
