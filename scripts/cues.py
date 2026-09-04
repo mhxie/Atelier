@@ -54,6 +54,7 @@ from typing import Literal
 sys.path.insert(0, str(Path(__file__).parent))
 from _paths import tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
 import cron_spec  # noqa: E402
+import intent_coverage  # noqa: E402
 from routine_claim import validate_claim  # noqa: E402
 
 
@@ -1674,54 +1675,35 @@ def check_eval_regression(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_intent_misses(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Catalog coverage feedback: recurring unrouted `/hi` requests need a row.
+    """Catalog coverage feedback: a recurring unrouted `/hi` request needs a row.
 
-    Reads the route ledger (`intent_routes/`, every kind except `routed`)
-    plus the legacy miss log (`intent_misses/`, all lines). Soft cue at 5+
-    unrouted requests in 14 days.
+    Reads the route ledger (`intent_routes/`) through the same reader and
+    aggregation as `intent-misses`, so the cue fires exactly when that review
+    would propose something: a phrase unrouted on 3+ distinct days in 14.
     """
-    dirs = [_meta_dir(ov) / "intent_routes", _meta_dir(ov) / "intent_misses"]
-    if not any(d.is_dir() for d in dirs):
+    log_dir = _meta_dir(ov) / "intent_routes"
+    if not log_dir.is_dir():
         return None, "no route log; skip"
-    cutoff = today - timedelta(days=14)
-    recent = 0
-    for log_dir in dirs:
-        if not log_dir.is_dir():
-            continue
-        for path in sorted(log_dir.glob("*.jsonl")):
-            try:
-                day = date.fromisoformat(path.stem)
-            except ValueError:
-                continue
-            if day < cutoff:
-                continue
-            try:
-                lines = path.read_text(encoding="utf-8").splitlines()
-            except OSError:
-                continue
-            for line in lines:
-                if not line.strip():
-                    continue
-                try:
-                    kind = json.loads(line).get("match_kind")
-                except (json.JSONDecodeError, AttributeError):
-                    continue
-                if kind != "routed":
-                    recent += 1
-    if recent < 5:
-        return None, f"{recent} unrouted in 14d < 5; silent"
+    events = intent_coverage.load_route_events(since=today - timedelta(days=14), dirs=[log_dir])
+    stats = intent_coverage.aggregate_route_events(events)
+    repeaters = stats["repeaters"]
+    misses = len(events) - stats["routed_count"]
+    threshold = intent_coverage.INTENT_MISS_DISTINCT_DAYS_THRESHOLD
+    if not repeaters:
+        return None, f"{misses} unrouted in 14d, none on {threshold}+ days; silent"
     return (
         Cue(
             key="intent_misses",
             severity="soft",
             command_path="protocols/intent-coverage.md",
             message=(
-                f"过去 14 天有 {recent} 次 `/hi` 没一次命中 (general / clarified / corrected). "
+                f"过去 14 天有 {len(repeaters)} 个 `/hi` 请求在 {threshold}+ 天反复出现却没命中 catalog 行 "
+                f"(共 {misses} 次 general / clarified / corrected). "
                 f"跑 `uv run scripts/intent_coverage.py intent-misses --propose` "
-                f"看反复出现的请求, 该补 description、加 example 还是写新 procedure."
+                f"看该补 description、加 example 还是写新 procedure."
             ),
         ),
-        f"{recent} unrouted in 14d",
+        f"{len(repeaters)} repeater(s), {misses} unrouted in 14d",
     )
 
 

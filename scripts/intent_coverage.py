@@ -36,11 +36,9 @@ PRIVATE_ROW_DEFAULTS = {
     "expected_subagent_count": 0,
     "parallel": False,
 }
-LEGACY_MISS_KINDS = ("fallback", "ambiguous", "low_confidence")
-INTENT_MISS_KINDS = ROUTE_KINDS + LEGACY_MISS_KINDS
 INTENT_MISS_RUNTIMES = ("claude-code", "codex")
 INTENT_MISS_DISTINCT_DAYS_THRESHOLD = 3
-INTENT_MISS_KINDS_COL_WIDTH = max(len(k) for k in INTENT_MISS_KINDS)
+INTENT_MISS_KINDS_COL_WIDTH = max(len(k) for k in ROUTE_KINDS)
 FALLBACK_INTENT = "general"
 
 
@@ -217,16 +215,6 @@ def resolve_route_log_dir() -> Path:
     return ROUTE_LOG_FALLBACK_DIR
 
 
-def resolve_intent_miss_dir() -> Path:
-    """Legacy miss-only log written by the retired substring router."""
-    return resolve_route_log_dir().parent / "intent_misses"
-
-
-def route_log_dirs() -> list[Path]:
-    """Directories the review reads: the live route ledger plus legacy misses."""
-    return [resolve_route_log_dir(), resolve_intent_miss_dir()]
-
-
 def write_route_event(payload: dict[str, Any]) -> Path | None:
     """Append one JSONL line to today's route log.
 
@@ -327,14 +315,14 @@ def is_miss(event: dict[str, Any]) -> bool:
 def load_route_events(
     since: date | None = None, dirs: list[Path] | None = None
 ) -> list[tuple[date, dict[str, Any]]]:
-    """Every (file_date, event) pair across the route ledger and legacy misses.
+    """Every (file_date, event) pair in the route ledger.
 
     file_date is the consumer-side ground truth for `--since` and for the
     distinct-days signal, which keeps both axes consistent against TZ slips
     between writer wall-clock and event timestamps.
     """
     events: list[tuple[date, dict[str, Any]]] = []
-    for log_dir in dirs if dirs is not None else route_log_dirs():
+    for log_dir in dirs if dirs is not None else [resolve_route_log_dir()]:
         if not log_dir.is_dir():
             continue
         for path in sorted(log_dir.glob("*.jsonl")):
@@ -365,34 +353,13 @@ def _proposal_target(stats: dict[str, Any]) -> str | None:
     return stats.get("clarified") or stats.get("dispatched") or None
 
 
-def cmd_intent_misses(args: argparse.Namespace) -> int:
-    """Aggregate unrouted `/hi` requests for catalog review.
+def aggregate_route_events(events: list[tuple[date, dict[str, Any]]]) -> dict[str, Any]:
+    """Counts by kind plus per-phrase recurrence over every miss.
 
-    A phrase logged as general or clarified on
-    INTENT_MISS_DISTINCT_DAYS_THRESHOLD+ distinct days is a recurring gap:
-    sharpen a row's description, add an example, or write a new procedure.
+    `repeaters` is the coverage signal: phrases seen on
+    INTENT_MISS_DISTINCT_DAYS_THRESHOLD+ distinct file dates. The review
+    command and the session cue both read it, so one threshold exists.
     """
-    try:
-        since = date.fromisoformat(args.since) if args.since else None
-    except ValueError:
-        raise SystemExit(
-            f"atelier: --since must be YYYY-MM-DD (got {args.since!r})"
-        ) from None
-    dirs = route_log_dirs()
-    if not any(d.is_dir() for d in dirs):
-        if args.json:
-            print(json.dumps({"events": [], "since": args.since, "log_dirs": [str(d) for d in dirs]}))
-        else:
-            print(f"intent-misses: no route log under {dirs[0].parent}")
-            print("Nothing logged yet. The directory is created on the first `/hi` route.")
-        return 0
-
-    events = load_route_events(since, dirs)
-    if args.match_kind:
-        events = [(d, e) for (d, e) in events if e.get("match_kind") == args.match_kind]
-    if args.runtime:
-        events = [(d, e) for (d, e) in events if e.get("runtime") == args.runtime]
-
     kind_counts: dict[str, int] = {}
     routed_count = 0
     phrase_stats: dict[str, dict[str, Any]] = {}
@@ -431,12 +398,55 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
         for phrase, pc in sorted_phrases
         if len(pc["days"]) >= INTENT_MISS_DISTINCT_DAYS_THRESHOLD
     ]
+    return {
+        "kind_counts": kind_counts,
+        "routed_count": routed_count,
+        "empty_phrase_count": empty_phrase_count,
+        "phrases": sorted_phrases,
+        "repeaters": repeaters,
+    }
+
+
+def cmd_intent_misses(args: argparse.Namespace) -> int:
+    """Aggregate unrouted `/hi` requests for catalog review.
+
+    A phrase logged as general or clarified on
+    INTENT_MISS_DISTINCT_DAYS_THRESHOLD+ distinct days is a recurring gap:
+    sharpen a row's description, add an example, or write a new procedure.
+    """
+    try:
+        since = date.fromisoformat(args.since) if args.since else None
+    except ValueError:
+        raise SystemExit(
+            f"atelier: --since must be YYYY-MM-DD (got {args.since!r})"
+        ) from None
+    log_dir = resolve_route_log_dir()
+    if not log_dir.is_dir():
+        if args.json:
+            print(json.dumps({"events": [], "since": args.since, "log_dir": str(log_dir)}))
+        else:
+            print(f"intent-misses: no route log at {log_dir}")
+            print("Nothing logged yet. The directory is created on the first `/hi` route.")
+        return 0
+
+    events = load_route_events(since, [log_dir])
+    if args.match_kind:
+        events = [(d, e) for (d, e) in events if e.get("match_kind") == args.match_kind]
+    if args.runtime:
+        events = [(d, e) for (d, e) in events if e.get("runtime") == args.runtime]
+
+    stats = aggregate_route_events(events)
+    kind_counts = stats["kind_counts"]
+    routed_count = stats["routed_count"]
+    empty_phrase_count = stats["empty_phrase_count"]
+    sorted_phrases = stats["phrases"]
+    repeaters = stats["repeaters"]
     miss_count = len(events) - routed_count
 
     if args.json:
         payload = {
             "since": args.since,
-            "log_dirs": [str(d) for d in dirs],
+            "log_dir": str(log_dir),
             "total_events": len(events),
             "routed_events": routed_count,
             "miss_events": miss_count,
@@ -469,7 +479,7 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    print(f"Route log: {dirs[0]} (+ legacy {dirs[1].name}/)")
+    print(f"Route log: {log_dir}")
     print(
         f"Total events: {len(events)}  routed: {routed_count}  misses: {miss_count}"
         + (f"  (since {args.since})" if args.since else "")
@@ -481,7 +491,7 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
     for kind in sorted(kind_counts):
         print(f"  {kind}: {kind_counts[kind]}")
     print()
-    if not phrase_stats:
+    if not sorted_phrases:
         print("No unrouted phrases logged.")
         return 0
     if empty_phrase_count:
@@ -602,8 +612,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Aggregate unrouted /hi requests for catalog review.",
         description=(
             "Print counts by match_kind and the top unrouted phrases from the route "
-            "ledger (plus the legacy miss log). Phrases recurring across 3+ distinct "
-            "days are flagged as catalog work."
+            "ledger. Phrases recurring across 3+ distinct days are flagged as "
+            "catalog work."
         ),
     )
     intent_misses.add_argument(
@@ -611,7 +621,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="YYYY-MM-DD; include events from this file date forward (file-date granularity).",
     )
     intent_misses.add_argument(
-        "--match-kind", choices=INTENT_MISS_KINDS, help="Filter to one match_kind."
+        "--match-kind", choices=ROUTE_KINDS, help="Filter to one match_kind."
     )
     intent_misses.add_argument(
         "--runtime", choices=INTENT_MISS_RUNTIMES, help="Filter to one runtime."

@@ -21,9 +21,7 @@ contextual invocation with `scripts/intent_coverage.py intent-log`. Kinds:
 Location: `$OV/_meta/intent_routes/YYYY-MM-DD.jsonl`, falling back to
 `~/.cache/atelier/intent_routes/` when `$OV` is unset. The filename date is
 wall-clock `date.today()` at write time, not the late-sleep effective date:
-this is an audit trail, not a user-authored surface. The legacy
-`$OV/_meta/intent_misses/` log written by the retired substring router is
-still read; every line there counts as a miss.
+this is an audit trail, not a user-authored surface.
 
 Schema:
 
@@ -63,8 +61,9 @@ file-date granularity.
 
 `scripts/eval_run.py` records route coverage (confident routes over all
 routes in the last 30 days) as the `routing` component of each eval snapshot,
-and `scripts/cues.py check_intent_misses` raises a soft cue at 5+ unrouted
-requests in 14 days. Coverage is not correctness; see the judged eval below.
+and `scripts/cues.py check_intent_misses` raises a soft cue when a phrase
+recurs unrouted on 3+ distinct days within 14 days. Coverage is not
+correctness; see the judged eval below.
 
 ## Judged routing eval
 

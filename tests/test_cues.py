@@ -149,6 +149,45 @@ class AutoevoCueTest(unittest.TestCase):
             self.assertIn("failed", out["message"])
 
 
+class IntentMissCueTest(unittest.TestCase):
+    """The cue fires on the review's own signal (a phrase unrouted on 3+
+    distinct days), not on a raw miss count that never proposed anything."""
+
+    @staticmethod
+    def _route(vault: Path, day: str, raw: str, kind: str = "general") -> None:
+        routes = vault / "_meta" / "intent_routes"
+        routes.mkdir(parents=True, exist_ok=True)
+        with (routes / f"{day}.jsonl").open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"raw_input": raw, "match_kind": kind, "timestamp": f"{day}T09:00:00"}) + "\n")
+
+    def _check(self, vault: Path) -> dict:
+        return _run_py(
+            vault,
+            """
+            cue, debug = cues.check_intent_misses(vault, date(2099, 1, 10))
+            print(json.dumps({"key": cue.key if cue else None, "message": cue.message if cue else "", "debug": debug}))
+            """,
+        )
+
+    def test_phrase_on_three_days_fires(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = Path(tmp)
+            for day in ("2099-01-03", "2099-01-05", "2099-01-08"):
+                self._route(vault, day, "Plan my week")
+            out = self._check(vault)
+            self.assertEqual(out["key"], "intent_misses", out)
+            self.assertIn("1 个", out["message"])
+
+    def test_one_day_burst_stays_silent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = Path(tmp)
+            for i in range(6):
+                self._route(vault, "2099-01-09", f"one-off request {i}")
+            out = self._check(vault)
+            self.assertIsNone(out["key"], out)
+            self.assertIn("6 unrouted", out["debug"])
+
+
 class RoutineCueTest(unittest.TestCase):
     def test_oldest_unreviewed_output_gets_a_visible_slot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:

@@ -9,7 +9,7 @@ SHA), written to `$OV/_meta/evals/`, so `/system-review` and the
 
 Components (each skips cleanly when its substrate is unavailable):
   routing    route coverage over the last ROUTE_WINDOW_DAYS of the `/hi`
-             ledger ($OV/_meta/intent_routes/ plus the legacy miss log):
+             ledger ($OV/_meta/intent_routes/):
              score = confident routes / all routes. Correctness of a route
              is not measured here; tests/fixtures/routing_evalset.json is
              the seed for a future judged routing eval.
