@@ -13,7 +13,7 @@ import tomllib
 from datetime import date, datetime
 from pathlib import Path
 
-from _paths import tier
+from _paths import retry_transient, tier
 from _git import run_git  # noqa: E402
 from autoevo_preflight import (  # noqa: E402
     PreflightError,
@@ -286,10 +286,12 @@ def _protected_paths(vault: Path, run_id: str) -> tuple[set[str], bool]:
     """(protected paths recorded by `plan`, whether the list existed)."""
     path = _tier_path(vault, "cache", "cache") / f"autoevo-{run_id}-protected.txt"
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = retry_transient(
+            lambda: path.read_text(encoding="utf-8"), what="protected list read"
+        )
     except OSError:
         return set(), False
-    return {line.strip() for line in lines if line.strip()}, True
+    return {line.strip() for line in text.splitlines() if line.strip()}, True
 
 
 def _git_commit(vault: Path, output: Path, run_id: str) -> str:

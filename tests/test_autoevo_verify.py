@@ -126,6 +126,53 @@ class GitCommitCheckTest(unittest.TestCase):
                 out = _run_py(ov, body)
                 self.assertIn("bot-owned paths are dirty", out.get("error", ""), (ov, out))
                 self.assertIn("wip/bot-left.md", out["error"])
+            # No protected list at all: the rule tightens and the error says so.
+            (vault / "cache" / "autoevo-20990103-050000-protected.txt").unlink()
+            out = _run_py(vault, body)
+            self.assertIn("(no protected list for this run)", out.get("error", ""), out)
+
+
+class ProtectedListReadTest(unittest.TestCase):
+    """The protected list lives on the Drive-synced cache tier, which answers
+    a read with EDEADLK while a file materializes (2026-08-27 and 08-28: the
+    quarantine file failed the same way). One transient error must not turn
+    the user's protected edits into bot leftovers."""
+
+    def _read(self, vault: Path, run_id: str, raises: list[BaseException]) -> dict:
+        from unittest import mock
+
+        real = Path.read_text
+        calls = {"n": 0}
+
+        def flaky(self, *args, **kwargs):
+            calls["n"] += 1
+            if raises:
+                raise raises.pop(0)
+            return real(self, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", flaky), mock.patch("_paths.time.sleep"):
+            protected, listed = autoevo_verify._protected_paths(vault, run_id)
+        return {"protected": protected, "listed": listed, "reads": calls["n"]}
+
+    def test_a_transient_mount_error_is_retried(self) -> None:
+        import errno
+
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            vault = Path(tmp).resolve()
+            (vault / "cache").mkdir()
+            (vault / "cache" / "autoevo-r1-protected.txt").write_text("wip/a.md\n", encoding="utf-8")
+            out = self._read(vault, "r1", [OSError(errno.EDEADLK, "Resource deadlock avoided")])
+            self.assertEqual(out["protected"], {"wip/a.md"}, out)
+            self.assertTrue(out["listed"])
+            self.assertEqual(out["reads"], 2)
+
+    def test_a_missing_list_is_reported_not_retried(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            vault = Path(tmp).resolve()
+            (vault / "cache").mkdir()
+            out = self._read(vault, "r1", [])
+            self.assertEqual((out["protected"], out["listed"]), (set(), False))
+            self.assertEqual(out["reads"], 1)
 
 
 if __name__ == "__main__":
