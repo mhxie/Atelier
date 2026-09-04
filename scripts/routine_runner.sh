@@ -1257,6 +1257,13 @@ if [ "$MODEL_EXIT_CODE" -eq 0 ]; then
         RUN_ERROR_DETAIL=$(printf '%s' "$RESULT_ATTESTATION" | tr '\n' ' ' | cut -c1-500)
         runner_event "delivery validation failed: $RUN_ERROR_DETAIL"
         echo "[$(date -Iseconds)] ERROR: delivery validation failed: $RESULT_ATTESTATION" >&2
+        # The model exited 0 and its report failed attestation, so the
+        # transcript is the only account of what it did (2026-09-03: an
+        # 83-second run reported `failed` with no audit block and no log).
+        ATTESTATION_LOG=$(preserve_model_log "$MODEL_LOG")
+        if [ -n "$ATTESTATION_LOG" ]; then
+            runner_event "transcript kept: $ATTESTATION_LOG"
+        fi
     fi
 else
     RUN_ERROR_DETAIL=$(model_failure_detail "$MODEL_LOG")

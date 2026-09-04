@@ -89,6 +89,9 @@ def check_codex_routine_runner() -> None:
         # Successful transcripts are kept too; a delivered-but-wrong report
         # was unauditable when only failures were preserved.
         'KEPT_LOG=$(preserve_model_log "$MODEL_LOG")',
+        # A report that fails attestation is a model that ran and misreported;
+        # its transcript is the only evidence and used to be discarded.
+        'ATTESTATION_LOG=$(preserve_model_log "$MODEL_LOG")',
         '--skip-git-repo-check --add-dir "$OV" -C "$ROUTINE_CWD"',
         "atelier-routine-cwd.XXXXXX",
         "ATELIER_ACCESS_MODE",
