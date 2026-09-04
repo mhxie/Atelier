@@ -51,9 +51,17 @@ def _tier_path(vault: Path, name: str, fixture_default: str) -> Path:
     return (vault / fixture_default).resolve()
 
 
+def _read_text(path: Path, what: str, *, errors: str = "strict") -> str:
+    """Read one vault file through the mount-aware retry; every file the
+    verifier inspects lives on the Drive-synced vault."""
+    return retry_transient(
+        lambda: path.read_text(encoding="utf-8", errors=errors), what=what
+    )
+
+
 def _read_toml(path: Path) -> dict[str, object]:
     try:
-        value = tomllib.loads(path.read_text(encoding="utf-8"))
+        value = tomllib.loads(_read_text(path, "claim read"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise VerificationError(f"cannot read claim: {exc}") from exc
     if not isinstance(value, dict):
@@ -137,7 +145,10 @@ def _section(run: str, heading: str) -> str:
 
 
 def _verify_audit(path: Path, minimum_sweeps: int) -> dict[str, object]:
-    run = _latest_run(path.read_text(encoding="utf-8"))
+    try:
+        run = _latest_run(_read_text(path, "audit read"))
+    except OSError as exc:
+        raise VerificationError(f"cannot read audit: {exc}") from exc
     run_id_match = re.search(r"(?m)^Run ID: (\d{8}-\d{6})\s*$", run)
     if not run_id_match:
         raise VerificationError("latest audit run omitted Run ID")
@@ -239,13 +250,13 @@ def _verify_sidecars(
     outcomes_path = cache / f"autoevo-{run_id}-outcomes.json"
     lint_path = cache / f"autoevo-{run_id}-lint.json"
     try:
-        outcomes = json.loads(outcomes_path.read_text(encoding="utf-8"))
+        outcomes = json.loads(_read_text(outcomes_path, "outcomes sidecar read"))
     except (OSError, json.JSONDecodeError) as exc:
         raise VerificationError(f"cannot read outcomes sidecar: {exc}") from exc
     if outcomes != coverage:
         raise VerificationError("audit Sweep coverage does not match outcomes sidecar")
     try:
-        lint = json.loads(lint_path.read_text(encoding="utf-8"))
+        lint = json.loads(_read_text(lint_path, "lint sidecar read"))
     except (OSError, json.JSONDecodeError) as exc:
         raise VerificationError(f"cannot read lint sidecar: {exc}") from exc
     if not isinstance(lint, dict) or lint.get("counts") != lint_counts:
@@ -286,9 +297,7 @@ def _protected_paths(vault: Path, run_id: str) -> tuple[set[str], bool]:
     """(protected paths recorded by `plan`, whether the list existed)."""
     path = _tier_path(vault, "cache", "cache") / f"autoevo-{run_id}-protected.txt"
     try:
-        text = retry_transient(
-            lambda: path.read_text(encoding="utf-8"), what="protected list read"
-        )
+        text = _read_text(path, "protected list read")
     except OSError:
         return set(), False
     return {line.strip() for line in text.splitlines() if line.strip()}, True
@@ -350,7 +359,7 @@ def _verify_reports(
 
 def _verify_wrapper_log(path: Path, cycle: str) -> dict[str, object]:
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        text = _read_text(path, "wrapper log read", errors="replace")
     except OSError as exc:
         raise VerificationError(f"cannot read wrapper log: {exc}") from exc
     claimed = list(

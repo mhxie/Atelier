@@ -175,5 +175,48 @@ class ProtectedListReadTest(unittest.TestCase):
             self.assertEqual(out["reads"], 1)
 
 
+class VerifierReadsTest(unittest.TestCase):
+    """Every file the verifier inspects lives on the Drive-synced vault, so
+    each read goes through the mount-aware retry, not only the protected list."""
+
+    def _flaky_once(self):
+        import errno
+        from unittest import mock
+
+        real = Path.read_text
+        state = {"raised": False, "reads": 0}
+
+        def flaky(self, *args, **kwargs):
+            state["reads"] += 1
+            if not state["raised"]:
+                state["raised"] = True
+                raise OSError(errno.EDEADLK, "Resource deadlock avoided")
+            return real(self, *args, **kwargs)
+
+        return mock.patch.object(Path, "read_text", flaky), mock.patch("_paths.time.sleep"), state
+
+    def test_claim_read_survives_one_transient_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            claim = Path(tmp) / "2099-01-03.toml"
+            claim.write_text('routine = "autoevo-nightly"\n', encoding="utf-8")
+            patch_read, patch_sleep, state = self._flaky_once()
+            with patch_read, patch_sleep:
+                value = autoevo_verify._read_toml(claim)
+            self.assertEqual(value, {"routine": "autoevo-nightly"})
+            self.assertEqual(state["reads"], 2)
+
+    def test_audit_read_survives_one_transient_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            audit = Path(tmp) / "autoevo-applied-2099-01-03.md"
+            audit.write_text("## Autoevo Run: 2099-01-03 05:00\n\nRun ID: 20990103-050000\n", encoding="utf-8")
+            patch_read, patch_sleep, state = self._flaky_once()
+            with patch_read, patch_sleep:
+                with self.assertRaises(autoevo_verify.VerificationError) as caught:
+                    autoevo_verify._verify_audit(audit, minimum_sweeps=3)
+            # The read succeeded on retry; what fails is the audit's content.
+            self.assertNotIn("cannot read audit", str(caught.exception))
+            self.assertEqual(state["reads"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()
