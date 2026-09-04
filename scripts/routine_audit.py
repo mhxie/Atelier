@@ -464,6 +464,29 @@ def _loaded_launchd_labels(labels: set[str]) -> tuple[set[str], str | None]:
     return loaded, None
 
 
+def _launchd_state(
+    local_names: set[str],
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]], str | None]:
+    """Per local routine: its plist label, whether launchd has it loaded, and
+    the plist's recovery mode. `loaded` is None when launchd cannot be asked."""
+    plists = _plists_by_routine(local_names)
+    plist_labels = {name: str(plist["Label"]) for name, plist in plists.items()}
+    loaded_labels, launchd_error = _loaded_launchd_labels(set(plist_labels.values()))
+    launchd = {
+        name: {
+            "label": plist_labels.get(name),
+            "loaded": (
+                None
+                if launchd_error or name not in plist_labels
+                else plist_labels[name] in loaded_labels
+            ),
+            "recovery": plist_recovery(plists[name]) if name in plists else None,
+        }
+        for name in sorted(local_names)
+    }
+    return launchd, plists, launchd_error
+
+
 def _plists_by_routine(routine_names: set[str]) -> dict[str, dict[str, Any]]:
     """Map each routine to the parsed plist that invokes it."""
     candidates = list((ROOT / "scripts" / "launchd").glob("*.plist"))
@@ -847,17 +870,7 @@ def _system_checks(
         else (set(), None)
     )
     local_names = {record["name"] for record in local_records}
-    plists = _plists_by_routine(local_names)
-    plist_labels = {name: str(plist["Label"]) for name, plist in plists.items()}
-    loaded_labels, launchd_error = _loaded_launchd_labels(set(plist_labels.values()))
-    launchd = {
-        name: {
-            "label": plist_labels.get(name),
-            "loaded": bool(plist_labels.get(name) in loaded_labels),
-            "recovery": plist_recovery(plists[name]) if name in plists else None,
-        }
-        for name in sorted(local_names)
-    }
+    launchd, plists, launchd_error = _launchd_state(local_names)
     background = _background_evidence(local_records, profiles)
 
     owner_result = subprocess.run(
@@ -891,7 +904,7 @@ def _system_checks(
     unloaded = [
         name
         for name, value in launchd.items()
-        if value["label"] and not value["loaded"]
+        if value["label"] and value["loaded"] is False
     ]
     if missing_clis:
         errors.append(f"missing required CLIs: {', '.join(missing_clis)}")
@@ -1140,12 +1153,12 @@ def _latest_failure(failures_dir: Path) -> tuple[str, str]:
 
 
 def _health() -> tuple[dict[str, Any], int]:
-    """One table answering "what is actually broken", from all four sources.
+    """One table answering "what is actually broken", from all five sources.
 
     Diagnosis previously meant correlating routine_watch.toml, the output
-    directories, the claim files, and the failure diagnostics by hand, per
-    routine. With ~20 routines that is the wrong amount of work to do at the
-    moment something has already gone wrong.
+    directories, the claim files, the failure diagnostics, and launchd's
+    loaded jobs by hand, per routine. With ~20 routines that is the wrong
+    amount of work to do at the moment something has already gone wrong.
     """
     import cues  # local import: only this subcommand needs it
 
@@ -1166,7 +1179,7 @@ def _health() -> tuple[dict[str, Any], int]:
             continue
         if record.get("surface") == "local" and record.get("name"):
             local_names.add(str(record["name"]))
-    plists = _plists_by_routine(local_names)
+    launchd, plists, _launchd_error = _launchd_state(local_names)
 
     rows: list[dict[str, Any]] = []
     for row in routines:
@@ -1193,17 +1206,20 @@ def _health() -> tuple[dict[str, Any], int]:
                 "last_failure": failed_at,
                 "failure_phase": failed_phase,
                 "recovery": plist_recovery(plist) if plist else ("" if name not in local_names else "no-plist"),
+                "loaded": launchd.get(name, {}).get("loaded"),
             }
         )
     rows.sort(key=lambda r: r["routine"])
     no_recovery = [r["routine"] for r in rows if r["recovery"] == "none"]
+    not_loaded = [r["routine"] for r in rows if r["loaded"] is False]
     disagreements = schedule_disagreements(routines, plists)
     return (
         {
-            "ok": not no_recovery,
+            "ok": not no_recovery and not not_loaded,
             "counts": {
                 "routines": len(rows),
                 "no_recovery": len(no_recovery),
+                "not_loaded": len(not_loaded),
                 "with_failure_diagnostic": sum(1 for r in rows if r["last_failure"]),
                 "schedule_disagreements": len(disagreements),
             },
@@ -1231,16 +1247,32 @@ def _health_text(payload: dict[str, Any]) -> str:
             if r["last_failure"]
             else "-"
         )
+        recovery = "not-loaded" if r.get("loaded") is False else (r["recovery"] or "-")
         lines.append(
             f"{r['routine'].ljust(width)}  {cadence:>4}  {r['last_output'] or '-':11}  "
-            f"{claim[:22]:22}  {failure[:22]:22}  {r['recovery'] or '-'}"
+            f"{claim[:22]:22}  {failure[:22]:22}  {recovery}"
         )
     counts = payload["counts"]
     lines.append("")
     lines.append(
         f"{counts['routines']} routines; {counts['no_recovery']} cannot recover a "
         f"missed cycle; {counts['with_failure_diagnostic']} have a failure diagnostic on record"
+        + (
+            f"; {counts['not_loaded']} launchd job(s) not loaded"
+            if counts.get("not_loaded")
+            else ""
+        )
     )
+    not_loaded = [r for r in rows if r.get("loaded") is False]
+    if not_loaded:
+        lines.append("")
+        lines.append(
+            "local routine launchd jobs not loaded (copy the plist to "
+            "~/Library/LaunchAgents and `launchctl load` it; the routine never "
+            "fires until then):"
+        )
+        for r in not_loaded:
+            lines.append(f"  {r['routine']}")
     failing = [r for r in rows if r["last_status"] == "failed"]
     if failing:
         lines.append("")

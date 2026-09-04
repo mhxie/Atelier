@@ -69,7 +69,7 @@ work.
 | Routine reports | `routine_digest.py` | one unacked source file | `health.review_debt` (files; the cue counts routines) |
 | Recurring obligations | `recurring.py` | one overdue/due-soon obligation | entries with `status` overdue or due-soon |
 | Aggregate freshness | `aggregate_freshness.py` | one stale aggregate | `stale_count` |
-| Routine health | `routine_audit.py` plus fired routine cues | one anomaly or failed cycle | `counts.with_failure_diagnostic` + `counts.no_recovery` + `counts.schedule_disagreements` |
+| Routine health | `routine_audit.py` plus fired routine cues | one anomaly, failed cycle, or unloaded launchd job | `counts.with_failure_diagnostic` + `counts.no_recovery` + `counts.schedule_disagreements` + `counts.not_loaded` |
 | Intent coverage | `intent_coverage.py` | one recurring unrouted request | `len(proposals)` (`phrases` are observe) |
 
 Dashboard columns: lane, cue severity, actionable count, oldest item or latest

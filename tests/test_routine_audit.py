@@ -335,3 +335,64 @@ class SmokeExemptionTests(unittest.TestCase):
     def test_the_smoke_passes_the_permission_it_is_verifying(self):
         smoke = (SCRIPTS / "routine_permission_smoke.sh").read_text(encoding="utf-8")
         self.assertIn('--smoke-permission "$SMOKE_PERMISSION"', smoke)
+
+
+class HealthLoadStateTests(unittest.TestCase):
+    """`health` must say when a declared local routine's launchd job is not
+    loaded. Measured 2026-09-03: the meta-reflection-draft plist sat under
+    `$OV/_meta/launchd/` unloaded, `audit --check-system` knew, and `health`
+    (the surface every cue points at) showed `run-at-load` as if it ran."""
+
+    WATCH = (
+        "[[routine]]\n"
+        'name = "demo-draft"\n'
+        'support = "local-only"\n'
+        'local_profile = "local-synthesis"\n'
+        'execution = "local"\n'
+        'cron = "30 11 * * 0 UTC"\n'
+        'output_dir = "agent-findings/demo"\n'
+        'file_pattern = "*-demo.md"\n'
+        'label = "demo draft"\n'
+    )
+    PLIST = {
+        "Label": "com.atelier.demo-draft",
+        "StartCalendarInterval": {"Hour": 4, "Minute": 30, "Weekday": 0},
+        "RunAtLoad": True,
+    }
+
+    def _health(self, loaded: set[str], error: str | None = None) -> dict:
+        import os
+        import tempfile
+        from unittest import mock
+
+        with tempfile.TemporaryDirectory(prefix="atelier-audit-") as tmp:
+            vault = Path(tmp)
+            (vault / "_meta").mkdir()
+            (vault / "_meta" / "routine_watch.toml").write_text(self.WATCH, encoding="utf-8")
+            with mock.patch.dict(os.environ, {"OV": str(vault)}), mock.patch.object(
+                ra, "_plists_by_routine", return_value={"demo-draft": dict(self.PLIST)}
+            ), mock.patch.object(ra, "_loaded_launchd_labels", return_value=(loaded, error)):
+                payload, _ = ra._health()
+                return {"payload": payload, "text": ra._health_text(payload)}
+
+    def test_an_unloaded_job_is_named_and_fails_health(self):
+        out = self._health(loaded=set())
+        row = out["payload"]["rows"][0]
+        self.assertIs(row["loaded"], False)
+        self.assertFalse(out["payload"]["ok"])
+        self.assertEqual(out["payload"]["counts"]["not_loaded"], 1)
+        self.assertIn("not-loaded", out["text"])
+        self.assertIn("launchd jobs not loaded", out["text"])
+
+    def test_a_loaded_job_keeps_its_recovery_column(self):
+        out = self._health(loaded={"com.atelier.demo-draft"})
+        row = out["payload"]["rows"][0]
+        self.assertIs(row["loaded"], True)
+        self.assertTrue(out["payload"]["ok"])
+        self.assertIn("run-at-load", out["text"])
+        self.assertNotIn("not-loaded", out["text"])
+
+    def test_launchd_unavailable_is_unknown_not_an_alarm(self):
+        out = self._health(loaded=set(), error="launchd unavailable on this platform")
+        self.assertIsNone(out["payload"]["rows"][0]["loaded"])
+        self.assertTrue(out["payload"]["ok"])
