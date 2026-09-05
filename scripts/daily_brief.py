@@ -17,16 +17,22 @@ The triage rule, in priority order:
      forfeited, but this is the quarter's main line, and a screen that only
      ever pulls toward "don't lose money" never pulls toward it. Two or three
      rows, never folded, so the first screen always names what the quarter is for.
+  1c. Dated TODO overdue or due by tomorrow -> itemized at tier 1. It slips
+     rather than forfeits, but "slips" here means the day it was for has
+     arrived; folding it behind a count line is how a dated TODO went unseen
+     for several mornings while far-off milestones held the screen.
   2. Dated and due within a week           -> itemized. Slips gracefully, still needs a slot.
   3. Everything else                       -> folded into a count line.
   3b. Health observability                 -> one count line, always: days since
      the newest weight row. A lapsed measurement is the failure nothing else fires on.
 
-The rule that matters most is #3, and specifically this: **overdue is not
-urgent.** A rotation task hundreds of days overdue is not an emergency, it is a
-mis-specified task. Listing nine overdue recurring items individually would
-train the reader to skip the whole screen, so overdue items fold to a count and
-only the ones that came due around now get their own bullet.
+The rule that matters most is #3, and specifically this: **an overdue
+recurring item is not urgent.** A rotation task hundreds of days overdue is not
+an emergency, it is a mis-specified task. Listing nine overdue recurring items
+individually would train the reader to skip the whole screen, so overdue
+recurring items fold to a count and only the ones that came due around now get
+their own bullet. Dated TODOs are the exception (1c): the date was written for
+that one task, so the day arriving is news, and an overdue one stays itemized.
 
 A hard line cap enforces the same discipline structurally: when the assembled
 screen exceeds it, groups fold from the bottom up rather than the screen growing.
@@ -51,6 +57,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import tomllib
@@ -108,10 +115,19 @@ REVIEW_CUES = (
 
 @dataclass
 class Item:
+    # `text` is the composed terminal line ("label · 26d · action"). Renderers
+    # with their own countdown column use `label` and `hint` instead, so the
+    # number and the action are never printed twice on one row.
     text: str
     due: str | None = None
     days_left: int | None = None
     source: str | None = None
+    label: str | None = None
+    hint: str | None = None
+    # Set by reconciliation: a note newer than the index mentions this row's
+    # due date, so the row may already be handled. `flag_source` names it.
+    flag: str | None = None
+    flag_source: str | None = None
 
 
 @dataclass
@@ -204,6 +220,25 @@ def load_closing(ov: Path, today: date, warnings: list[str]) -> list[Group]:
     rows = [d for d in dl.in_lead_window(index) if d.is_forfeitable()]
     now_rows = [d for d in rows if d.days_left <= 1]
     lead_rows = [d for d in rows if d.days_left > 1]
+    mentions = recent_mentions(ov, index, rows)
+
+    def items(subset: list[dl.Deadline]) -> list[Item]:
+        out = []
+        for row in subset:
+            item = _closing_item(row)
+            hit = mentions.get(row.slug)
+            if hit:
+                item.flag = "待核"
+                item.flag_source = hit
+            out.append(item)
+        return out
+
+    if mentions:
+        slugs = ", ".join(sorted(mentions))
+        warnings.append(
+            f"{len(mentions)} 条关窗行在索引 {index.refreshed} 刷新后被新笔记提及, 可能已处理: {slugs} "
+            "(确认后 deadlines.py done <slug>)"
+        )
 
     groups: list[Group] = []
     if now_rows:
@@ -212,7 +247,7 @@ def load_closing(ov: Path, today: date, warnings: list[str]) -> list[Group]:
                 tier=1,
                 kind="closing_now",
                 heading=f"今天/明天关窗 {len(now_rows)} 件",
-                items=[_closing_item(d) for d in now_rows],
+                items=items(now_rows),
                 fold_heading=f"今天/明天关窗 {len(now_rows)} 件 (deadlines.py due --lead)",
             )
         )
@@ -222,11 +257,180 @@ def load_closing(ov: Path, today: date, warnings: list[str]) -> list[Group]:
                 tier=1,
                 kind="closing_lead",
                 heading=f"需要开始处理 {len(lead_rows)} 件",
-                items=[_closing_item(d) for d in lead_rows],
+                items=items(lead_rows),
                 fold_heading=f"需要开始处理 {len(lead_rows)} 件 (deadlines.py due --lead)",
             )
         )
     return groups
+
+
+# Reconciliation. The index is refreshed weekly by hand; a perk redeemed on
+# Wednesday stays "closing" until Sunday unless something notices. This is the
+# deterministic half of noticing: no judgment about whether the row is done,
+# only the fact that a note written after the refresh names the row's due date
+# together with a word from its label. The reader confirms and closes the row.
+# Logical tiers the scan never reads: generated, archived, transient, or
+# subject matter rather than the user's own notes. Resolved through the path
+# registry so a renamed or localized tier stays excluded; the two names that
+# are not registry tiers (cache, inbox) are physical and stay literal.
+RECONCILE_SKIP_TIERS = ("archive", "sessions", "zettelm", "wiki", "papers", "preprints")
+RECONCILE_SKIP_LITERAL = ("cache", "inbox")
+RECONCILE_MAX_FILES = 400
+RECONCILE_MAX_BYTES = 512 * 1024
+_CJK_RUN = re.compile(r"[\u3400-\u9fff]{2,}")
+_LATIN_RUN = re.compile(r"[A-Za-z][A-Za-z'&-]{2,}")
+
+
+def label_tokens(label: str) -> list[str]:
+    """Words worth matching: latin runs of 3+ and CJK runs of 2+. Digits are
+    dropped because a year matches every note that mentions the year. Latin
+    tokens are casefolded; the note is casefolded before comparison."""
+    return [t.casefold() for t in _LATIN_RUN.findall(label)] + _CJK_RUN.findall(label)
+
+
+def _date_forms(due: str) -> list[str]:
+    """The ways a note writes the same day: ISO, slashed ISO, M/D and
+    M月D日 with and without zero padding. A label token must match too, so
+    the short forms do not turn every 3/15 in the vault into a hit."""
+    forms = [due]
+    try:
+        d = date.fromisoformat(due)
+    except ValueError:
+        return forms
+    forms.append(f"{d.year}/{d.month:02d}/{d.day:02d}")
+    for month, day in ((f"{d.month}", f"{d.day}"), (f"{d.month:02d}", f"{d.day:02d}")):
+        forms.append(f"{month}/{day}")
+        forms.append(f"{month}月{day}日")
+    return list(dict.fromkeys(forms))
+
+
+def _date_pattern(due: str) -> re.Pattern[str]:
+    """The forms as one regex with digit boundaries: `3/1` must not match
+    inside `03/15` or `3/15`, and `1/3` must not match inside `11/30`."""
+    alternation = "|".join(re.escape(form) for form in _date_forms(due))
+    return re.compile(rf"(?<!\d)(?:{alternation})(?!\d)")
+
+
+def _refresh_cutoff(ov: Path, refreshed: date) -> float:
+    """When the index was last refreshed, as precisely as the vault knows.
+
+    Preference order:
+      1. `[meta] refreshed_at`, a datetime the weekly refresh may record.
+      2. The index file's mtime, when it falls on the `refreshed` date and no
+         row was closed that day: a same-day `done` rewrites the file too,
+         and its write time is not the refresh moment.
+      3. Midnight of the `refreshed` date.
+    """
+    midnight = datetime(refreshed.year, refreshed.month, refreshed.day).timestamp()
+    path = ov / dl.INDEX_RELPATH
+    try:
+        raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return midnight
+    stamp = (raw.get("meta") or {}).get("refreshed_at")
+    if isinstance(stamp, datetime):
+        return stamp.timestamp()
+    if isinstance(stamp, str):
+        try:
+            return datetime.fromisoformat(stamp).timestamp()
+        except ValueError:
+            pass
+    closed_same_day = any(
+        isinstance(row, dict) and dl._coerce_date(row.get("resolved")) == refreshed
+        for row in raw.get("deadline") or []
+    )
+    if closed_same_day:
+        return midnight
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return midnight
+    return mtime if date.fromtimestamp(mtime) == refreshed else midnight
+
+
+def _reconcile_skip_prefixes(ov: Path) -> set[str]:
+    """Vault-relative directory prefixes the reconciliation walk prunes."""
+    prefixes = set(RECONCILE_SKIP_LITERAL)
+    try:
+        from _paths import tier_segments, wiki_dirs
+
+        segments = tier_segments()
+        for name in RECONCILE_SKIP_TIERS:
+            prefixes.add(segments.get(name, name).strip("/"))
+        for path in wiki_dirs():
+            try:
+                prefixes.add(path.resolve().relative_to(ov.resolve()).as_posix())
+            except ValueError:
+                continue
+    except Exception:  # registry unavailable: the literal names are the fallback
+        prefixes.update(RECONCILE_SKIP_TIERS)
+    return prefixes
+
+
+def _modified_since(ov: Path, cutoff: float) -> list[Path]:
+    skip = _reconcile_skip_prefixes(ov)
+    found: list[tuple[float, Path]] = []
+    for root, dirs, files in os.walk(ov):
+        rel_root = Path(root).relative_to(ov).as_posix()
+        dirs[:] = [
+            d
+            for d in dirs
+            if not d.startswith((".", "_"))
+            and (d if rel_root == "." else f"{rel_root}/{d}") not in skip
+        ]
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            path = Path(root) / name
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_mtime > cutoff and stat.st_size <= RECONCILE_MAX_BYTES:
+                found.append((stat.st_mtime, path))
+    found.sort(reverse=True)
+    return [p for _, p in found[:RECONCILE_MAX_FILES]]
+
+
+def recent_mentions(ov: Path, index: dl.Index, rows: list[dl.Deadline]) -> dict[str, str]:
+    """{slug: "<vault-relative path>:<line>"} for rows a newer note mentions.
+
+    A mention is a line that carries the row's due date (ISO, M/D, or M月D日)
+    and at least one label token, in a file modified after the index refresh
+    (see `_refresh_cutoff`) that is not the row's own source. First hit per
+    row wins.
+    """
+    if not rows or not index.refreshed:
+        return {}
+    try:
+        since = date.fromisoformat(index.refreshed)
+    except ValueError:
+        return {}
+    cutoff = _refresh_cutoff(ov, since)
+    wanted = []
+    for row in rows:
+        tokens = label_tokens(row.label)
+        if tokens:
+            wanted.append((row, _date_pattern(row.due), tokens))
+    if not wanted:
+        return {}
+    hits: dict[str, str] = {}
+    for path in _modified_since(ov, cutoff):
+        rel = path.relative_to(ov).as_posix()
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for number, line in enumerate(lines, 1):
+            folded = line.casefold()
+            for row, pattern, tokens in wanted:
+                if row.slug in hits or rel == row.source.rsplit(":", 1)[0]:
+                    continue
+                if pattern.search(line) and any(t in folded for t in tokens):
+                    hits[row.slug] = f"{rel}:{number}"
+        if len(hits) == len(wanted):
+            break
+    return hits
 
 
 def load_focus(ov: Path, today: date, warnings: list[str]) -> list[Group]:
@@ -254,10 +458,20 @@ def load_focus(ov: Path, today: date, warnings: list[str]) -> list[Group]:
 
 
 def _closing_item(row: dl.Deadline) -> Item:
+    """One ledger row. A milestone's `action` is a description of the quarter's
+    work, not a step to take today, so it stays in the index and off the row."""
+    hint = row.action if row.action and row.kind != "milestone" else None
     text = f"{row.label} · {_days_phrase(row.days_left)}"
-    if row.action:
-        text += f" · {row.action}"
-    return Item(text=_truncate(text), due=row.due, days_left=row.days_left, source=row.source)
+    if hint:
+        text += f" · {hint}"
+    return Item(
+        text=_truncate(text),
+        due=row.due,
+        days_left=row.days_left,
+        source=row.source,
+        label=_truncate(row.label),
+        hint=_truncate(hint) if hint else None,
+    )
 
 
 def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
@@ -288,24 +502,41 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         return []
 
     dated.sort(key=lambda pair: (pair[0], pair[1].text))
-    items = [
-        Item(
+
+    def item(days: int, todo: Any) -> Item:
+        return Item(
             text=_truncate(f"{_days_phrase(days)} · {clean_todo_text(todo.text)}"),
             due=todo.due,
             days_left=days,
             source=f"{todo.short_source()}:{todo.line}",
+            label=_truncate(clean_todo_text(todo.text)),
         )
-        for days, todo in dated
-    ]
-    return [
-        Group(
-            tier=2,
-            kind="todo",
-            heading=f"TODO 到期 {len(items)} 件",
-            items=items,
-            fold_heading=f"TODO 到期 {len(items)} 件 (todos.py list)",
+
+    # Same split as the deadlines: the day has arrived versus this week.
+    now = [item(days, todo) for days, todo in dated if days <= 1]
+    later = [item(days, todo) for days, todo in dated if days > 1]
+    groups: list[Group] = []
+    if now:
+        groups.append(
+            Group(
+                tier=1,
+                kind="todo_now",
+                heading=f"今天/明天到期 TODO {len(now)} 件",
+                items=now,
+                fold_heading=f"今天/明天到期 TODO {len(now)} 件 (todos.py list)",
+            )
         )
-    ]
+    if later:
+        groups.append(
+            Group(
+                tier=2,
+                kind="todo",
+                heading=f"TODO 到期 {len(later)} 件",
+                items=later,
+                fold_heading=f"TODO 到期 {len(later)} 件 (todos.py list)",
+            )
+        )
+    return groups
 
 
 def load_recurring(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
@@ -357,6 +588,7 @@ def load_recurring(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
             due=r.next_due().isoformat(),
             days_left=r.days_until_due(today),
             source=f"gtd/recurring.md:{r.line}",
+            label=_truncate(f"{r.slug} (every:{r.every_str()})"),
         )
         for r in fresh[:3]
     ]
@@ -780,6 +1012,10 @@ def build(
                             ("due", i.due),
                             ("days_left", i.days_left),
                             ("source", i.source),
+                            ("label", i.label),
+                            ("hint", i.hint),
+                            ("flag", i.flag),
+                            ("flag_source", i.flag_source),
                         )
                         if v is not None
                     }
@@ -799,7 +1035,8 @@ def text_view(brief: dict[str, Any]) -> str:
     for group in brief["groups"]:
         lines.append(group["heading"])
         for item in group["items"]:
-            lines.append(f"  · {item['text']}")
+            flag = f"  [{item['flag']} {item['flag_source']}]" if item.get("flag") else ""
+            lines.append(f"  · {item['text']}{flag}")
     for warning in brief["warnings"]:
         lines.append(f"! {warning}")
     return "\n".join(lines)

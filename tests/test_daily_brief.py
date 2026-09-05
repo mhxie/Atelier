@@ -360,7 +360,11 @@ class BriefIntegrationTests(unittest.TestCase):
         focus = self._group(brief, "focus")
         self.assertEqual(focus["tier"], 1)
         self.assertEqual(focus["heading"], "本季主线 1 件")
-        self.assertIn("环境探针中检 · 29d · 定义性", focus["items"][0]["text"])
+        # The milestone's `action` is a description of the quarter's work, not
+        # a step for today, so it stays in the index: the row is label + days.
+        self.assertEqual(focus["items"][0]["text"], "环境探针中检 · 29d")
+        self.assertEqual(focus["items"][0]["label"], "环境探针中检")
+        self.assertNotIn("hint", focus["items"][0])
         self.assertEqual(focus["items"][0]["source"], "travel/example-trip.md:30")
         closing = json.dumps(
             [self._group(brief, k) for k in ("closing_now", "closing_lead")], ensure_ascii=False
@@ -406,10 +410,25 @@ class BriefIntegrationTests(unittest.TestCase):
 
     def test_dated_todos_inside_the_horizon_itemize(self):
         brief = self._brief()
+        now = self._group(brief, "todo_now")
+        self.assertEqual(now["tier"], 1)
+        self.assertEqual(len(now["items"]), 1)
+        self.assertIn("明天", now["items"][0]["text"])
+        self.assertNotIn("due:", now["items"][0]["text"])
         todo = self._group(brief, "todo")
-        self.assertEqual(len(todo["items"]), 2)
-        self.assertIn("明天", todo["items"][0]["text"])
-        self.assertNotIn("due:", todo["items"][0]["text"])
+        self.assertEqual(todo["tier"], 2)
+        self.assertEqual([i["days_left"] for i in todo["items"]], [5])
+
+    def test_a_todo_whose_day_has_arrived_survives_the_cap(self):
+        """An overdue dated TODO and a due-today one were folded behind a
+        count line while unrelated far-off milestones held the screen. Tier 1
+        is never folded, so the split fixes that."""
+        brief = self._brief(cap="6")
+        self.assertTrue(brief["over_cap"])
+        now = self._group(brief, "todo_now")
+        self.assertFalse(now["folded"])
+        self.assertEqual(len(now["items"]), 1)
+        self.assertTrue(self._group(brief, "todo")["folded"])
 
     def test_undated_far_future_and_done_todos_are_excluded(self):
         brief = self._brief()
@@ -499,11 +518,12 @@ class BriefIntegrationTests(unittest.TestCase):
         self.assertEqual(brief["rendered_lines"], 0)
 
     def test_cap_is_reported_and_respected(self):
-        # Tier 1 is 7 lines in this fixture (two closing groups plus 本季主线),
-        # so a cap of 10 leaves room for exactly the folded count lines.
-        brief = self._brief("--cap", "10")
-        self.assertEqual(brief["cap"], 10)
-        self.assertLessEqual(brief["rendered_lines"], 10)
+        # Tier 1 is 9 lines in this fixture (two closing groups, 本季主线, and
+        # the due-tomorrow TODO), so a cap of 12 leaves room for exactly the
+        # folded count lines.
+        brief = self._brief("--cap", "12")
+        self.assertEqual(brief["cap"], 12)
+        self.assertLessEqual(brief["rendered_lines"], 12)
         self.assertGreater(brief["folded_by_cap"], 0)
         self.assertFalse(brief["over_cap"])
 
@@ -616,8 +636,6 @@ class RecurringWindowTests(unittest.TestCase):
         self.assertIn("逾期", group["heading"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class GlanceLineTests(unittest.TestCase):
@@ -664,3 +682,208 @@ class GlanceLineTests(unittest.TestCase):
     def test_a_short_bracketed_label_is_kept(self):
         raw = "演唱会: Some Artist [已购票] 明晚"
         self.assertIn("[已购票]", self.db._format_reminder(raw))
+
+
+class ReconciliationTests(unittest.TestCase):
+    """A perk redeemed mid-week must not sit on the morning screen until the
+    weekly index refresh: a newer note naming the row's due date flags it."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, vault: Path) -> dict:
+        proc = subprocess.run(
+            [sys.executable, "scripts/daily_brief.py", "--json", "--today", TODAY, "--skip-cues", "--cap", "40"],
+            cwd=REPO_ROOT,
+            env={**os.environ, "OV": str(vault)},
+            capture_output=True,
+            text=True,
+            timeout=90,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return json.loads(proc.stdout)
+
+    def _item(self, brief: dict, label_start: str) -> dict:
+        for group in brief["groups"]:
+            for item in group["items"]:
+                if item.get("label", "").startswith(label_start):
+                    return item
+        raise AssertionError(f"no item starting {label_start!r}")
+
+    def _note(self, vault: Path, text: str, *, newer: bool, at: datetime | None = None) -> Path:
+        path = vault / "travel" / "trips" / "example-city.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        if newer or at:
+            stamp = (at or datetime(2099, 2, 1, 12, 0)).timestamp()
+            os.utime(path, (stamp, stamp))
+        return path
+
+    def test_skip_prefixes_follow_the_path_registry(self):
+        from unittest import mock
+
+        ov = Path(self.tmp.name)
+        with mock.patch("_paths.tier_segments", return_value={"archive": "attic", "wiki": "kb", "papers": "papers"}), \
+             mock.patch("_paths.wiki_dirs", return_value=[ov / "kb", ov / "kb-zh", Path("/elsewhere/kb")]):
+            prefixes = db._reconcile_skip_prefixes(ov)
+        self.assertIn("attic", prefixes)
+        self.assertNotIn("archive", prefixes)
+        self.assertIn("kb-zh", prefixes)
+        self.assertIn("cache", prefixes)
+        self.assertNotIn("/elsewhere/kb", prefixes)
+        # With the registry unreadable the literal names still exclude.
+        with mock.patch("_paths.tier_segments", side_effect=RuntimeError("no registry")):
+            self.assertIn("archive", db._reconcile_skip_prefixes(ov))
+
+    def test_a_note_under_an_excluded_tier_never_flags(self):
+        vault = build_vault(Path(self.tmp.name))
+        for sub in ("wiki", "archive", "inbox/digest", "cache"):
+            path = vault / sub / "note.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("Award night (exp 2099-03-15) 顺带在此兑现。\n", encoding="utf-8")
+            stamp = datetime(2099, 2, 1, 12, 0).timestamp()
+            os.utime(path, (stamp, stamp))
+        self.assertNotIn("flag", self._item(self._run(vault), "Award night"))
+
+    def test_same_day_notes_are_measured_against_the_refresh_moment(self):
+        """The index says refreshed = 2099-01-30. When the file was written
+        at noon that day, a note from 09:00 was already seen by the refresh
+        and a note from 15:00 was not."""
+        vault = build_vault(Path(self.tmp.name))
+        index = vault / "_meta" / "deadlines.toml"
+        noon = datetime(2099, 1, 30, 12, 0).timestamp()
+        os.utime(index, (noon, noon))
+        text = "Award night (exp 2099-03-15) 顺带在此兑现。\n"
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 9, 0))
+        self.assertNotIn("flag", self._item(self._run(vault), "Award night"))
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 15, 0))
+        brief = self._run(vault)
+        self.assertEqual(self._item(brief, "Award night")["flag"], "待核")
+        self.assertTrue(any("2099-01-30 刷新后" in w for w in brief["warnings"]), brief["warnings"])
+        # Once the index file is touched on a later day (e.g. by `done`), the
+        # cutoff falls back to the refresh date's midnight.
+        later = datetime(2099, 2, 3, 8, 0).timestamp()
+        os.utime(index, (later, later))
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 9, 0))
+        self.assertEqual(self._item(self._run(vault), "Award night")["flag"], "待核")
+
+    def test_a_same_day_done_write_is_not_the_refresh_moment(self):
+        """`done` rewrites the index; when that happens on the refresh date the
+        file's mtime is the close, not the refresh, so the cutoff falls back
+        to midnight and a note from earlier that day still flags."""
+        vault = build_vault(Path(self.tmp.name))
+        index = vault / "_meta" / "deadlines.toml"
+        index.write_text(
+            index.read_text(encoding="utf-8").replace(
+                'slug = "reversible-chore"', 'status = "done"\nresolved = 2099-01-30\nslug = "reversible-chore"'
+            ),
+            encoding="utf-8",
+        )
+        evening = datetime(2099, 1, 30, 20, 0).timestamp()
+        os.utime(index, (evening, evening))
+        text = "Award night (exp 2099-03-15) 顺带在此兑现。\n"
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 9, 0))
+        self.assertEqual(self._item(self._run(vault), "Award night")["flag"], "待核")
+
+    def test_refreshed_at_is_the_cutoff_when_the_index_records_it(self):
+        vault = build_vault(Path(self.tmp.name))
+        index = vault / "_meta" / "deadlines.toml"
+        index.write_text(
+            index.read_text(encoding="utf-8").replace(
+                "refreshed = 2099-01-30\n", "refreshed = 2099-01-30\nrefreshed_at = 2099-01-30T12:00:00\n"
+            ).replace('slug = "reversible-chore"', 'status = "done"\nresolved = 2099-01-30\nslug = "reversible-chore"'),
+            encoding="utf-8",
+        )
+        evening = datetime(2099, 1, 30, 20, 0).timestamp()
+        os.utime(index, (evening, evening))
+        text = "Award night (exp 2099-03-15) 顺带在此兑现。\n"
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 9, 0))
+        self.assertNotIn("flag", self._item(self._run(vault), "Award night"))
+        self._note(vault, text, newer=False, at=datetime(2099, 1, 30, 15, 0))
+        self.assertEqual(self._item(self._run(vault), "Award night")["flag"], "待核")
+
+    def test_a_newer_note_naming_the_due_date_flags_the_row(self):
+        vault = build_vault(Path(self.tmp.name))
+        self._note(vault, "## 已锁定\n\nAward night (exp 2099-03-15) 顺带在此兑现。\n", newer=True)
+        brief = self._run(vault)
+        item = self._item(brief, "Award night")
+        self.assertEqual(item["flag"], "待核")
+        self.assertEqual(item["flag_source"], "travel/trips/example-city.md:3")
+        self.assertTrue(any("needs-long-lead" in w and "deadlines.py done" in w for w in brief["warnings"]), brief["warnings"])
+
+    def test_every_way_of_writing_the_day_counts(self):
+        for text in (
+            "Award night booked, was expiring 3/15.\n",
+            "Award night booked, was expiring 03/15.\n",
+            "Award night 03月15日 到期，已用掉。\n",
+            "Award night 3月15日 到期，已用掉。\n",
+            "Award night used, 2099/03/15 deadline gone.\n",
+        ):
+            with self.subTest(text=text):
+                vault = build_vault(Path(self.tmp.name))
+                self._note(vault, text, newer=True)
+                self.assertEqual(self._item(self._run(vault), "Award night")["flag_source"], "travel/trips/example-city.md:1")
+        self.assertEqual(
+            db._date_forms("2099-03-15"),
+            ["2099-03-15", "2099/03/15", "3/15", "3月15日", "03/15", "03月15日"],
+        )
+        # No duplicates when padding changes nothing.
+        self.assertEqual(db._date_forms("2099-11-20"), ["2099-11-20", "2099/11/20", "11/20", "11月20日"])
+
+    def test_label_words_match_regardless_of_case(self):
+        for text in ("award night booked 3/15.\n", "AWARD NIGHT used, 2099-03-15.\n"):
+            with self.subTest(text=text):
+                vault = build_vault(Path(self.tmp.name))
+                self._note(vault, text, newer=True)
+                self.assertEqual(self._item(self._run(vault), "Award night")["flag"], "待核")
+        self.assertEqual(db.label_tokens("Award Night 免房券 2025"), ["award", "night", "免房券"])
+
+    def test_a_short_date_form_does_not_match_inside_a_longer_one(self):
+        """`2/1` (the 02-01 row) must not match inside `02/15` or `12/10`."""
+        for text in ("Document expires on 02/15.\n", "Document expires 12/10.\n", "Document expires 2/10.\n"):
+            with self.subTest(text=text):
+                vault = build_vault(Path(self.tmp.name))
+                self._note(vault, text, newer=True)
+                self.assertNotIn("flag", self._item(self._run(vault), "Document expires"))
+        vault = build_vault(Path(self.tmp.name))
+        self._note(vault, "Document expires 2/1, renewed.\n", newer=True)
+        self.assertEqual(self._item(self._run(vault), "Document expires")["flag"], "待核")
+        pattern = db._date_pattern("2099-02-01")
+        self.assertIsNone(pattern.search("02/15"))
+        self.assertIsNone(pattern.search("12/1"))
+        self.assertIsNotNone(pattern.search("due 2/1."))
+        self.assertIsNotNone(pattern.search("2月1日"))
+
+    def test_an_older_note_or_a_date_without_the_label_does_not_flag(self):
+        vault = build_vault(Path(self.tmp.name))
+        self._note(vault, "Award night (exp 2099-03-15) 顺带在此兑现。\n", newer=False)
+        self.assertNotIn("flag", self._item(self._run(vault), "Award night"))
+        self._note(vault, "Something else happens on 2099-03-15.\n", newer=True)
+        self.assertNotIn("flag", self._item(self._run(vault), "Award night"))
+
+    def test_the_rows_own_source_never_flags_itself(self):
+        vault = build_vault(Path(self.tmp.name))
+        source = vault / "finance" / "example-tracker.md"
+        source.write_text("Award night needs a booking, expires 2099-03-15\n" * 140, encoding="utf-8")
+        stamp = datetime(2099, 2, 1, 12, 0).timestamp()
+        os.utime(source, (stamp, stamp))
+        brief = self._run(vault)
+        self.assertNotIn("flag", self._item(brief, "Award night"))
+
+    def test_items_carry_label_and_hint_apart_from_the_composed_text(self):
+        brief = self._run(build_vault(Path(self.tmp.name)))
+        for group in brief["groups"]:
+            for item in group["items"]:
+                self.assertIn("label", item, item)
+                self.assertNotIn("d ·", item["label"])
+                if "hint" in item:
+                    self.assertTrue(item["text"].endswith(item["hint"]), item)
+                    self.assertNotIn(item["hint"], item["label"])
+        self.assertIn("[待核", db.text_view({**brief, "groups": [{"heading": "h", "items": [{"text": "x", "flag": "待核", "flag_source": "a.md:1"}]}]}))
+
+
+if __name__ == "__main__":
+    unittest.main()

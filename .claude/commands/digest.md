@@ -202,15 +202,29 @@ Write `$SCRATCH/overview.json`:
       "title": "需要的决策",
       "bullets": [
         {
-          "text": "Bullet prose. **bold**, `code`, and [inline links](https://example.com) work.",
+          "text": "The question, one line. **bold**, `code`, and [inline links](https://example.com) work.",
+          "between": ["选项 A", "选项 B"],
+          "settles": "what evidence closes it",
+          "by": "YYYY-MM-DD or omit",
           "sources": ["<lane dir>/<routine output>.md"],
           "url": "https://primary-source.example.com"
         }
+      ]
+    },
+    {
+      "title": "信号",
+      "bullets": [
+        {"text": "Bullet prose.", "sources": ["<lane dir>/<routine output>.md"]}
       ]
     }
   ]
 }
 ```
+
+`between` and `settles` are what make a bullet a decision. `write` moves a
+需要的决策 bullet that lacks either under 信号 and names the demotion in the
+colophon, so the masthead's 决策 count only ever counts cards the reader can
+act on.
 
 `sources` paths must match the manifest's `path` values exactly. A path that
 does not match renders as `(unmatched)` in the document, which is a visible
@@ -233,8 +247,10 @@ Section order for **daily**:
 
 1. **需要的决策**: findings from this window that need a call the routines
    cannot make. A finding is a decision only when acting and not acting lead
-   somewhere different. Include what the decision is between, and what would
-   settle it. Zero is a valid count; say so rather than manufacturing one.
+   somewhere different. `text` is the question; `between` lists the two or
+   three options; `settles` names what would close it; `by` is the date it
+   stops being open, when there is one. Zero is a valid count; say so rather
+   than manufacturing one.
 2. **新产品**: products, tools, and hardware from the window's items that touch
    something the user is actually building or using. Name the fit in the same
    breath, or leave it out.
@@ -320,7 +336,10 @@ Rules:
 - **No metadata.** Nothing from frontmatter, coverage, universe, limitations,
   or effort sections. The source index still links the full file.
 - The tech feed's items render after your picks deterministically from the
-  manifest; do not copy them into `deep_read`.
+  manifest; do not copy them into `deep_read`. Each item's one-line note is
+  read from the feed routine's own file (the summary after the link, inline
+  or indented, in Chinese); `write` reports a feed whose notes are missing or
+  not Chinese in the colophon rather than rendering bare headlines silently.
 - When the window has no signal units, omit `deep_read`; the renderer then
   falls back to the raw bodies, which is worse but never empty.
 
@@ -359,6 +378,14 @@ then add `--routine <name>` to say which one writes the digest.
 It warns when the document exceeds Gmail's ~102 KB clip threshold. That is a
 report, not a failure: the document is ordered so the clipped tail is the source
 index. A clip warning on a normal window means the window is too wide.
+
+`write` also runs the document's own invariants before writing and prints each
+miss as a `check:` line: a countdown printed twice on one ledger row, a tech
+feed of bare headlines, a decision card without its settling condition. They
+are reports on the inputs, never a reason to skip the morning's document.
+`"$PY" scripts/routine_digest.py check` re-runs them on the newest artifact:
+exit 3 on findings, 1 when the check itself could not run, 0 when clean;
+`/lint` Phase 0 calls it and reports findings as WARN.
 
 Interactively, show the user the first screen and the overview text before
 step 6. The scheduled run has no such gate, which is why the mail is addressed
@@ -405,8 +432,8 @@ evidence the user read it. Acking stays an interactive act.
 
 The first screen's forfeitable items come from `$OV/_meta/deadlines.toml`, which
 holds dated obligations that live as prose in `finance/` and `travel/` trackers.
-`deadlines.py` only reads it. Refresh it on the weekly run, or whenever the brief
-warns that the index is stale:
+`deadlines.py` never adds a row; its one write is `done`, below. Refresh it on
+the weekly run, or whenever the brief warns that the index is stale:
 
 1. `"$PY" scripts/deadlines.py list` to see what is already indexed.
 2. Search the trackers for dated language:
@@ -417,12 +444,19 @@ warns that the index is stale:
 4. **Show the proposed rows to the user and write only what they approve.**
    These are claims about their money and documents. A row whose date you had to
    infer is a row to ask about, not to write.
-5. Set `[meta] refreshed` to today in the same edit, then
+5. Set `[meta] refreshed` to today in the same edit, and `refreshed_at` to
+   the current datetime (RFC 3339) so the brief's reconciliation measures
+   "newer than the refresh" from the moment, not the day; then
    `"$PY" scripts/deadlines.py lint`, which fails on a `source` that does not
    resolve, which is the check that keeps invented rows out.
 
 Mark a row `status = "done"` rather than deleting it, so the index keeps its
-history.
+history. A row handled before the next refresh closes the same day with
+`"$PY" scripts/deadlines.py done <slug> --resolved-by <path>:<line>`, the
+index's one write. Until then the brief flags a row 待核 when a note modified
+after the refresh names its due date together with a word from its label,
+and lists the slug in its warnings; the flag is a prompt to confirm, not a
+verdict.
 
 ## Notes
 

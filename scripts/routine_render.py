@@ -126,6 +126,39 @@ _S_TRACE = (
     "padding:1px 6px;border-radius:3px;white-space:nowrap;"
 )
 
+_S_HINT = f"display:block;font-size:13px;color:{_MUTED};"
+
+_S_FLAG = (
+    f"font-family:{_MONO};font-size:11px;color:{_URGENT};background:#f6e8e4;"
+    "padding:1px 6px;border-radius:3px;white-space:nowrap;"
+)
+
+# 需要的决策 renders as cards, not bullets: it is the one section whose
+# reader has to act, and it earns the document's only boxed treatment.
+_S_DEC_UL = "margin:4px 0 0;padding:0;list-style:none;"
+
+_S_DEC_CARD = (
+    f"margin:0 0 10px;padding:10px 12px;border-left:3px solid {_ACCENT};"
+    f"background:{_CHIP};border-radius:0 4px 4px 0;"
+)
+
+_S_DEC_Q = f"margin:0 0 6px;font-weight:600;color:{_INK};"
+
+_S_DEC_OPT = "margin:0 0 6px;"
+
+_S_DEC_KEY = (
+    f"display:inline-block;min-width:16px;margin-right:6px;font-family:{_MONO};"
+    f"font-size:11px;font-weight:600;color:{_ACCENT};"
+)
+
+_S_DEC_SETTLE = f"margin:0;font-size:13px;color:{_MUTED};"
+
+_S_LAB_HEAD = f"margin:10px 0 2px;font-weight:600;color:{_INK};"
+
+_S_LAB_UL = "margin:0 0 4px;padding-left:18px;"
+
+_S_LAB_LI = "margin:0 0 5px;"
+
 _S_LI = "margin:0 0 5px;"
 
 _S_H2 = (
@@ -364,7 +397,7 @@ def render(
     not link to their deep counterparts because a mail client rewrites
     in-document anchors; they are found by name instead.
     """
-    overview = overview or {}
+    overview, demoted = normalize_decisions(overview or {})
     context = context or {}
     counts = manifest.get("counts", {})
     parts: list[str] = []
@@ -504,6 +537,10 @@ def render(
     # provenance, and not in a section above the fold: a missing Readwise
     # pull changes nothing the reader does in the next twelve hours.
     gaps = [str(g).strip() for g in (overview.get("gaps") or []) if str(g).strip()]
+    gaps.extend(demoted)
+    note_gap = feed_note_gap(manifest)
+    if note_gap:
+        gaps.append(note_gap)
     if gaps:
         rendered = "<br>".join(html_mod.escape(g) for g in gaps)
         depth.append(f'<p style="{_S_NOTE}">输入缺口<br>{rendered}</p>')
@@ -608,11 +645,92 @@ WEIGHT_STALE_DAYS = 3
 
 DECISION_SECTION = "需要的决策"
 
+SIGNAL_SECTION = "信号"
+
 def _decision_count(overview: dict[str, Any] | None) -> int:
-    for section in (overview or {}).get("sections") or []:
-        if isinstance(section, dict) and section.get("title") == DECISION_SECTION:
-            return len(section.get("bullets") or [])
-    return 0
+    """Cards under every 需要的决策 section, so the strip matches the page."""
+    return sum(
+        len(section.get("bullets") or [])
+        for section in (overview or {}).get("sections") or []
+        if isinstance(section, dict) and section.get("title") == DECISION_SECTION
+    )
+
+def decision_shape_missing(bullet: Any) -> list[str]:
+    """Which of the fields that make a bullet a decision are absent.
+
+    A decision is a choice the routines could not make: it asks a question
+    (`text`), names what it is between, and what would settle it. A bullet
+    missing any of the three is a signal wearing the wrong heading, or a
+    blank card, and the reader cannot act on it.
+    """
+    if not isinstance(bullet, dict):
+        return ["text", "between", "settles"]
+    missing = []
+    if not str(bullet.get("text") or "").strip():
+        missing.append("text")
+    between = bullet.get("between")
+    if not (
+        isinstance(between, list)
+        and len([o for o in between if str(o or "").strip()]) >= 2
+    ):
+        missing.append("between")
+    if not str(bullet.get("settles") or "").strip():
+        missing.append("settles")
+    return missing
+
+def normalize_decisions(overview: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Move unstructured 需要的决策 bullets under 信号, naming each demotion.
+
+    Deterministic guard on model-written JSON: the writer is asked for
+    `between` and `settles`; whatever arrives without them is still rendered,
+    just not as a decision, and the colophon says so. Returns a new overview
+    and the demotion notes.
+    """
+    sections = overview.get("sections")
+    if not isinstance(sections, list):
+        return overview, []
+    demoted: list[str] = []
+    moved: list[Any] = []
+    new_sections: list[Any] = []
+    for section in sections:
+        if not (isinstance(section, dict) and section.get("title") == DECISION_SECTION):
+            new_sections.append(section)
+            continue
+        section = dict(section)
+        kept: list[dict[str, Any]] = []
+        for index, bullet in enumerate(section.get("bullets") or [], 1):
+            missing = decision_shape_missing(bullet)
+            if missing:
+                moved.append(bullet)
+                demoted.append(
+                    f"{DECISION_SECTION} #{index} 缺 {'/'.join(missing)}, 已降级为{SIGNAL_SECTION}"
+                )
+            else:
+                kept.append(bullet)
+        section["bullets"] = kept
+        new_sections.append(section)
+    if not moved:
+        return overview, []
+    position = next(
+        (
+            i
+            for i, sec in enumerate(new_sections)
+            if isinstance(sec, dict) and sec.get("title") == SIGNAL_SECTION
+        ),
+        None,
+    )
+    if position is None:
+        target: dict[str, Any] = {"title": SIGNAL_SECTION, "bullets": []}
+        new_sections.append(target)
+    else:
+        # A copy: the caller's section dict must survive a second render
+        # without the demoted bullet appearing twice.
+        target = dict(new_sections[position])
+        new_sections[position] = target
+    target["bullets"] = list(target.get("bullets") or []) + moved
+    result = dict(overview)
+    result["sections"] = new_sections
+    return result, demoted
 
 def _render_signals(
     health: dict[str, Any],
@@ -723,6 +841,28 @@ def _render_quota(context: dict[str, Any]) -> str:
         f'<table role="presentation" style="{_S_QUOTA_TABLE}"><tr>{"".join(cells)}</tr></table>'
     )
 
+_TRACE_STEM_CHARS = 22
+
+
+def _trace_label(source: str) -> str:
+    """`<stem>:<line>` with a long stem cut, so the chip never wraps the row.
+
+    A 2099-01-30-decision-example-long-note-name.md:123 chip costs a whole
+    line on a phone; the reader needs enough of the name to recognise the
+    file, not the full slug.
+    """
+    if not source:
+        return ""
+    name = source.rsplit("/", 1)[-1]
+    stem, _, line = name.rpartition(":")
+    if not stem:
+        stem, line = name, ""
+    stem = stem[:-3] if stem.endswith(".md") else stem
+    if len(stem) > _TRACE_STEM_CHARS:
+        stem = stem[: _TRACE_STEM_CHARS - 1] + "…"
+    return html_mod.escape(f"{stem}:{line}" if line else stem)
+
+
 def _due_cell(item: dict[str, Any], tier: Any) -> str:
     """The countdown column: a number the eye can sort by."""
     days = item.get("days_left")
@@ -774,20 +914,27 @@ def _render_brief(brief: dict[str, Any]) -> str:
                 f'{html_mod.escape(str(group.get("heading", "")))}</span></td></tr>'
             )
             for item in group.get("items") or []:
-                text = html_mod.escape(str(item.get("text", "")))
+                # `label` is the row without its countdown, which this ledger
+                # already prints in its own column; `text` is the composed
+                # terminal line and only a fallback for an older brief.
+                text = html_mod.escape(str(item.get("label") or item.get("text", "")))
+                hint = str(item.get("hint") or "").strip()
+                if hint:
+                    text += f'<span style="{_S_HINT}">{html_mod.escape(hint)}</span>'
                 # Basename only. The full vault path doubles the line length
                 # and wraps the item onto a second row, which is the whole
                 # cost this screen is trying not to pay; the file is still
                 # identifiable.
                 source = str(item.get("source") or "")
-                tail = (
-                    f' <span style="{_S_TRACE}">{html_mod.escape(source.rsplit("/", 1)[-1])}</span>'
-                    if source
-                    else ""
-                )
+                tail = f' <span style="{_S_TRACE}">{_trace_label(source)}</span>' if source else ""
+                if item.get("flag"):
+                    flag = html_mod.escape(str(item["flag"]))
+                    where = _trace_label(str(item.get("flag_source") or ""))
+                    tail += f' <span style="{_S_FLAG}">{flag}{" · " + where if where else ""}</span>'
                 out.append(
-                    f'<tr><td style="{_S_LEDGER_DUE}">{_due_cell(item, group.get("tier"))}</td>'
-                    f'<td style="{_S_LEDGER_ITEM}">{text}{tail}</td></tr>'
+                    f'<tr class="ledger-row"><td class="ledger-due" style="{_S_LEDGER_DUE}">'
+                    f'{_due_cell(item, group.get("tier"))}</td>'
+                    f'<td class="ledger-item" style="{_S_LEDGER_ITEM}">{text}{tail}</td></tr>'
                 )
         out.append("</table>")
     warnings = brief.get("warnings") or []
@@ -959,12 +1106,16 @@ def _articles_badge(articles: list[dict[str, Any]]) -> str:
     return f'<span style="{_S_H2_N}">{" · ".join(bits)}</span>'
 
 def _render_frontier(labs: Any, digest_date: str) -> str:
-    """The frontier-lab sweep as one section: signals, drift, promotions.
+    """The frontier-lab sweep as one section: signals grouped by lab.
 
-    The sweep is weekly and the digest is daily, so the full table renders only
-    on the sweep's own day and the day after; later days keep the heading and
-    its counts, which is enough to know nothing new arrived without paying the
-    first screen for a week-old table.
+    Stacked rather than tabular: a fixed name column wrapped a long lab name
+    into three lines beside a two-line signal and left the rest of every row
+    blank, and two signals from one lab printed the name twice. Here each lab
+    is a heading line and its signals are the bullets under it.
+
+    The sweep runs daily but may skip days, so the full list renders only on
+    the sweep's own day and the day after; later days keep the heading and
+    its counts, which is enough to know nothing new arrived.
     """
     if not isinstance(labs, dict):
         return ""
@@ -978,42 +1129,45 @@ def _render_frontier(labs: Any, digest_date: str) -> str:
     sweep = str(labs.get("sweep_date") or "")
     badge_bits = [f"{len(signals)} 条信号", f"{drift} 漂移", f"{promotions} 晋级"]
     if sweep:
-        badge_bits.append(f"周扫 {sweep[5:] or sweep}")
+        badge_bits.append(f"扫描 {sweep[5:] or sweep}")
     heading = (
         f'<h2 style="{_S_H2}">前沿实验室'
         f'<span style="{_S_H2_N}">{html_mod.escape(" · ".join(badge_bits))}</span></h2>'
     )
     if not signals and not labs.get("watchlist_note"):
         return heading
-    # Unknown digest date fails closed: a table of unknown age is the thing
+    # Unknown digest date fails closed: a list of unknown age is the thing
     # this rule exists to keep off the first screen.
     if sweep and (not digest_date or not _within_days(sweep, digest_date, 1)):
         return heading + (
-            f'<p style="{_S_SMALL}">本期周扫 {html_mod.escape(sweep)} 已随当日 digest 报告，'
-            "本周尚无新扫描。</p>"
+            f'<p style="{_S_SMALL}">本期扫描 {html_mod.escape(sweep)} 已随当日 digest 报告，'
+            "之后尚无新扫描。</p>"
         )
-    rows = []
+    by_lab: dict[str, list[dict[str, Any]]] = {}
     for signal in signals:
-        cat = html_mod.escape(str(signal.get("category") or ""))
-        tier = signal.get("tier")
-        if tier:
-            tier_label = f"{html_mod.escape(str(tier))}级来源"
-            cat = f"{cat} · {tier_label}" if cat else tier_label
-        link = (
-            f' <a href="{html_mod.escape(str(signal["url"]))}" style="{_S_SRC_LINK}">来源 ↗</a>'
-            if signal.get("url")
-            else ""
-        )
-        rows.append(
-            f'<tr><td style="{_S_LAB_NAME}"><span style="font-weight:600;">'
-            f'{html_mod.escape(str(signal["lab"]))}</span>'
-            + (f'<br><span style="{_S_LAB_CAT}">{cat}</span>' if cat else "")
-            + f'</td><td style="{_S_LAB_TEXT}">{inline_html(str(signal["text"]))}{link}</td></tr>'
-        )
+        by_lab.setdefault(str(signal["lab"]), []).append(signal)
+    out = [heading]
+    for lab, rows in by_lab.items():
+        out.append(f'<p class="lab" style="{_S_LAB_HEAD}">{html_mod.escape(lab)}</p>')
+        out.append(f'<ul style="{_S_LAB_UL}">')
+        for signal in rows:
+            cat = html_mod.escape(str(signal.get("category") or ""))
+            tier = signal.get("tier")
+            if tier:
+                tier_label = f"{html_mod.escape(str(tier))}级来源"
+                cat = f"{cat} · {tier_label}" if cat else tier_label
+            chip = f'<span style="{_S_LAB_CAT}">{cat}</span> ' if cat else ""
+            link = (
+                f' <a href="{html_mod.escape(str(signal["url"]))}" style="{_S_SRC_LINK}">来源 ↗</a>'
+                if signal.get("url")
+                else ""
+            )
+            out.append(f'<li style="{_S_LAB_LI}">{chip}{inline_html(str(signal["text"]))}{link}</li>')
+        out.append("</ul>")
     note = str(labs.get("watchlist_note") or "").strip()
     if note:
-        rows.append(f'<tr><td colspan="2" style="{_S_LAB_NOTE}">{inline_html(note)}</td></tr>')
-    return heading + f'<table role="presentation" style="{_S_LAB_TABLE}">{"".join(rows)}</table>'
+        out.append(f'<p style="{_S_LAB_NOTE}">{inline_html(note)}</p>')
+    return "".join(out)
 
 def _render_deep_read_curated(deep_read: Any) -> str:
     """Model-picked findings, rewritten for the reader: two facts and a why.
@@ -1074,9 +1228,14 @@ def _render_feed_items(manifest: dict[str, Any]) -> str:
                 else f'<span style="font-weight:600;">{html_mod.escape(title)}</span>'
             )
             note = str(item.get("note") or "").strip()
-            tail = f'<br><span style="color:{_MUTED};">{html_mod.escape(note)}</span>' if note else ""
+            tail = (
+                f'<br><span class="feed-note" style="color:{_MUTED};">{html_mod.escape(note)}</span>'
+                if note
+                else ""
+            )
             rows.append(
-                f'<tr><td style="padding:9px 0;border-top:1px solid {_RULE};">{head}{tail}</td></tr>'
+                f'<tr class="feed-item"><td style="padding:9px 0;border-top:1px solid {_RULE};">'
+                f"{head}{tail}</td></tr>"
             )
     if not rows:
         return ""
@@ -1085,6 +1244,99 @@ def _render_feed_items(manifest: dict[str, Any]) -> str:
         f'<tr><td style="{_S_DR_GROUP}">科技动态 · {len(rows)}</td></tr>'
         f'{"".join(rows)}</table>'
     )
+
+def _feed_note_stats(items: list[dict[str, Any]]) -> tuple[int, int, int]:
+    total = len(items)
+    noted = sum(1 for i in items if str(i.get("note") or "").strip())
+    cjk = sum(1 for i in items if _CJK.search(str(i.get("note") or "")))
+    return total, noted, cjk
+
+def _feed_note_message(total: int, noted: int, cjk: int) -> str | None:
+    # Every item carries a Chinese note, or the colophon says how many do
+    # not: a tolerance here would hide exactly the partial failure the
+    # spec asks `write` to report.
+    if not total or cjk == total:
+        return None
+    return (
+        f"科技动态 {total} 条中 {noted} 条有摘要, {cjk} 条为中文; "
+        "资讯例程需按「链接下一行缩进、中文、一句话」写摘要"
+    )
+
+def feed_note_gap(manifest: dict[str, Any]) -> str | None:
+    """One line when the tech feed arrived without readable summaries.
+
+    The items render deterministically from the manifest, so a routine that
+    wrote its summaries in a shape the collector does not read, or in the
+    wrong language, produces a list of bare headlines and nothing on the face
+    of the document says why. This says why, in the colophon.
+    """
+    items = [
+        i
+        for lane, source in iter_sources(manifest)
+        if lane == "Tech feed"
+        for i in (source.get("items") or [])
+        if isinstance(i, dict)
+    ]
+    return _feed_note_message(*_feed_note_stats(items))
+
+_LEDGER_ROW = re.compile(
+    r'<tr class="ledger-row">\s*<td class="ledger-due"[^>]*>(?P<due>.*?)</td>\s*'
+    r'<td class="ledger-item"[^>]*>(?P<item>.*?)</td>',
+    re.S,
+)
+_FEED_ITEM = re.compile(r'<tr class="feed-item">(?P<row>.*?)</tr>', re.S)
+_FEED_NOTE = re.compile(r'<span class="feed-note"[^>]*>(?P<note>.*?)</span>', re.S)
+_DECISION = re.compile(r'<li class="decision"[^>]*>(?P<card>.*?)</li>', re.S)
+_DECISION_OPTION = re.compile(r'<span class="decision-option-text">(?P<text>.*?)</span>', re.S)
+_DECISION_SETTLES = re.compile(r'<span class="decision-settles">(?P<text>.*?)</span>', re.S)
+
+def _countdown_repeated(due: str, item: str) -> bool:
+    """Whether the due column's token also appears as a countdown in the text.
+
+    The composed terminal line is "label · 26d · action" or "明天 · text", so
+    a numeric countdown is looked for with digit boundaries and a word one
+    (今天, 明天) only as a separated token. A label that happens to start
+    with 今天 is the reader's wording, not a duplicate.
+    """
+    if re.fullmatch(r"(?:逾期 )?\d+d", due):
+        return re.search(rf"(?<!\d){re.escape(due)}(?!\d)", item) is not None
+    return re.search(rf"(?:^|·)\s*{re.escape(due)}\s*·", item) is not None
+
+def check_html(document: str) -> list[str]:
+    """Invariants a rendered digest must hold, checked on the artifact itself.
+
+    Each check is a guard for a bug the document has already shipped with:
+    the countdown printed twice on a ledger row, a tech feed of bare
+    headlines, a decision without its options. Checking the HTML rather than
+    the inputs means a renderer regression is caught too.
+    """
+    findings: list[str] = []
+    for match in _LEDGER_ROW.finditer(document):
+        due = _TAGS.sub("", match.group("due")).strip()
+        item = " ".join(_TAGS.sub(" ", match.group("item")).split())
+        if due and due != "·" and _countdown_repeated(due, item):
+            findings.append(f"倒计时「{due}」在条目文本里重复: {item[:60]}")
+    rows = _FEED_ITEM.findall(document)
+    if rows:
+        notes = [_FEED_NOTE.search(row) for row in rows]
+        noted = sum(1 for n in notes if n and n.group("note").strip())
+        cjk = sum(1 for n in notes if n and _CJK.search(n.group("note")))
+        message = _feed_note_message(len(rows), noted, cjk)
+        if message:
+            findings.append(message)
+    for index, match in enumerate(_DECISION.finditer(document), 1):
+        card = match.group("card")
+        # Inline markup (**bold**, `code`, links) renders as tags around the
+        # option; the text inside is what counts.
+        options = [_TAGS.sub("", m.group("text")).strip() for m in _DECISION_OPTION.finditer(card)]
+        if len([o for o in options if o]) < 2:
+            findings.append(f"{DECISION_SECTION} #{index} 选项不足两个")
+        settles = _DECISION_SETTLES.search(card)
+        settle_text = _TAGS.sub("", settles.group("text")) if settles else ""
+        settle_text = re.sub(r"^\s*·\s*截止.*$", "", settle_text).strip()
+        if not settle_text:
+            findings.append(f"{DECISION_SECTION} #{index} 缺定案条件")
+    return findings
 
 def _deep_read_badge(deep_read: Any, manifest: dict[str, Any]) -> str:
     bits = []
@@ -1116,12 +1368,46 @@ def _render_section(section: dict[str, Any], manifest: dict[str, Any]) -> str:
     ]
     if section.get("note"):
         out.append(f'<p style="{_S_P}">{inline_html(section["note"])}</p>')
-    if bullets:
+    if bullets and section.get("title") == DECISION_SECTION:
+        out.append(f'<ul style="{_S_DEC_UL}">')
+        for bullet in bullets:
+            out.append(_render_decision_bullet(bullet, known_paths))
+        out.append("</ul>")
+    elif bullets:
         out.append(f'<ul style="{_S_UL}">')
         for bullet in bullets:
             out.append(f'<li style="{_S_LI}">{_render_bullet(bullet, known_paths)}</li>')
         out.append("</ul>")
     return "\n".join(out)
+
+def _render_decision_bullet(bullet: dict[str, Any], known_paths: set[str]) -> str:
+    """One decision as a card: the question, the options, what settles it.
+
+    Only structured bullets reach here (`normalize_decisions` demotes the
+    rest), so every card has the three parts the reader needs to act.
+    """
+    body = _render_bullet(dict(bullet, text=""), known_paths)  # provenance tail only
+    question = inline_html(str(bullet.get("text") or ""))
+    options = [str(o).strip() for o in bullet.get("between") or [] if str(o or "").strip()]
+    keys = "ABCDEFG"
+    option_html = "<br>".join(
+        f'<span class="decision-option" style="{_S_DEC_KEY}">'
+        f"{keys[i] if i < len(keys) else i + 1}</span>"
+        f'<span class="decision-option-text">{inline_html(o)}</span>'
+        for i, o in enumerate(options)
+    )
+    settle = inline_html(str(bullet.get("settles") or ""))
+    by = str(bullet.get("by") or "").strip()
+    if by:
+        settle += f" · 截止 {html_mod.escape(by)}"
+    return (
+        f'<li class="decision" style="{_S_DEC_CARD}">'
+        f'<p style="{_S_DEC_Q}">{question}</p>'
+        f'<p style="{_S_DEC_OPT}">{option_html}</p>'
+        f'<p class="decision-settle" style="{_S_DEC_SETTLE}">定案 · '
+        f'<span class="decision-settles">{settle}</span>{body}</p>'
+        "</li>"
+    )
 
 def _render_bullet(bullet: Any, known_paths: set[str]) -> str:
     """One overview bullet with its provenance tail.

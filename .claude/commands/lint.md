@@ -59,6 +59,19 @@ Any ERROR-level finding blocks the run until the harness contract is fixed. WARN
 Bash: wc -c CLAUDE.md
 ```
 
+```
+Bash: uv run scripts/routine_digest.py check; echo "exit=$?"
+```
+
+Re-runs the rendered-digest invariants on the newest artifact under the digest
+routine's output directory (countdown printed once per ledger row, tech feed
+carrying Chinese notes, every decision card with a settling condition). Read
+the exit: `3` means findings, and each `check:` line is reported as WARN,
+because `write` printed the same lines the morning it happened and a finding
+is one nobody acted on. `0` is clean. Any other nonzero exit is an execution
+failure (unset `$OV`, a broken digest registry, an unreadable artifact) and
+counts as ERROR like any other Phase 0 failure.
+
 If CLAUDE.md exceeds 8,192 bytes (~2,000 tokens), emit a WARN: "CLAUDE.md is [size] bytes (target: <8KB). This file is inherited by every subagent; excess size multiplies token cost across all agent dispatches. Run a prune pass or move rules to agent definitions/protocols."
 
 If CLAUDE.md exceeds 15,000 bytes, escalate to ERROR. The file has likely accumulated rules that belong elsewhere.

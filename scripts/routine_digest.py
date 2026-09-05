@@ -142,7 +142,9 @@ from routine_collect import (  # noqa: E402,F401  (re-exported public surface)
     split_units,
     _parse_meta_lines,
     extract_headline,
-    _ITEM_META_TAIL,
+    _META_TAILS,
+    _INLINE_NOTE_LEAD,
+    _strip_meta_tail,
     _BOLD_RUN,
     _item_note,
     extract_items,
@@ -320,7 +322,20 @@ from routine_render import (  # noqa: E402,F401  (re-exported public surface)
     _brief_counts,
     WEIGHT_STALE_DAYS,
     DECISION_SECTION,
+    SIGNAL_SECTION,
     _decision_count,
+    decision_shape_missing,
+    normalize_decisions,
+    _render_decision_bullet,
+    _trace_label,
+    feed_note_gap,
+    _countdown_repeated,
+    check_html,
+    _S_HINT,
+    _S_FLAG,
+    _S_DEC_CARD,
+    _S_DEC_KEY,
+    _TRACE_STEM_CHARS,
     _render_signals,
     _fleet_bits,
     _QUOTA_COLOUR,
@@ -351,6 +366,12 @@ from routine_render import (  # noqa: E402,F401  (re-exported public surface)
     _render_source,
 )
 
+
+# `check` exit code when the artifact carries findings. Distinct from 1, which
+# stays the code for a check that could not run (unreadable artifact, unset
+# $OV, broken registry), so /lint can downgrade findings to WARN without also
+# swallowing execution failures.
+CHECK_FINDINGS_EXIT = 3
 
 def write(
     ov: Path,
@@ -543,6 +564,19 @@ def main(argv: list[str] | None = None) -> int:
     p_ack.add_argument("--manifest", required=True)
     p_ack.add_argument("--dry-run", action="store_true")
 
+    p_check = sub.add_parser(
+        "check",
+        help=(
+            "Assert the rendered invariants on a digest artifact. Exit "
+            f"{CHECK_FINDINGS_EXIT} on findings, 1 on an execution failure, 0 when clean."
+        ),
+    )
+    p_check.add_argument(
+        "--html",
+        help="Artifact to check. Default: the newest *-digest.html in the digest routine's output_dir.",
+    )
+    p_check.add_argument("--routine", help="Digest routine name when the registry excludes several.")
+
     args = parser.parse_args(argv)
 
     try:
@@ -611,9 +645,15 @@ def main(argv: list[str] | None = None) -> int:
         gap = deep_read_lane_gap(overview.get("deep_read"), manifest)
         if gap:
             print(f"warning: {gap}", file=sys.stderr)
+        document = render(manifest, overview, brief, picks, context)
+        # The artifact checks itself before it is written: a finding here is
+        # a report on the inputs (or the renderer), never a reason to skip
+        # the morning's document.
+        for finding in check_html(document):
+            print(f"check: {finding}", file=sys.stderr)
         return write(
             ov,
-            render(manifest, overview, brief, picks, context),
+            document,
             manifest,
             routine_name=args.routine or "",
             out=Path(args.out) if args.out else None,
@@ -623,6 +663,32 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "mail":
         document = Path(args.html).read_text(encoding="utf-8")
         return mail(ov, document, args.subject, dry_run=args.dry_run)
+
+    if args.cmd == "check":
+        if args.html:
+            target = Path(args.html)
+        else:
+            routine = resolve_output_dir(ov, args.routine or "")
+            candidates = list((ov / routine.output_dir).glob("*-digest.html"))
+            if not candidates:
+                # Nothing to check is not "clean": the check could not run.
+                print(f"no *-digest.html under {fmt(ov / routine.output_dir)}", file=sys.stderr)
+                return 1
+            # Newest by modification time: a name sort would rank a same-day
+            # weekly above the daily and miss an older file rendered again.
+            target = max(candidates, key=lambda path: path.stat().st_mtime)
+        try:
+            document = target.read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"artifact unreadable: {exc!r}", file=sys.stderr)
+            return 1
+        findings = check_html(document)
+        for finding in findings:
+            print(f"check: {finding}")
+        print(f"{fmt(target)}: {len(findings)} finding(s)")
+        # Findings are advisory and get their own code, so a caller can tell
+        # "the document has a problem" from "the check could not run".
+        return CHECK_FINDINGS_EXIT if findings else 0
 
     if args.cmd == "ack":
         manifest = _load_manifest(args.manifest)

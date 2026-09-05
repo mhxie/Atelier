@@ -389,5 +389,134 @@ class CliTests(unittest.TestCase):
         self.assertIn("missing", proc.stdout)
 
 
+
+
+class DoneTests(unittest.TestCase):
+    """`done` is the index's one write: it closes a row in place, keeps every
+    other byte, and refuses evidence that does not resolve."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.vault = write_vault(Path(self.tmp.name), GOOD_INDEX)
+        self.index = self.vault / "_meta" / "deadlines.toml"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _run(self, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "scripts/deadlines.py", *args],
+            cwd=REPO_ROOT,
+            env={**os.environ, "OV": str(self.vault)},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+    def test_done_closes_the_row_in_place_and_records_evidence(self):
+        before = self.index.read_text(encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        after = self.index.read_text(encoding="utf-8")
+        self.assertIn('status = "done"\nresolved = ' + date.today().isoformat(), after)
+        self.assertIn('resolved_by = "travel/example-trip.md:5"', after)
+        # Everything but the closed block is byte-identical.
+        cut = before.index('slug = "document-expiry"')
+        self.assertEqual(before[cut:], after[after.index('slug = "document-expiry"'):])
+        self.assertEqual(before[: before.index("[[deadline]]")], after[: after.index("[[deadline]]")])
+        loaded = dl.load_index(self.vault, date(2099, 1, 31))
+        self.assertEqual(loaded.errors, [])
+        self.assertEqual({d.slug: d.status for d in loaded.deadlines}["hotel-credit-1"], "done")
+        self.assertNotIn("hotel-credit-1", [d.slug for d in dl.open_deadlines(loaded)])
+        self.assertEqual(self._run("lint").returncode, 0)
+
+    def test_done_refuses_a_closed_row_an_unknown_slug_and_bad_evidence(self):
+        before = self.index.read_text(encoding="utf-8")
+        # A real file outside the vault, reachable by traversal or absolute path.
+        self.outside = str(Path(self.tmp.name) / "outside.md")
+        Path(self.outside).write_text("x\n", encoding="utf-8")
+        for args, message in (
+            (("done", "already-handled", "--resolved-by", "travel/example-trip.md:5"), "already done"),
+            (("done", "no-such-row", "--resolved-by", "travel/example-trip.md:5"), "no row with slug"),
+            (("done", "hotel-credit-1", "--resolved-by", "travel/missing.md:1"), "not found in vault"),
+            (("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:999"), "past end"),
+            (("done", "hotel-credit-1", "--resolved-by", "not a source"), "is not <vault-relative"),
+            (("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:0"), "1-based"),
+            (("done", "hotel-credit-1", "--resolved-by", "../outside.md:1"), "outside the vault"),
+            (("done", "hotel-credit-1", "--resolved-by", f"{self.outside}:1"), "outside the vault"),
+        ):
+            with self.subTest(args=args):
+                proc = self._run(*args)
+                self.assertEqual(proc.returncode, 1, proc.stdout)
+                self.assertIn(message, proc.stderr)
+        self.assertEqual(self.index.read_text(encoding="utf-8"), before)
+
+    def test_done_rewrites_the_whole_table_even_when_status_precedes_the_slug(self):
+        """A `status = "open"` written above `slug` must be replaced, not joined
+        by a second `status` that leaves the index unparseable."""
+        reordered = GOOD_INDEX.replace(
+            '[[deadline]]\nslug = "hotel-credit-1"\n',
+            '[[deadline]]\nstatus = "open"\nresolved = 2098-01-01\nslug = "hotel-credit-1"\n',
+        )
+        self.assertNotEqual(reordered, GOOD_INDEX)
+        self.index.write_text(reordered, encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        after = self.index.read_text(encoding="utf-8")
+        block = after[after.index('[[deadline]]\nslug = "hotel-credit-1"') : after.index('slug = "document-expiry"')]
+        self.assertEqual(block.count("status ="), 1)
+        self.assertEqual(block.count("resolved ="), 1)
+        self.assertIn('status = "done"', block)
+        self.assertNotIn("2098-01-01", block)
+        loaded = dl.load_index(self.vault, date(2099, 1, 31))
+        self.assertEqual(loaded.errors, [])
+        self.assertEqual({d.slug: d.status for d in loaded.deadlines}["hotel-credit-1"], "done")
+
+    def test_done_refuses_an_index_that_already_fails_lint(self):
+        """Otherwise the row is marked done and the command still exits 1,
+        because the reload cannot separate old errors from this edit's."""
+        broken = GOOD_INDEX.replace('kind = "window"\nreversible = true\n', 'kind = "window"\n')
+        self.assertNotEqual(broken, GOOD_INDEX)
+        self.index.write_text(broken, encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("before done", proc.stderr)
+        self.assertIn("missing reversible", proc.stderr)
+        self.assertEqual(self.index.read_text(encoding="utf-8"), broken)
+
+    def test_done_without_evidence_is_refused_before_any_write(self):
+        before = self.index.read_text(encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1")
+        self.assertEqual(proc.returncode, 2, proc.stdout)
+        self.assertIn("--resolved-by", proc.stderr)
+        self.assertEqual(self.index.read_text(encoding="utf-8"), before)
+
+    def test_done_keeps_a_private_index_private(self):
+        self.index.chmod(0o600)
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.index.stat().st_mode & 0o777, 0o600)
+        self.assertEqual([p.name for p in self.index.parent.iterdir()], ["deadlines.toml"])
+
+    def test_done_refuses_an_index_whose_sources_do_not_resolve(self):
+        """`lint` reports a source file that is missing; `done` must hold the
+        same bar rather than editing what lint would reject."""
+        (self.vault / "finance" / "example-plan.md").unlink()
+        before = self.index.read_text(encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5")
+        self.assertEqual(proc.returncode, 1, proc.stdout)
+        self.assertIn("renewal-window: source not found", proc.stderr)
+        self.assertIn("before done", proc.stderr)
+        self.assertEqual(self.index.read_text(encoding="utf-8"), before)
+
+    def test_done_dry_run_shows_the_edit_and_writes_nothing(self):
+        before = self.index.read_text(encoding="utf-8")
+        proc = self._run("done", "hotel-credit-1", "--resolved-by", "travel/example-trip.md:5", "--dry-run")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn('status = "done"', proc.stdout)
+        self.assertIn("no write", proc.stdout)
+        self.assertEqual(self.index.read_text(encoding="utf-8"), before)
+
+
 if __name__ == "__main__":
     unittest.main()

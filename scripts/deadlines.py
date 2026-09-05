@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""deadlines.py: Read-only view over the dated-obligation index.
+"""deadlines.py: View over the dated-obligation index, plus one write: `done`.
 
 Why this exists: the things that must not be missed -- an expiring card credit,
 an open equity selling window, a document expiry, a tax deadline -- are recorded
@@ -13,9 +13,12 @@ elsewhere with aggregates plus a freshness gate.
 
 So: judgment weekly, mechanics daily. A weekly pass extracts candidate rows
 from the prose trackers, the user approves them, and the orchestrator writes
-`$OV/_meta/deadlines.toml`. This script only reads that index -- there is no
-write path here on purpose, because every row is a factual claim about the
-user's money or documents and must pass through the normal $OV approval gate.
+`$OV/_meta/deadlines.toml`. This script never adds a row: every row is a
+factual claim about the user's money or documents and passes through the
+normal $OV approval gate. Its one write, `done`, is user-invoked and only
+closes a row, recording when and on what evidence, so a perk redeemed
+mid-week leaves the morning screen the same day instead of at the next
+weekly refresh.
 
 Every row carries `source = "<vault-relative path>:<line>"`. A row without a
 resolvable source is a lint error, not a warning: an invented deadline on the
@@ -52,9 +55,15 @@ Subcommands:
     list    every open row with computed state, newest deadline first
     due     rows closing within N days (default 14)
     lint    schema and provenance validation; non-zero exit on any error
+    done    close one open row in place: `status = "done"`, `resolved`, and a
+            required `--resolved-by <path>:<line>` that must resolve inside
+            the vault. Refuses an index that fails lint, a row that is not
+            open, and an edit that would not parse; writes atomically and
+            keeps the file's permission bits.
 
 Exit codes: 0 for list/due even when the index is missing (an absent index is a
-warning the caller surfaces, not a crash). lint exits 1 on any error.
+warning the caller surfaces, not a crash). lint exits 1 on any error. done
+exits 1 on any refusal and 2 when --resolved-by is missing (argparse).
 """
 
 from __future__ import annotations
@@ -71,7 +80,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _paths import PathsError, fmt, vault_root  # noqa: E402
+from _paths import PathsError, atomic_write, fmt, vault_root  # noqa: E402
 
 INDEX_RELPATH = "_meta/deadlines.toml"
 DEFAULT_MAX_AGE_DAYS = 10
@@ -357,6 +366,15 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("lint", help="Validate the index; non-zero exit on any error.")
 
+    p_done = sub.add_parser("done", help="Close one open row (status = done) with its evidence.")
+    p_done.add_argument("slug")
+    p_done.add_argument(
+        "--resolved-by",
+        required=True,
+        help="<vault-relative .md path>:<line> that records the row being handled.",
+    )
+    p_done.add_argument("--dry-run", action="store_true", help="Show the edit, write nothing.")
+
     args = parser.parse_args(argv)
 
     try:
@@ -367,6 +385,11 @@ def main(argv: list[str] | None = None) -> int:
 
     today = date.today()
     index = load_index(ov, today)
+
+    if args.cmd == "done":
+        return mark_done(
+            ov, index, args.slug, today, resolved_by=args.resolved_by, dry_run=args.dry_run
+        )
 
     if args.cmd == "lint":
         if not index.exists:
@@ -423,6 +446,130 @@ def main(argv: list[str] | None = None) -> int:
     _print_rows(rows)
     if index.errors:
         print(f"\n{len(index.errors)} schema errors; run `deadlines.py lint`")
+    return 0
+
+
+_SLUG_LINE = re.compile(r'^\s*slug\s*=\s*"(?P<slug>[^"]+)"\s*$')
+_STATUS_LINE = re.compile(r"^\s*status\s*=")
+_RESOLVED_LINE = re.compile(r"^\s*resolved(?:_by)?\s*=")
+
+
+def _source_resolves(ov: Path, source: str) -> str | None:
+    """None when `<path>:<line>` points at a real line of a real vault file."""
+    match = _SOURCE_RE.match(source)
+    if not match:
+        return f"{source!r} is not <vault-relative .md path>:<line>"
+    rel = match.group("path")
+    path = ov / rel
+    if Path(rel).is_absolute() or not path.resolve().is_relative_to(ov.resolve()):
+        return f"{rel} is outside the vault"
+    if not path.is_file():
+        return f"{match.group('path')} not found in vault"
+    count = sum(1 for _ in path.open(encoding="utf-8", errors="replace"))
+    line = int(match.group("line"))
+    if line < 1:
+        return f"line {line} is not a line; line numbers are 1-based"
+    if line > count:
+        return f"line {line} past end of {match.group('path')} ({count} lines)"
+    return None
+
+
+def mark_done(
+    ov: Path,
+    index: Index,
+    slug: str,
+    today: date,
+    *,
+    resolved_by: str,
+    dry_run: bool = False,
+) -> int:
+    """Set `status = "done"` on one open row, keeping the file's own layout.
+
+    Edits the TOML text rather than re-serialising it so comments, ordering,
+    and the untouched rows survive byte for byte. Refuses a row that is not
+    open, and evidence that is missing or does not resolve: the closing line
+    is a claim about the user's money or documents, like the row it closes.
+    """
+    if not index.exists:
+        print(f"index absent: {fmt(index_path(ov))}", file=sys.stderr)
+        return 1
+    # An index that already fails lint is not something to edit blind: the
+    # post-write reload could not tell this edit's damage from the existing
+    # damage, and the exit code would lie either way. Same lint as the `lint`
+    # command: schema errors plus sources that do not resolve.
+    problems = list(index.errors) + [
+        f"{s}: source not found in vault: {src}" for s, src in _unresolved_sources(ov, index)
+    ]
+    if problems:
+        for problem in problems:
+            print(f"ERROR {problem}", file=sys.stderr)
+        print(f"index has {len(problems)} lint error(s); fix them (deadlines.py lint) before done", file=sys.stderr)
+        return 1
+    row = next((d for d in index.deadlines if d.slug == slug), None)
+    if row is None:
+        print(f"no row with slug {slug!r}", file=sys.stderr)
+        return 1
+    if row.status != "open":
+        print(f"{slug} is already {row.status}", file=sys.stderr)
+        return 1
+    if not resolved_by:
+        print("--resolved-by <path>:<line> is required: a closed row needs its evidence", file=sys.stderr)
+        return 1
+    problem = _source_resolves(ov, resolved_by)
+    if problem:
+        print(f"--resolved-by {problem}", file=sys.stderr)
+        return 1
+
+    path = index_path(ov)
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    slug_at = next(
+        (i for i, line in enumerate(lines) if (m := _SLUG_LINE.match(line)) and m.group("slug") == slug),
+        None,
+    )
+    if slug_at is None:
+        print(f"slug {slug!r} not found in {fmt(path)} text", file=sys.stderr)
+        return 1
+    # The block is the enclosing [[deadline]] table, not the slug line down:
+    # a `status` written above `slug` would otherwise survive and collide
+    # with the one appended below.
+    start = slug_at
+    while start > 0 and not lines[start].lstrip().startswith("[[deadline]]"):
+        start -= 1
+    if not lines[start].lstrip().startswith("[[deadline]]"):
+        print(f"slug {slug!r} is not inside a [[deadline]] table", file=sys.stderr)
+        return 1
+    end = slug_at + 1
+    while end < len(lines) and not lines[end].lstrip().startswith("["):
+        end += 1
+    # Trim trailing blank lines so the new keys sit inside the block.
+    while end > slug_at and not lines[end - 1].strip():
+        end -= 1
+    block = [ln for ln in lines[start:end] if not _STATUS_LINE.match(ln) and not _RESOLVED_LINE.match(ln)]
+    block.append('status = "done"\n')
+    block.append(f"resolved = {today.isoformat()}\n")
+    block.append(f'resolved_by = "{resolved_by}"\n')
+    new_text = "".join(lines[:start] + block + lines[end:])
+    # Prove the result parses before anything touches the file: the index
+    # is the morning screen's input, and a half-written one costs a morning.
+    try:
+        tomllib.loads(new_text)
+    except tomllib.TOMLDecodeError as exc:
+        print(f"refusing to write: edited index would not parse ({exc})", file=sys.stderr)
+        return 1
+    edit = "".join(block[-3:]).rstrip()
+    print(f"{slug}: {row.label}\n{edit}")
+    if dry_run:
+        print("(dry run; no write)")
+        return 0
+    # The shared helper keeps the file's permission bits: a 0600 index stays
+    # private, and concurrent writers cannot cross-clobber.
+    atomic_write(path, new_text)
+    check = load_index(ov, today)
+    if check.errors:
+        for error in check.errors:
+            print(f"ERROR {error}", file=sys.stderr)
+        return 1
+    print(f"updated {fmt(path)}")
     return 0
 
 

@@ -549,31 +549,54 @@ def extract_headline(
     first = _ANY_HEADING.search(body)
     return first.group(2).strip() if first else ""
 
-_ITEM_META_TAIL = re.compile(r"\*\*(?:Why now|Provenance)[^*]*\*\*.*$", re.I)
+# The classification tail a feed routine appends to each item, in every shape
+# it has been observed writing it: bold keys, a bare "Why now:", a backtick
+# cluster chip, or plain "Cluster:" on its own bullet. The earliest match cuts.
+_META_TAILS = (
+    re.compile(r"\*\*\s*(?:Cluster|Tag|Mode|Why now|Provenance)\b", re.I),
+    re.compile(r"\bWhy now\s*[:：]", re.I),
+    re.compile(r"`[^`]+`\s*·\s*\*\*"),
+    re.compile(r"(?:^|[\s|·-])(?:Cluster|Provenance)\s*[:：]", re.I),
+)
 
 _BOLD_RUN = re.compile(r"\*\*([^*]+)\*\*")
 
-def _item_note(lines: list[str], index: int) -> str:
-    """The gloss line under a feed item, if the report wrote one.
+# Separators a routine puts between the link and an inline summary. A plain
+# hyphen counts only when whitespace follows it: `-5%` is a sign, not a dash.
+_INLINE_NOTE_LEAD = re.compile(r"^\s*(?:(?:[—–:：·]|-(?=\s))\s*)+")
+_NOTE_TRAIL = re.compile(r"[\s·\-—,;|]+$")
+_NOTE_LEAD = re.compile(r"^(?:(?:[·—,;|]|-(?=\s))\s*)+")
+
+def _strip_meta_tail(note: str) -> str:
+    cut = min((m.start() for rx in _META_TAILS if (m := rx.search(note))), default=None)
+    return note if cut is None else note[:cut]
+
+def _item_note(lines: list[str], index: int, inline: str = "") -> str:
+    """The gloss under a feed item, if the report wrote one.
 
     Feed-shaped routine reports put the link on one line and a sentence of
-    context on the next, indented. That sentence is what makes an item readable
-    without opening it, and it was being discarded: the manifest kept only the
-    title and URL, so a news section could offer a headline and nothing else.
+    context either after it on the same line ("— summary") or on the next,
+    indented. Both shapes have been written by the same routine in the same
+    week, and a manifest that only read one of them offered a headline and
+    nothing else for the other. So both count.
 
     The trailing classification (`**Why now:** ... **Provenance:** ...`) is
     bookkeeping for whoever tunes the routine, not for the reader, so it is cut.
     """
     parts: list[str] = []
+    lead = _INLINE_NOTE_LEAD.sub("", inline).strip()
+    if lead:
+        parts.append(lead)
     for line in lines[index + 1 : index + 4]:
         if not line.strip() or not line.startswith((" ", "\t")):
             break
         parts.append(line.strip())
     note = " ".join(parts)
-    note = _ITEM_META_TAIL.sub("", note)
+    note = _strip_meta_tail(note)
     note = _BOLD_RUN.sub(r"\1", note)
     note = strip_inline_markup(note)
-    return re.sub(r"\s+", " ", note).strip(" ·-—,;")
+    note = re.sub(r"\s+", " ", note).strip()
+    return _NOTE_TRAIL.sub("", _NOTE_LEAD.sub("", note))
 
 def extract_items(body: str, cap: int) -> list[dict[str, str]]:
     """Titled links from list items and table rows, deduped by URL.
@@ -589,9 +612,15 @@ def extract_items(body: str, cap: int) -> list[dict[str, str]]:
     for position, line in enumerate(lines):
         if len(items) >= cap:
             break
-        match = _LIST_LINK.match(line) or _TABLE_LINK.match(line)
+        list_match = _LIST_LINK.match(line)
+        match = list_match or _TABLE_LINK.match(line)
+        inline = ""
         if match:
             title, url = match.group(1).strip(), match.group(2)
+            if list_match:
+                # Whatever follows the link on the same line is the summary
+                # when the writer chose the one-line shape.
+                inline = line[match.end() :]
         else:
             bare = _BARE_TABLE_URL.match(line)
             if not bare:
@@ -603,7 +632,7 @@ def extract_items(body: str, cap: int) -> list[dict[str, str]]:
             continue
         seen.add(url)
         item = {"title": title, "url": url}
-        note = _item_note(lines, position)
+        note = _item_note(lines, position, inline)
         if note:
             item["note"] = note
         items.append(item)

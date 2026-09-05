@@ -21,6 +21,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -547,7 +548,8 @@ class RenderTests(unittest.TestCase):
         self.assertGreater(html.index("Readwise CLI unavailable"), fold)
         self.assertGreater(html.index("输入缺口"), fold)
         self.assertNotIn("<h2 style=\"" + rd._S_H2 + "\">输入缺口", html)
-        self.assertNotIn("输入缺口", rd.render(self.manifest, {"schema": 1, "headline": "h", "sections": []}))
+        quiet = {**self.manifest, "lanes": [lane for lane in self.manifest["lanes"] if lane["lane"] != "Tech feed"]}
+        self.assertNotIn("输入缺口", rd.render(quiet, {"schema": 1, "headline": "h", "sections": []}))
 
     def test_brief_renders_above_the_overview(self):
         """The action surface is the first screen, ahead of the intel overview."""
@@ -975,8 +977,6 @@ class CliTests(unittest.TestCase):
         self.assertIn("routine registry missing", proc.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class MailTests(unittest.TestCase):
@@ -1705,7 +1705,7 @@ class MastheadAndContextTests(unittest.TestCase):
         self.assertIn("逾期 2d", card)
         self.assertIn("今日 <span", card)
         self.assertIn("· 4 件", card)
-        self.assertIn("x.md:1", card)
+        self.assertIn(">x:1<", card)
 
 
 class FrontierAndCuratedDepthTests(unittest.TestCase):
@@ -1727,7 +1727,7 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
         for sweep in ("2099-01-30", "2099-01-29"):
             document = rd.render(self.manifest, {"schema": 1, "frontier_labs": self._labs(sweep)})
             self.assertIn("前沿实验室", document)
-            self.assertIn("1 条信号 · 0 漂移 · 1 晋级 · 周扫 " + sweep[5:], document)
+            self.assertIn("1 条信号 · 0 漂移 · 1 晋级 · 扫描 " + sweep[5:], document)
             self.assertIn("Example Lab", document)
             self.assertIn('href="https://example.com/atlas"', document)
             self.assertIn("本周无使命漂移。", document)
@@ -1735,7 +1735,7 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
 
     def test_frontier_collapses_to_counts_on_later_days(self):
         document = rd.render(self.manifest, {"schema": 1, "frontier_labs": self._labs("2099-01-25")})
-        self.assertIn("1 条信号 · 0 漂移 · 1 晋级 · 周扫 01-25", document)
+        self.assertIn("1 条信号 · 0 漂移 · 1 晋级 · 扫描 01-25", document)
         self.assertNotIn("Example Lab", document)
         self.assertIn("已随当日 digest 报告", document)
 
@@ -1908,3 +1908,375 @@ class ReviewFollowUpTests(unittest.TestCase):
             finally:
                 _restore_vault(previous)
             self.assertIn("under $OV", str(ctx.exception))
+
+
+class WriteTimeGuardTests(unittest.TestCase):
+    """Guards for shapes an earlier digest shipped with: a countdown
+    printed twice per ledger row, a tech feed of bare headlines, a decision
+    that was prose under a heading, a lab table that was mostly blank."""
+
+    def setUp(self):
+        self.manifest = {
+            "schema": rd.MANIFEST_SCHEMA,
+            "mode": "daily",
+            "window": {"since": "2099-01-30", "until": "2099-01-30"},
+            "generated": "2099-01-30T06:22:00",
+            "counts": {"files": 1, "bytes": 2048, "updates": 0},
+            "lanes": [
+                {
+                    "lane": "Tech feed",
+                    "files": 1,
+                    "sources": [
+                        {
+                            "path": "inbox/feed/2099-01-30-feed.md",
+                            "label": "daily feed digest",
+                            "date": "2099-01-30",
+                            "headline": "Daily Feed Digest",
+                            "items": [
+                                {"title": "One", "url": "https://example.com/one", "note": "第一条的中文摘要。"},
+                                {"title": "Two", "url": "https://example.com/two", "note": "第二条的中文摘要。"},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def _brief(self, *items):
+        return {
+            "schema": 1,
+            "date": "2099-01-30",
+            "groups": [
+                {"tier": 1, "kind": "closing_lead", "heading": "需要开始处理 1 件", "folded": False, "items": list(items)}
+            ],
+            "warnings": [],
+        }
+
+    def test_ledger_row_prints_the_countdown_once_and_the_hint_below(self):
+        card = rd._render_brief(
+            self._brief(
+                {
+                    "text": "Hotel credit · 42d · book one night",
+                    "label": "Hotel credit",
+                    "hint": "book one night",
+                    "days_left": 42,
+                    "source": "finance/2099-01-30-decision-example-long-note-name.md:123",
+                }
+            )
+        )
+        self.assertEqual(card.count("42d"), 1)
+        self.assertIn("Hotel credit", card)
+        self.assertIn(f'<span style="{rd._S_HINT}">book one night</span>', card)
+        self.assertNotIn("Hotel credit · 42d", card)
+        # The trace chip keeps enough of the stem to recognise the file.
+        self.assertIn("2099-01-30-decision-e…:123", card)
+        self.assertNotIn("long-note-name.md", card)
+        self.assertEqual(rd.check_html(card), [])
+
+    def test_check_catches_the_old_row_shape_with_the_countdown_in_the_text(self):
+        """Mutation: a brief written before `label` existed renders the composed
+        line, and the check names the duplicate rather than letting it ship."""
+        card = rd._render_brief(self._brief({"text": "Hotel credit · 42d", "days_left": 42}))
+        findings = rd.check_html(card)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("42d", findings[0])
+        self.assertIn("重复", findings[0])
+
+    def test_a_label_that_starts_with_today_is_not_a_repeated_countdown(self):
+        card = rd._render_brief(self._brief({"text": "今天 · 今天提交护照", "label": "今天提交护照", "days_left": 0}))
+        self.assertEqual(rd.check_html(card), [])
+        old_shape = rd._render_brief(self._brief({"text": "今天 · 提交护照", "days_left": 0}))
+        self.assertEqual(len(rd.check_html(old_shape)), 1)
+        self.assertTrue(rd._countdown_repeated("明天", "Hotel · 明天 · book"))
+        self.assertFalse(rd._countdown_repeated("明天", "明天的会议"))
+        self.assertTrue(rd._countdown_repeated("26d", "恢复健康基线 · 26d"))
+        self.assertFalse(rd._countdown_repeated("26d", "Run 126d plan"))
+        self.assertTrue(rd._countdown_repeated("逾期 3d", "逾期 3d · 提交表格"))
+
+    def test_reconciliation_flag_renders_on_the_row(self):
+        card = rd._render_brief(
+            self._brief(
+                {
+                    "text": "Example Hotel 免房券 · 39d",
+                    "label": "Example Hotel 免房券",
+                    "days_left": 39,
+                    "source": "finance/example-tracker.md:51",
+                    "flag": "待核",
+                    "flag_source": "travel/trips/Example City 2099-01-05 to 01-08.md:13",
+                }
+            )
+        )
+        self.assertIn(f'<span style="{rd._S_FLAG}">待核 · Example City 2099-01-…:13</span>', card)
+
+    def _decision(self, **extra):
+        return {
+            "schema": 1,
+            "sections": [
+                {
+                    "title": rd.DECISION_SECTION,
+                    "bullets": [
+                        {
+                            "text": "是否把验证预算给 Example Model 2",
+                            "sources": ["inbox/feed/2099-01-30-feed.md"],
+                            **extra,
+                        }
+                    ],
+                }
+            ],
+        }
+
+    def test_decision_bullet_renders_as_a_card_with_options_and_settlement(self):
+        overview = self._decision(
+            between=["现在更新跟踪结论", "继续保留为候选"], settles="完整模型卡与独立基准", by="2099-02-01"
+        )
+        document = rd.render(self.manifest, overview)
+        self.assertIn('<li class="decision"', document)
+        self.assertIn(f'<span class="decision-option" style="{rd._S_DEC_KEY}">A</span><span class="decision-option-text">现在更新跟踪结论</span>', document)
+        self.assertIn(f'<span class="decision-option" style="{rd._S_DEC_KEY}">B</span><span class="decision-option-text">继续保留为候选</span>', document)
+        self.assertIn('定案 · <span class="decision-settles">完整模型卡与独立基准 · 截止 2099-02-01</span>', document)
+        self.assertIn("2099-01-30-feed.md", document)
+        self.assertEqual(rd._decision_count(rd.normalize_decisions(overview)[0]), 1)
+        self.assertEqual([f for f in rd.check_html(document) if rd.DECISION_SECTION in f], [])
+
+    def test_unstructured_decision_is_demoted_to_signals_and_named_in_the_colophon(self):
+        overview = self._decision()
+        normalized, notes = rd.normalize_decisions(overview)
+        self.assertEqual(notes, [f"{rd.DECISION_SECTION} #1 缺 between/settles, 已降级为{rd.SIGNAL_SECTION}"])
+        self.assertEqual(rd._decision_count(normalized), 0)
+        titles = [s["title"] for s in normalized["sections"]]
+        self.assertEqual(titles, [rd.DECISION_SECTION, rd.SIGNAL_SECTION])
+        self.assertEqual(normalized["sections"][1]["bullets"][0]["text"], "是否把验证预算给 Example Model 2")
+        # The caller's overview is untouched; the document carries the note.
+        self.assertEqual(len(overview["sections"]), 1)
+        document = rd.render(self.manifest, overview)
+        self.assertNotIn('class="decision"', document)
+        self.assertIn("已降级为信号", document)
+        self.assertLess(document.index("是否把验证预算"), document.index("以上 "))
+
+    def test_demotion_into_an_existing_signal_section_leaves_the_caller_untouched(self):
+        overview = self._decision()
+        overview["sections"].append({"title": rd.SIGNAL_SECTION, "bullets": [{"text": "已有信号"}]})
+        first, _ = rd.normalize_decisions(overview)
+        second, _ = rd.normalize_decisions(overview)
+        self.assertEqual([b["text"] for b in overview["sections"][1]["bullets"]], ["已有信号"])
+        for result in (first, second):
+            self.assertEqual(
+                [b["text"] for b in result["sections"][1]["bullets"]],
+                ["已有信号", "是否把验证预算给 Example Model 2"],
+            )
+        rd.render(self.manifest, overview)
+        self.assertEqual(rd.render(self.manifest, overview).count("是否把验证预算给"), 1)
+
+    def test_two_decision_sections_keep_their_own_cards(self):
+        valid = {"text": "决策甲", "between": ["a", "b"], "settles": "s"}
+        second = {"text": "决策乙", "between": ["c", "d"], "settles": "t"}
+        overview = {
+            "schema": 1,
+            "sections": [
+                {"title": rd.DECISION_SECTION, "bullets": [valid, {"text": "伪一"}]},
+                {"title": rd.DECISION_SECTION, "bullets": [second, {"text": "伪二"}]},
+            ],
+        }
+        normalized, notes = rd.normalize_decisions(overview)
+        decisions = [s for s in normalized["sections"] if s["title"] == rd.DECISION_SECTION]
+        self.assertEqual([[b["text"] for b in s["bullets"]] for s in decisions], [["决策甲"], ["决策乙"]])
+        signals = [s for s in normalized["sections"] if s["title"] == rd.SIGNAL_SECTION]
+        self.assertEqual([b["text"] for b in signals[0]["bullets"]], ["伪一", "伪二"])
+        self.assertEqual(len(notes), 2)
+        document = rd.render(self.manifest, overview)
+        self.assertEqual(document.count("决策甲"), 1)
+        self.assertEqual(document.count("决策乙"), 1)
+        # The masthead counts what the page shows: two cards, two sections.
+        self.assertEqual(rd._decision_count(normalized), 2)
+
+    def test_a_decision_with_one_option_is_not_a_decision(self):
+        self.assertEqual(rd.decision_shape_missing({"text": "q", "between": ["only"], "settles": "x"}), ["between"])
+        self.assertEqual(rd.decision_shape_missing({"text": "q", "between": ["a", "b"]}), ["settles"])
+        self.assertEqual(rd.decision_shape_missing("prose"), ["text", "between", "settles"])
+
+    def test_check_reads_the_card_content_not_just_its_labels(self):
+        """A card the renderer was handed with blank options or an empty
+        settling condition still carries the 定案 label; the check must look
+        at what follows it."""
+        blank = rd._render_decision_bullet({"text": "q", "between": ["", " "], "settles": "", "by": "2099-02-01"}, set())
+        findings = rd.check_html(f"<ul>{blank}</ul>")
+        self.assertEqual(findings, [f"{rd.DECISION_SECTION} #1 选项不足两个", f"{rd.DECISION_SECTION} #1 缺定案条件"])
+        good = rd._render_decision_bullet({"text": "q", "between": ["a", "b"], "settles": "证据", "by": "2099-02-01"}, set())
+        self.assertEqual(rd.check_html(f"<ul>{good}</ul>"), [])
+        # Options that open with inline markup still count as options.
+        marked = rd._render_decision_bullet(
+            {"text": "q", "between": ["**现在更新**", "`候选` 保留", "[看](https://example.com/x)"], "settles": "**证据**"},
+            set(),
+        )
+        self.assertEqual(rd.check_html(f"<ul>{marked}</ul>"), [])
+        self.assertIn("<strong>现在更新</strong>", marked)
+
+    def test_a_decision_without_a_question_is_demoted_not_rendered_blank(self):
+        for bullet in ({"between": ["a", "b"], "settles": "s"}, {"text": "  ", "between": ["a", "b"], "settles": "s"}):
+            with self.subTest(bullet=bullet):
+                self.assertEqual(rd.decision_shape_missing(bullet), ["text"])
+                overview = {"schema": 1, "sections": [{"title": rd.DECISION_SECTION, "bullets": [bullet]}]}
+                normalized, notes = rd.normalize_decisions(overview)
+                self.assertEqual(rd._decision_count(normalized), 0)
+                self.assertEqual(notes, [f"{rd.DECISION_SECTION} #1 缺 text, 已降级为{rd.SIGNAL_SECTION}"])
+                self.assertNotIn('class="decision"', rd.render(self.manifest, overview))
+
+    def test_frontier_groups_signals_under_one_lab_heading(self):
+        labs = {
+            "sweep_date": "2099-01-30",
+            "drift_count": 0,
+            "promotion_count": 0,
+            "signals": [
+                {"lab": "Example Lab / Long Name (org)", "category": "模型发布", "tier": 1, "text": "Ling 3.0 出现。", "url": "https://example.com/a"},
+                {"lab": "Example Lab / Long Name (org)", "category": "图像模型", "tier": 1, "text": "LLaDA-Image 上线。", "url": "https://example.com/b"},
+            ],
+            "watchlist_note": "无漂移。",
+        }
+        section = rd._render_frontier(labs, "2099-01-30")
+        self.assertEqual(section.count('class="lab"'), 1)
+        self.assertEqual(section.count("Example Lab / Long Name (org)"), 1)
+        self.assertNotIn("width:112px", section)
+        self.assertIn("模型发布 · 1级来源", section)
+        self.assertIn("图像模型 · 1级来源", section)
+        self.assertIn("扫描 01-30", section)
+        self.assertNotIn("周扫", section)
+
+    def test_inline_dash_summary_becomes_the_item_note(self):
+        body = (
+            "1. [Example Model](https://example.com/model) — 发布了 Example Model。 "
+            "**Cluster:** AI Models · **Mode:** familiar · **Why now:** 相关 · **Provenance:** websearch\n"
+        )
+        items = rd.extract_items(body, 5)
+        self.assertEqual(items[0]["note"], "发布了 Example Model。")
+
+    def test_a_sign_attached_to_a_number_is_not_a_separator(self):
+        shapes = {
+            "1. [AMD](https://example.com/amd) — -5% after guidance. **Cluster:** x\n": "-5% after guidance.",
+            "1. [AMD](https://example.com/amd) - +3% premarket.\n": "+3% premarket.",
+            "1. [AMD](https://example.com/amd) -5% after guidance.\n": "-5% after guidance.",
+            "1. [AMD](https://example.com/amd)\n   - -2% is the move.\n": "-2% is the move.",
+            "1. [AMD](https://example.com/amd) — summary, trailing dash -\n": "summary, trailing dash",
+        }
+        for body, expected in shapes.items():
+            with self.subTest(body=body):
+                self.assertEqual(rd.extract_items(body, 5)[0]["note"], expected)
+
+    def test_every_observed_meta_tail_is_cut(self):
+        shapes = {
+            "1. [T](https://example.com/1)\n   Nvidia says HF stays open. `AI Infra` · **familiar** · Why now: relevant.\n": "Nvidia says HF stays open.",
+            "1. [T](https://example.com/2)\n   - 中文摘要。\n   - Cluster: AI | Mode: familiar | Provenance: rss\n": "中文摘要。",
+            "1. [T](https://example.com/3)\n   AMD's release adds a layer. **Tag:** GPU. **Mode:** familiar.\n": "AMD's release adds a layer.",
+            "1. [T](https://example.com/4)\n   Plain gloss with no tail.\n": "Plain gloss with no tail.",
+        }
+        for body, expected in shapes.items():
+            with self.subTest(body=body):
+                self.assertEqual(rd.extract_items(body, 5)[0]["note"], expected)
+
+    def test_feed_note_gap_names_missing_and_non_chinese_notes(self):
+        self.assertIsNone(rd.feed_note_gap(self.manifest))
+        items = self.manifest["lanes"][0]["sources"][0]["items"]
+        items[:] = [
+            {"title": "A", "url": "https://example.com/a", "note": "English only."},
+            {"title": "B", "url": "https://example.com/b"},
+            {"title": "C", "url": "https://example.com/c"},
+            {"title": "D", "url": "https://example.com/d"},
+        ]
+        gap = rd.feed_note_gap(self.manifest)
+        self.assertIn("科技动态 4 条中 1 条有摘要, 0 条为中文", gap)
+        document = rd.render(self.manifest, {"schema": 1})
+        self.assertIn("科技动态 4 条中 1 条有摘要", document)
+        self.assertGreater(document.index("科技动态 4 条中"), document.index("以上 "))
+        # Any item without a Chinese note is reported; the spec promises one
+        # per item, and a tolerance would hide the partial failure.
+        for item, note in zip(items, ("中文一。", "English two.", "English three.", "English four.")):
+            item["note"] = note
+        self.assertIn("4 条中 4 条有摘要, 1 条为中文", rd.feed_note_gap(self.manifest))
+        items[1]["note"] = "中文二。"
+        self.assertIn("4 条中 4 条有摘要, 2 条为中文", rd.feed_note_gap(self.manifest))
+        items[2]["note"] = "中文三。"
+        items[3]["note"] = "中文四。"
+        self.assertIsNone(rd.feed_note_gap(self.manifest))
+        del items[3]["note"]
+        self.assertIn("4 条中 3 条有摘要, 3 条为中文", rd.feed_note_gap(self.manifest))
+
+    def test_check_flags_a_feed_of_bare_headlines(self):
+        for item in self.manifest["lanes"][0]["sources"][0]["items"]:
+            item.pop("note")
+        html = rd._render_feed_items(self.manifest)
+        self.assertEqual(html.count('class="feed-item"'), 2)
+        findings = rd.check_html(html)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("2 条中 0 条有摘要", findings[0])
+
+    def test_check_command_reads_an_artifact_and_fails_on_findings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp) / "vault"
+            vault.mkdir()
+            bad = Path(tmp) / "bad.html"
+            bad.write_text(rd._render_brief(self._brief({"text": "Hotel credit · 42d", "days_left": 42})), encoding="utf-8")
+            good = Path(tmp) / "good.html"
+            good.write_text(rd._render_brief(self._brief({"text": "x", "label": "Hotel credit", "days_left": 42})), encoding="utf-8")
+            env = {**os.environ, "OV": str(vault)}
+            failed = subprocess.run(
+                [sys.executable, "scripts/routine_digest.py", "check", "--html", str(bad)],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(failed.returncode, rd.CHECK_FINDINGS_EXIT, failed.stderr)
+            self.assertIn("check: 倒计时「42d」", failed.stdout)
+            missing = subprocess.run(
+                [sys.executable, "scripts/routine_digest.py", "check", "--html", str(Path(tmp) / "absent.html")],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(missing.returncode, 1, missing.stdout)
+            self.assertIn("unreadable", missing.stderr)
+            # No artifact at all is "could not run", never clean.
+            (vault / "_meta").mkdir()
+            (vault / "_meta" / "routine_watch.toml").write_text(
+                '[[routine]]\nname = "digest-writer"\noutput_dir = "inbox/digest"\n'
+                'file_pattern = "*-digest.html"\ndigest = { include = false }\n',
+                encoding="utf-8",
+            )
+            (vault / "inbox" / "digest").mkdir(parents=True)
+            empty = subprocess.run(
+                [sys.executable, "scripts/routine_digest.py", "check"],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(empty.returncode, 1, empty.stdout)
+            self.assertIn("no *-digest.html", empty.stderr)
+            passed = subprocess.run(
+                [sys.executable, "scripts/routine_digest.py", "check", "--html", str(good)],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(passed.returncode, 0, passed.stderr)
+            self.assertIn("0 finding(s)", passed.stdout)
+
+    def test_check_without_html_takes_the_newest_artifact_by_mtime(self):
+        """A name sort would rank the same day's weekly above the daily and
+        miss an older file rendered again; modification time is the truth."""
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp) / "vault"
+            digests = vault / "inbox" / "digest"
+            digests.mkdir(parents=True)
+            (vault / "_meta").mkdir()
+            (vault / "_meta" / "routine_watch.toml").write_text(
+                '[[routine]]\nname = "digest-writer"\noutput_dir = "inbox/digest"\n'
+                'file_pattern = "*-digest.html"\ndigest = { include = false }\n',
+                encoding="utf-8",
+            )
+            bad = rd._render_brief(self._brief({"text": "Hotel credit · 42d", "days_left": 42}))
+            good = rd._render_brief(self._brief({"text": "x", "label": "Hotel credit", "days_left": 42}))
+            (digests / "2099-01-31-weekly-digest.html").write_text(good, encoding="utf-8")
+            older = digests / "2099-01-30-daily-digest.html"
+            older.write_text(bad, encoding="utf-8")
+            stamp = time.time() + 60
+            os.utime(older, (stamp, stamp))
+            proc = subprocess.run(
+                [sys.executable, "scripts/routine_digest.py", "check"],
+                cwd=REPO_ROOT, env={**os.environ, "OV": str(vault)}, capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(proc.returncode, rd.CHECK_FINDINGS_EXIT, proc.stdout + proc.stderr)
+            self.assertIn("2099-01-30-daily-digest.html", proc.stdout)
+
+
+if __name__ == "__main__":
+    unittest.main()
