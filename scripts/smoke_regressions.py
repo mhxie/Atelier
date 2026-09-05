@@ -152,6 +152,7 @@ def check_public_regression_tests() -> None:
             "tests.test_daily_brief",
             "tests.test_refresh_tracking",
             "tests.test_triage_command",
+            "tests.test_reviewer_contract",
         ],
         cwd=ROOT,
         capture_output=True,

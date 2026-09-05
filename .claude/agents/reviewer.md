@@ -27,7 +27,7 @@ Default to **Session Review** if no mode is specified.
 
 ## System Diff Review Mode
 
-Read the diff with `git diff` (or `git diff <base>..HEAD` for committed changes). Score each dimension 0-10:
+Read the diff with `git diff` (or `git diff <base>..HEAD` for committed changes). Both system modes are read-only: never stash, checkout, restore, apply, reset, or edit. Read a baseline with `git show HEAD:<path>` for a working-tree diff or `git show <base>:<path>` for a committed range; a file the diff adds has no baseline, so read its working copy. Run tests as they are. Score each dimension 0-10:
 
 | Dimension | What to look for |
 |-----------|-----------------|
