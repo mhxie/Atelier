@@ -153,6 +153,8 @@ def check_public_regression_tests() -> None:
             "tests.test_refresh_tracking",
             "tests.test_triage_command",
             "tests.test_reviewer_contract",
+            "tests.test_git_retry",
+            "tests.test_autoevo_verify",
         ],
         cwd=ROOT,
         capture_output=True,

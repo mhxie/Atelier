@@ -7,20 +7,20 @@ import argparse
 import json
 import os
 import re
-import subprocess
 import sys
 import tomllib
 from datetime import date, datetime
 from pathlib import Path
 
 from _paths import retry_transient, tier
-from _git import run_git  # noqa: E402
+from _git import run_git_retry  # noqa: E402
 from autoevo_preflight import (  # noqa: E402
     PreflightError,
     _in_scope,
     _is_autoevo_state,
     _status_entries,
     autoevo_scope_prefixes,
+    autoevo_sidecar,
 )
 
 SAFE_CYCLE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -247,8 +247,8 @@ def _verify_sidecars(
     lint_counts: dict[str, int],
 ) -> dict[str, str]:
     cache = _tier_path(vault, "cache", "cache")
-    outcomes_path = cache / f"autoevo-{run_id}-outcomes.json"
-    lint_path = cache / f"autoevo-{run_id}-lint.json"
+    outcomes_path = autoevo_sidecar(cache, run_id, "outcomes")
+    lint_path = autoevo_sidecar(cache, run_id, "lint")
     try:
         outcomes = json.loads(_read_text(outcomes_path, "outcomes sidecar read"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -295,7 +295,7 @@ def leftover_paths(
 
 def _protected_paths(vault: Path, run_id: str) -> tuple[set[str], bool]:
     """(protected paths recorded by `plan`, whether the list existed)."""
-    path = _tier_path(vault, "cache", "cache") / f"autoevo-{run_id}-protected.txt"
+    path = autoevo_sidecar(_tier_path(vault, "cache", "cache"), run_id, "protected")
     try:
         text = _read_text(path, "protected list read")
     except OSError:
@@ -305,7 +305,9 @@ def _protected_paths(vault: Path, run_id: str) -> tuple[set[str], bool]:
 
 def _git_commit(vault: Path, output: Path, run_id: str) -> str:
     relative = output.relative_to(vault).as_posix()
-    result = run_git(vault, "log", "-1", "--format=%H", "--", relative, timeout=30)
+    result = run_git_retry(
+        vault, "log", "-1", "--format=%H", "--", relative, timeout=30, what="audit commit read"
+    )
     commit = result.stdout.strip()
     if result.returncode != 0 or not re.fullmatch(r"[0-9a-f]{40,64}", commit):
         raise VerificationError("audit output has no Git commit")
@@ -342,12 +344,8 @@ def _verify_reports(
             raise VerificationError("Sweep report is outside agent-findings")
         if not report.is_file() or report.stat().st_size == 0:
             raise VerificationError(f"Sweep report is absent or empty: {raw}")
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%H", "--", raw],
-            cwd=vault,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        result = run_git_retry(
+            vault, "log", "-1", "--format=%H", "--", raw, timeout=30, what="report commit read"
         )
         if result.returncode != 0 or result.stdout.strip() != audit_commit:
             raise VerificationError(

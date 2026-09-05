@@ -217,6 +217,123 @@ class VerifierReadsTest(unittest.TestCase):
             self.assertNotIn("cannot read audit", str(caught.exception))
             self.assertEqual(state["reads"], 2)
 
+    def test_sidecar_reads_survive_one_transient_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            vault = Path(tmp).resolve()
+            (vault / "cache").mkdir()
+            (vault / "cache" / "autoevo-r1-outcomes.json").write_text('{"wip": "swept"}', encoding="utf-8")
+            (vault / "cache" / "autoevo-r1-lint.json").write_text('{"counts": {"error": 0}}', encoding="utf-8")
+            patch_read, patch_sleep, state = self._flaky_once()
+            with patch_read, patch_sleep:
+                out = autoevo_verify._verify_sidecars(vault, "r1", {"wip": "swept"}, {"error": 0})
+            self.assertTrue(out["outcomes"].endswith("autoevo-r1-outcomes.json"), out)
+            self.assertEqual(state["reads"], 3)
+
+    def test_wrapper_log_read_survives_one_transient_error(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            log = Path(tmp) / "wrapper.log"
+            log.write_text(
+                "[t0] claimed: /vault/_meta/routine_claims/2099-01-03.toml\n"
+                "[t1] deterministic autoevo preflight passed\n"
+                "[t2] starting: runtime=codex command=/autoevo-nightly\n"
+                "[t3] delivery validated: outcome=delivered\n"
+                "[t4] finished: status=completed\n"
+                "[t5] lock release: ok\n",
+                encoding="utf-8",
+            )
+            patch_read, patch_sleep, state = self._flaky_once()
+            with patch_read, patch_sleep:
+                out = autoevo_verify._verify_wrapper_log(log, "2099-01-03")
+            self.assertEqual(len(out["markers_verified"]), 5)
+            self.assertEqual(state["reads"], 2)
+
+
+class SidecarNamingTest(unittest.TestCase):
+    """One naming rule for every sidecar writer and reader; the nightly
+    command's bash spells the lint sidecar by the same rule."""
+
+    def test_writers_and_readers_share_the_rule(self) -> None:
+        from autoevo_preflight import SIDECAR_SUFFIXES, autoevo_sidecar
+
+        cache = Path("/cache")
+        self.assertEqual(autoevo_sidecar(cache, "r1", "outcomes"), cache / "autoevo-r1-outcomes.json")
+        self.assertEqual(autoevo_sidecar(cache, "r1", "protected").name, "autoevo-r1-protected.txt")
+        with self.assertRaises(KeyError):
+            autoevo_sidecar(cache, "r1", "snapshot")
+        nightly = (REPO_ROOT / ".claude" / "commands" / "autoevo-nightly.md").read_text(encoding="utf-8")
+        self.assertIn(autoevo_sidecar(cache, "${RUN_TS}", "lint").name, nightly)
+        self.assertIn(autoevo_sidecar(cache, "${RUN_TS}", "reports").name, nightly)
+        for rel in ("scripts/autoevo_run.py", "scripts/autoevo_verify.py"):
+            source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            for suffix in SIDECAR_SUFFIXES.values():
+                self.assertNotIn(f"-{suffix}", source, (rel, suffix))
+
+
+class GitReadRetryTest(unittest.TestCase):
+    """The verifier's two git reads sit on the same mount as its file reads,
+    so a transient failure of either is retried, not fatal."""
+
+    def _repo(self, tmp: str) -> tuple[Path, Path, str]:
+        vault = Path(tmp).resolve() / "vault"
+        for seg in ("wip", "research", "reflections", "agent-findings", "cache", "_meta"):
+            (vault / seg).mkdir(parents=True)
+        (vault / ".gitignore").write_text("cache/\n", encoding="utf-8")
+        audit = vault / "agent-findings" / "autoevo-applied-2099-01-03.md"
+        audit.write_text("## Autoevo Run: 2099-01-03 05:00\n", encoding="utf-8")
+        (vault / "agent-findings" / "sweep-2099-01-03.md").write_text("report\n", encoding="utf-8")
+        (vault / "cache" / "autoevo-r1-protected.txt").write_text("", encoding="utf-8")
+        _git(vault, "init", "-q")
+        _git(vault, "config", "user.email", "test@example.com")
+        _git(vault, "config", "user.name", "Test")
+        _git(vault, "add", "-A")
+        _git(vault, "commit", "-qm", "seed")
+        head = subprocess.run(
+            ["git", "-C", str(vault), "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=60
+        ).stdout.strip()
+        return vault, audit, head
+
+    def _flaky_first(self, first):
+        from unittest import mock
+
+        real = subprocess.run
+        state = {"calls": 0}
+
+        def fake(*args, **kwargs):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                if isinstance(first, BaseException):
+                    raise first
+                return first
+            return real(*args, **kwargs)
+
+        return mock.patch("_git.subprocess.run", fake), mock.patch("_paths.time.sleep"), state
+
+    def test_audit_commit_read_survives_a_transient_spawn_error(self) -> None:
+        import errno
+
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            vault, audit, head = self._repo(tmp)
+            patch_run, patch_sleep, state = self._flaky_first(OSError(errno.EDEADLK, "Resource deadlock avoided"))
+            with patch_run, patch_sleep:
+                commit = autoevo_verify._git_commit(vault, audit, "r1")
+            self.assertEqual(commit, head)
+            self.assertGreaterEqual(state["calls"], 2)
+
+    def test_report_commit_read_survives_a_transient_exit(self) -> None:
+        import errno
+        import os as _os
+
+        with tempfile.TemporaryDirectory(prefix="atelier-verify-") as tmp:
+            vault, audit, head = self._repo(tmp)
+            transient = subprocess.CompletedProcess(
+                ["git"], 128, stdout="", stderr=f"fatal: unable to read: {_os.strerror(errno.EDEADLK)}\n"
+            )
+            patch_run, patch_sleep, state = self._flaky_first(transient)
+            with patch_run, patch_sleep:
+                verified = autoevo_verify._verify_reports(vault, audit, ["agent-findings/sweep-2099-01-03.md"], head)
+            self.assertEqual(len(verified), 1)
+            self.assertEqual(state["calls"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

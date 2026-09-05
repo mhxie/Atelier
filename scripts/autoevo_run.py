@@ -46,6 +46,7 @@ from _paths import atomic_write, tier, vault_root  # noqa: E402
 from _git import merge_state, run_git  # noqa: E402
 from autoevo_commit import archive_commit, audit_commit, cluster_hash, merge_commit, stale_commit  # noqa: E402
 from autoevo_preflight import (  # noqa: E402
+    autoevo_sidecar,
     partition_dirty_scope,
     _inside_worktree,
     _status_entries,
@@ -319,9 +320,9 @@ def cmd_plan(args: argparse.Namespace) -> int:
             }
         )
 
-    outcomes_file = cache / f"autoevo-{args.run_ts}-outcomes.json"
+    outcomes_file = autoevo_sidecar(cache, args.run_ts, "outcomes")
     outcomes_file.write_text("{}", encoding="utf-8")
-    skipped_file = cache / f"autoevo-{args.run_ts}-quarantine-skipped.txt"
+    skipped_file = autoevo_sidecar(cache, args.run_ts, "quarantine-skipped")
     skipped_file.write_text(
         "".join(line + "\n" for line in skipped_lines), encoding="utf-8"
     )
@@ -329,7 +330,7 @@ def cmd_plan(args: argparse.Namespace) -> int:
     _, protected = partition_dirty_scope(
         [path for _, path in _status_entries(vault)], autoevo_scope_prefixes(vault)
     )
-    protected_file = cache / f"autoevo-{args.run_ts}-protected.txt"
+    protected_file = autoevo_sidecar(cache, args.run_ts, "protected")
     protected_file.write_text(
         "".join(line + "\n" for line in protected), encoding="utf-8"
     )
@@ -927,7 +928,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     if not audit_path.is_file():
         return _fail(f"audit log missing: {args.audit_rel}")
     state = vault / "_meta" / "autoevo_quarantine.toml"
-    count_file = cache / f"autoevo-{args.run_ts}-quarantine-count.txt"
+    count_file = autoevo_sidecar(cache, args.run_ts, "quarantine-count")
     helper = ROOT / "scripts" / "autoevo_quarantine.py"
     steps = [
         ["update", "--outcomes", args.outcomes, "--state", str(state), "--count-file", str(count_file), "--today", args.run_date],

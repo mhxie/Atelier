@@ -46,6 +46,22 @@ AUTOEVO_SCOPE_TIERS = ("wip", "research", "reflections", "agent_findings")
 AUTOEVO_SCOPE_FILE_PREFIX = "_meta/autoevo_"
 AUTOEVO_SCOPE_FILE_SUFFIX = ".toml"
 
+# Per-cycle sidecar files under the cache tier, by kind. The nightly command's
+# bash writes the lint sidecar by the same rule.
+SIDECAR_SUFFIXES = {
+    "outcomes": "outcomes.json",
+    "lint": "lint.json",
+    "protected": "protected.txt",
+    "quarantine-skipped": "quarantine-skipped.txt",
+    "quarantine-count": "quarantine-count.txt",
+    "reports": "reports.json",
+}
+
+
+def autoevo_sidecar(cache: Path, run_id: str, kind: str) -> Path:
+    """The sidecar of `kind` that cycle `run_id` writes or reads under `cache`."""
+    return cache / f"autoevo-{run_id}-{SIDECAR_SUFFIXES[kind]}"
+
 
 def autoevo_scope_prefixes(vault: Path) -> list[str]:
     """Vault-relative prefixes the dirty gate inspects (posix, no trailing slash)."""
