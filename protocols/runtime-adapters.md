@@ -63,6 +63,12 @@ by default. Both edges always call the shared script, which resolves the
 machine-local Atelier preference and optional process override. The canonical
 activation contract is in `protocols/session-replay.md`.
 
+Claude Code also loads the `hooks:` block of an agent's frontmatter and runs
+those hooks for that agent's own tool calls, so a boundary can be scoped to
+one role: the Reviewer's read-only Bash guard (`scripts/readonly_bash_guard.py`)
+is a `PreToolUse` hook there. Agent-scoped hooks have no Codex equivalent;
+there the role source's prose rule is the only boundary.
+
 ## Runtime Selection
 
 `harness/runtimes.toml` declares both native CLI surfaces and ships with Codex

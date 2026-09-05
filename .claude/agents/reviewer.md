@@ -4,6 +4,15 @@ description: Quality-checks reflection outputs and system evolution changes. Thr
 tools: Read, Grep, Glob, Bash
 model: sonnet
 maxTurns: 100
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: >-
+            python3 "${CLAUDE_PROJECT_DIR:-.}/scripts/readonly_bash_guard.py"
+            || printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"read-only agent: the Bash guard could not run, so nothing runs until it does. Check the python3 on PATH and scripts/readonly_bash_guard.py"}}'
+          timeout: 10
 ---
 
 **Path placeholders.** When you see `<paths.<name>>` (e.g. `<paths.wip>`, `<paths.daily_notes>`) in your prompt or in files you read, resolve via `harness/paths.toml` (canonical) and `harness/paths.local.toml` (per-user). Read both files on first need; cache the mapping for the rest of your turn.
@@ -35,7 +44,8 @@ Read the diff with `git diff` (or `git diff <base>..HEAD` for committed changes)
 | Wiring correctness | Are there references to things that don't exist (agents, protocols, handoff types, tools)? |
 | Bug absence | Any logical errors, contradictions, or broken flows? |
 | Claim fidelity | Does the text promise only what the system can deliver (no overclaims)? |
-| Harness terseness | Any inline rationale, explanatory parentheticals, "see X.md" pointers, or multi-clause justifications inside committed harness/protocol/agent values? FLAG. The harness is read often in many contexts; rationale belongs in commits, PRs, or memory, not inside table cells or field values. |
+
+Inline rationale, explanatory parentheticals, or "see X.md" pointers inside committed harness, protocol, or agent values are FLAGs for the concern list, not a scored dimension.
 
 Then apply the Adversarial Mandate (below): antipattern scan, pre-mortem, scope clarifier, minimum concern floor. Missing any of these artifacts forces NEEDS_REVISION regardless of dimension scores.
 
@@ -55,7 +65,7 @@ Read all changed files in **full** (not just the diff). Walk the global consiste
 - [ ] Framework count claims match actual `frameworks/*.md` file count
 - [ ] New capabilities are reachable from `/hi` menu
 - [ ] Coaching style rules in CLAUDE.md are reflected in agent behavior definitions
-- [ ] No inline rationale pollution: harness/protocol/agent values free of explanatory parentheticals, "see X.md" pointers, multi-clause justifications. Such rationale belongs in commits, PRs, or memory files, not inline.
+- [ ] No inline rationale pollution: harness/protocol/agent values free of explanatory parentheticals, "see X.md" pointers, multi-clause justifications.
 
 Then score the same 4 dimensions as Diff mode (contract integrity, wiring correctness, bug absence, claim fidelity) but at global scope - judging the whole system after the change lands, not just the patch. Apply the Adversarial Mandate (below).
 
@@ -129,7 +139,7 @@ The default mode. Scores session output on 5 dimensions.
 | 3-4 | Significant speculation without flagging |
 | 0-2 | Fabricated content or hallucinated note references |
 
-**Red flags:** "You feel..." without evidence, "possibly" used to mask speculation, a session output claiming wiki-entry-grade certainty (claim sections, `@anchor` / `@cite` markers) without the corresponding file living under `<paths.wiki>/` and passing structural integrity, a non-wiki note that copies wiki schema shape. (Provenance tags are not relevant: alloy carries no tag by default; the validation-depth taxonomy is in `protocols/epistemic-hygiene.md`.)
+**Red flags:** "You feel..." without evidence, "possibly" used to mask speculation, a session output claiming wiki-entry-grade certainty (claim sections, `@anchor` / `@cite` markers) without the corresponding file living under `<paths.wiki>/` and passing structural integrity, a non-wiki note that copies wiki schema shape.
 
 ### 4. Staleness Check (weight: 10%)
 
@@ -222,16 +232,8 @@ Use this format instead of the Review Check table above for System modes.
 | Claim fidelity | X/10 | [overclaims or "accurate"] |
 | **Overall** | **X/10** | **VERDICT** |
 
-**Antipattern scan** (from `protocols/antipatterns.md`):
-1. Premature abstraction: FLAG/N/A + reason
-2. Rule duplication: FLAG/N/A + reason
-3. Happy-path-only design: FLAG/N/A + reason
-4. Implicit contracts: FLAG/N/A + reason
-5. Monotonic growth: FLAG/N/A + reason
-6. Shadow state: FLAG/N/A + reason
-7. Behavior coupled to location: FLAG/N/A + reason
-8. Scope creep past the stated criterion: FLAG/N/A + reason
-9. Placebo guard: FLAG/N/A + reason
+**Antipattern scan**, one line for each `protocols/antipatterns.md` entry in catalog order:
+N. <entry title>: FLAG/N/A + reason
 
 **Concerns** (>=3 required, or "Hunted but not found" block):
 - [BLOCKER|SHOULD-FIX|NICE-TO-HAVE] file:line - issue

@@ -1190,6 +1190,57 @@ def check_codex_hooks() -> list[Finding]:
     return findings
 
 
+# the agent-frontmatter hook events Claude Code has been seen to fire for a
+# subagent's own tool calls (the Reviewer's Bash guard); add an event here
+# only with a live check behind it
+AGENT_HOOK_EVENTS = ("PreToolUse",)
+
+
+def check_agent_hooks(agent_dir: Path | None = None) -> list[Finding]:
+    """Agent-frontmatter hooks (Claude Code only) name supported events and
+    scripts that exist."""
+    findings: list[Finding] = []
+    for path in sorted((agent_dir or ROOT / ".claude" / "agents").glob("*.md")):
+        match = FRONTMATTER_RE.match(_read(path))
+        if not match:
+            continue
+        frontmatter = match.group(1)
+        start = re.search(r"(?m)^hooks:\s*$", frontmatter)
+        if start is None:
+            continue
+        block = frontmatter[start.end() :]
+        next_key = re.search(r"(?m)^[A-Za-z_][A-Za-z0-9_-]*:", block)
+        if next_key:
+            block = block[: next_key.start()]
+        nested = re.search(r"(?m)^([ \t]+)[A-Za-z]", block)  # the events' own indentation, whatever the file uses
+        events = re.findall(r"(?m)^" + re.escape(nested.group(1)) + r"([A-Za-z]+):", block) if nested else []
+        for event in events:
+            if event not in AGENT_HOOK_EVENTS:
+                findings.append(
+                    Finding("ERROR", "agent-hook-event", rel(path), f"unsupported agent hook event `{event}`")
+                )
+        commands = [
+            value for value in re.findall(r"(?m)^\s*command:\s*(.+?)\s*$", block) if value not in ("|", ">", "|-", ">-")
+        ]
+        for scalar in re.finditer(r"(?m)^(\s*)command:\s*[|>]-?\s*$", block):
+            indent = len(scalar.group(1))
+            lines: list[str] = []
+            for line in block[scalar.end() :].split("\n")[1:]:
+                if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                    break
+                lines.append(line.strip())
+            commands.append(" ".join(part for part in lines if part))
+        if not commands:
+            findings.append(Finding("ERROR", "agent-hook-command", rel(path), "hooks block declares no command"))
+        for command in commands:
+            for script in re.findall(r"scripts/[\w./-]+", command):
+                if not (ROOT / script).is_file():
+                    findings.append(
+                        Finding("ERROR", "agent-hook-script", rel(path), f"hook command names a missing script `{script}`")
+                    )
+    return findings
+
+
 def check_claude_hooks() -> list[Finding]:
     """Validate the supported Claude lifecycle edge alongside Codex."""
     path = ROOT / ".claude" / "settings.json"
@@ -3212,6 +3263,7 @@ def run_lints() -> list[Finding]:
     findings.extend(check_codex_agent_adapters(models))
     findings.extend(check_codex_hooks())
     findings.extend(check_claude_hooks())
+    findings.extend(check_agent_hooks())
     findings.extend(check_commands(commands))
     findings.extend(check_command_frontmatter(commands))
     findings.extend(check_reader_scholar_sync())
