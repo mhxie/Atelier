@@ -666,7 +666,7 @@ class GlanceLineTests(unittest.TestCase):
         self.assertEqual(len(got), 12)
 
     def test_short_text_is_untouched(self):
-        self.assertEqual(self.db._truncate("Ritz 2025 免房券", 96), "Ritz 2025 免房券")
+        self.assertEqual(self.db._truncate("Example Hotel 2025 免房券", 96), "Example Hotel 2025 免房券")
 
     def test_a_bracketed_rationale_is_dropped_but_the_decision_survives(self):
         raw = (
