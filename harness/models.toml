@@ -12,32 +12,25 @@
 #                                                          + .codex/agents/*.toml
 #                                                          + harness/agents.toml
 #   2. Model identity  (opus, sonnet, deepseek_pro, ...)  -> THIS FILE
-#   3. Voices         (which two models a role binds, run in parallel) -> harness/agents.toml
-#                                                          (each agent declares
-#                                                          its bound `voices`)
+#   3. Voices         (available model legs for a role) -> harness/agents.toml
 #
 # Each role declares a `voices` keyed inline table in `harness/agents.toml`
 # (`{native = "X", direct = "Y"}`, with leg keys `native`/`direct`/`codex`).
 # Whether all declared legs fire on a dispatch is the call site's decision;
-# see `protocols/voice-dispatch.md` for the canonical
+# see `protocols/agent-handoff.md` for the canonical
 # story. Single-leg roles (Scribe) declare only `{native}` by design. `native`
 # is the selected runtime's project-agent surface. Claude binds its concrete
 # model in agent frontmatter; Codex inherits the selected session model and
 # maps this file's native-identity `reasoning_tier` to native effort.
-# Tier scales the cardinality of role-units in a gathering (Tier N = N
-# parallel copies); tier never alters voices composition.
-#
-# The "Tier 1-4" review ladder in protocols/collaboration-matrix.md, the evolver,
-# and /system-review is the canonical "tier" semantics in this repo.
-# It governs how many reviewer-units run on a change. It is NOT a model-
-# layer concept.
+# Review risk tiers are separate from model reasoning effort. Neither is a
+# demonstrated measure of how much procedural guidance a model needs.
 #
 # Per-model schema (binding values live in profile/models.toml):
 #   claude_code            Claude Code-side model id (e.g., "opus")
 #   codex                  Codex-side model id (e.g., "openai/gpt-5.5")
 #   codex_reasoning_effort "low" | "medium" | "high" | "xhigh" - explicit
 #                          Codex CLI model binding
-#                          used by script-driven legs such as review.sh.
+#                          used by direct legs through chat_completion.py.
 #                          Native project agents instead map their shared
 #                          `reasoning_tier` at the `.codex/agents/` edge.
 #   direct_api             direct OpenAI-compatible model id
@@ -48,8 +41,10 @@
 #   direct_api_timeout     seconds; per-call timeout override (use for
 #                          reasoning-heavy models where TTFT exceeds the
 #                          120s default)
-#   api_env                env var holding the API key (Authorization:
-#                          Bearer is assumed)
+#   direct_api_provider    optional; only "openai" (OpenAI-compatible chat
+#                          completions via the official SDK) is supported
+#   api_env                env var holding the API key; the selected SDK
+#                          applies its own auth scheme
 #
 # Helper scripts that read api_env MUST exit-skip cleanly when unset (a
 # missing key collapses dual voices to single-leg with a warning, never a
@@ -86,10 +81,3 @@ reasoning_tier = "light"
 [models.codex_gpt55_max]
 # Codex gpt-5.5 with reasoning_effort = "high".
 reasoning_tier = "deep"
-
-[models.codex_native]
-# Dynamic identity for a project agent that inherits the active Codex model.
-# It is used for honest shadow-log attribution when the exact CLI model is not
-# exposed to the workflow shell. No committed cost row exists by design.
-reasoning_tier = "balanced"
-binding_optional = true

@@ -5,13 +5,10 @@ from __future__ import annotations
 
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import privacy_check as pc  # noqa: E402
 
 

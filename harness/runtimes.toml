@@ -18,7 +18,6 @@ environment_override = "ATELIER_RUNTIME"
 label = "Codex"
 executable = "codex"
 command_prefix = "$"
-native_shadow_identity = "codex_native"
 # Surface declaration (consumed by scripts/render_runtime_edges.py and, later,
 # runtime-aware helpers). Paths are repo-relative.
 instruction_file = "AGENTS.md"
@@ -38,7 +37,6 @@ fork_interactive_args = ["fork", "--last"]
 label = "Claude Code"
 executable = "claude"
 command_prefix = "/"
-native_shadow_identity = "role"
 instruction_file = "CLAUDE.md"
 agent_dir = ".claude/agents"
 agent_format = "claude-markdown"

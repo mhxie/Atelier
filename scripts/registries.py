@@ -1,17 +1,9 @@
 #!/usr/bin/env python3
-"""Shared, validated loaders for the harness registries.
+"""Shared validated loaders for commands, agents, models, and intents.
 
-The same TOML files were parsed independently in up to six places with
-divergent failure behavior (a malformed commands.toml was a hard lint error
-but a silent cosmetic no-op in cue rendering). Production consumers load
-through these functions and get one exception type, `RegistryError`; each
-call site keeps its own edge policy (degrade, Finding, exit) but the parse
-and shape validation happen once.
-
-Deliberately NOT migrated: `harness_lint.py` and `harness_smoke.py` keep
-their own independent parses, because a checker that shares the production
-loader cannot catch that loader's own bugs. `atelier_runtime.load_registry`
-remains the owner of runtimes.toml (it already validates the launch schema).
+Production consumers receive one ``RegistryError`` type and retain their own
+edge policy. Lint keeps an independent parse; runtime launch configuration
+remains ``atelier_runtime``'s responsibility.
 """
 
 from __future__ import annotations

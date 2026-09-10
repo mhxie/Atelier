@@ -4,14 +4,12 @@ version = "0.1.0"
 description = "Your AI-native personal operating system"
 requires-python = ">=3.11"
 dependencies = [
-    "sentence-transformers>=5.4.0",
-    "lancedb>=0.30.2",
-    "torch>=2.11.0",
-    "numpy>=2.4.4",
-    "pyarrow>=23.0.1",
-    "pandas>=3.0.2",
-    "rank-bm25>=0.2.2",
-    "boto3>=1.43.14",
+    "markdown-it-py==4.0.0",
+    "PyYAML==6.0.3",
+    "tomli-w==1.2.0",
+    "openai>=3.8.0",
+    "prefect>=3.4,<4",
+    "check-jsonschema==0.38.0",
 ]
 
 [tool.ruff]

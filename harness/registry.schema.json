@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Atelier public harness configuration",
+  "description": "Validated together before cross-file checks. Private overlays are not part of this input.",
+  "type": "object",
+  "required": [
+    "harness/models.toml",
+    "harness/agents.toml",
+    "harness/commands.toml",
+    "harness/capabilities.toml",
+    "harness/runtimes.toml",
+    "harness/intents.toml",
+    "harness/paths.toml",
+    ".codex/hooks.json",
+    ".claude/settings.json"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "harness/models.toml": {
+      "type": "object",
+      "required": ["models"],
+      "propertyNames": {"not": {"enum": ["profiles", "agents"]}},
+      "properties": {
+        "models": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["reasoning_tier"],
+            "propertyNames": {
+              "not": {
+                "enum": [
+                  "claude_code", "codex", "codex_reasoning_effort", "direct_api",
+                  "direct_api_base", "direct_api_extras", "direct_api_timeout", "api_env"
+                ]
+              }
+            },
+            "properties": {
+              "reasoning_tier": {"$ref": "#/$defs/text"},
+              "binding_optional": {"type": "boolean"}
+            }
+          }
+        }
+      }
+    },
+    "harness/agents.toml": {
+      "type": "object",
+      "required": ["agents"],
+      "properties": {
+        "agents": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source", "voices", "status", "description", "codex_prompt"],
+            "properties": {
+              "source": {"$ref": "#/$defs/text"},
+              "status": {"$ref": "#/$defs/text"},
+              "description": {"$ref": "#/$defs/text"},
+              "codex_prompt": {"$ref": "#/$defs/text"},
+              "voices": {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": {"enum": ["native", "direct", "codex"]},
+                "additionalProperties": {"$ref": "#/$defs/text"}
+              }
+            },
+            "if": {"properties": {"status": {"const": "script-driven"}}},
+            "then": {"properties": {"source": {"not": {"pattern": "^\\.claude/agents/"}}}},
+            "else": {"properties": {"source": {"pattern": "^\\.claude/agents/.+\\.md$"}}}
+          }
+        }
+      }
+    },
+    "harness/commands.toml": {
+      "type": "object",
+      "required": ["commands"],
+      "properties": {
+        "commands": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["source", "category", "status", "description", "codex_prompt"],
+            "properties": {
+              "source": {"type": "string", "pattern": "^\\.claude/commands/.+\\.md$"},
+              "category": {"$ref": "#/$defs/text"},
+              "status": {"$ref": "#/$defs/text"},
+              "description": {"$ref": "#/$defs/text"},
+              "codex_prompt": {"$ref": "#/$defs/text"},
+              "user_facing": {"type": "boolean"},
+              "direct_only": {"type": "boolean"},
+              "alias_of": {"$ref": "#/$defs/text"}
+            }
+          }
+        }
+      }
+    },
+    "harness/capabilities.toml": {
+      "type": "object",
+      "required": ["capabilities"],
+      "properties": {
+        "capabilities": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "codex"],
+            "properties": {
+              "description": {"$ref": "#/$defs/text"},
+              "codex": {"$ref": "#/$defs/strings", "minItems": 1}
+            }
+          }
+        }
+      }
+    },
+    "harness/runtimes.toml": {
+      "type": "object",
+      "required": ["runtime", "runtimes"],
+      "properties": {
+        "runtime": {
+          "type": "object",
+          "required": ["default", "local_override", "environment_override"],
+          "properties": {
+            "default": {"const": "codex"},
+            "local_override": {"const": "harness/runtime.local.toml"},
+            "environment_override": {"const": "ATELIER_RUNTIME"}
+          }
+        },
+        "runtimes": {
+          "type": "object",
+          "required": ["codex", "claude"],
+          "properties": {
+            "codex": {"properties": {"command_prefix": {"const": "$"}}},
+            "claude": {"properties": {"command_prefix": {"const": "/"}}}
+          },
+          "patternProperties": {".*": {"$ref": "#/$defs/runtime"}}
+        }
+      }
+    },
+    "harness/intents.toml": {
+      "type": "object",
+      "required": ["intents"],
+      "properties": {
+        "intents": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": "object",
+            "required": ["description", "mode", "procedure", "context_budget_tokens"],
+            "propertyNames": {"not": {"enum": ["patterns", "priority", "context_budget_bytes"]}},
+            "properties": {
+              "description": {"$ref": "#/$defs/text"},
+              "mode": {"$ref": "#/$defs/text"},
+              "procedure": {"$ref": "#/$defs/text"},
+              "context_budget_tokens": {"type": "integer", "minimum": 1, "maximum": 16384},
+              "agents": {"$ref": "#/$defs/strings"},
+              "profile_reads": {"$ref": "#/$defs/strings"},
+              "examples": {"$ref": "#/$defs/strings"}
+            }
+          }
+        }
+      }
+    },
+    "harness/paths.toml": {
+      "type": "object",
+      "required": ["paths"],
+      "properties": {
+        "paths": {
+          "type": "object",
+          "properties": {
+            "wiki_localized": {"type": "object", "additionalProperties": {"type": "string"}}
+          },
+          "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    ".codex/hooks.json": {"$ref": "#/$defs/hooks"},
+    ".claude/settings.json": {"$ref": "#/$defs/hooks"}
+  },
+  "$defs": {
+    "text": {"type": "string", "pattern": "\\S"},
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "runtime": {
+      "type": "object",
+      "required": ["label", "executable", "command_prefix", "shell_args", "interactive_args", "non_interactive_args"],
+      "properties": {
+        "label": {"$ref": "#/$defs/text"},
+        "executable": {"$ref": "#/$defs/text"},
+        "command_prefix": {"$ref": "#/$defs/text"}
+      },
+      "patternProperties": {"_args$": {"$ref": "#/$defs/strings"}}
+    },
+    "hooks": {
+      "type": "object",
+      "required": ["hooks"],
+      "properties": {
+        "hooks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["hooks"],
+              "properties": {
+                "hooks": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {"command": {"type": "string"}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

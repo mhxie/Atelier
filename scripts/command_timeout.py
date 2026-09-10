@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
 import subprocess
@@ -41,9 +42,10 @@ def stop_process_group(process: subprocess.Popen[bytes]) -> None:
         return
     try:
         wait_until_deadline(process, time.time() + 5)
-        return
     except subprocess.TimeoutExpired:
         pass
+    # The leader may exit while a descendant ignores SIGTERM. Kill any
+    # remaining group members before a caller releases its execution mutex.
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -51,33 +53,56 @@ def stop_process_group(process: subprocess.Popen[bytes]) -> None:
     process.wait()
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seconds", type=float, required=True)
     parser.add_argument("command", nargs=argparse.REMAINDER)
-    args = parser.parse_args()
-    if args.seconds <= 0:
-        parser.error("--seconds must be positive")
+    args = parser.parse_args(argv)
+    if not math.isfinite(args.seconds) or args.seconds <= 0:
+        parser.error("--seconds must be finite and positive")
     command = args.command
     if command and command[0] == "--":
         command = command[1:]
     if not command:
         parser.error("a command is required after --")
 
+    cancelled = 0
+
+    def cancel(signum, _frame):
+        nonlocal cancelled
+        cancelled = signum
+
+    def clock():
+        if cancelled:
+            raise SystemExit(128 + cancelled)
+        return time.time()
+
+    handlers = {signum: signal.signal(signum, cancel) for signum in (signal.SIGINT, signal.SIGTERM)}
+    process = None
+    returncode = None
     try:
-        process = subprocess.Popen(command, start_new_session=True)
-    except OSError as exc:
-        print(f"ERROR: cannot start {command[0]}: {exc}", file=sys.stderr)
-        return 127
-    try:
-        return wait_until_deadline(process, time.time() + args.seconds)
-    except subprocess.TimeoutExpired:
-        print(
-            f"ERROR: command timed out after {args.seconds:g}s: {command[0]}",
-            file=sys.stderr,
-        )
-        stop_process_group(process)
-        return 124
+        try:
+            process = subprocess.Popen(command, start_new_session=True)
+        except OSError as exc:
+            print(f"ERROR: cannot start {command[0]}: {exc}", file=sys.stderr)
+            return 127
+        try:
+            returncode = wait_until_deadline(process, time.time() + args.seconds, now=clock)
+            clock()
+            return returncode if returncode >= 0 else 128 - returncode
+        except subprocess.TimeoutExpired:
+            print(
+                f"ERROR: command timed out after {args.seconds:g}s: {command[0]}",
+                file=sys.stderr,
+            )
+            return 124
+    finally:
+        try:
+            if process is not None and (returncode is None or cancelled):
+                stop_process_group(process)
+        finally:
+            for signum, handler in handlers.items():
+                signal.signal(signum, handler)
 
 
 if __name__ == "__main__":

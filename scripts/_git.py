@@ -1,20 +1,8 @@
 #!/usr/bin/env python3
-"""One git subprocess wrapper for every script that shells out to git.
+"""Shared git subprocess helpers.
 
-Six scripts carried their own `subprocess.run(["git", ...])` with different
-timeouts, error handling, and identity plumbing. This module owns:
-
-  run_git(cwd, *args)        CompletedProcess, never raises on non-zero exit
-  run_git_retry(cwd, *args)  run_git behind the vault mount's transient retry
-  git_paths(cwd, *args)      NUL-separated path listing (ls-files and friends)
-  merge_state(cwd)           names of in-progress git operations (merge,
-                             rebase, cherry-pick, revert, bisect); the autoevo
-                             gates refuse to commit while any is present
-  BOT_NAME / BOT_EMAIL       the autoevo bot identity, applied with
-                             bot_identity=True
-
-Checkers (`harness_lint.py`, `privacy_check.py`) may use it: it wraps a
-process call, not a registry parse, so it cannot mask a loader bug.
+Non-zero exits are returned for callers to interpret. Read paths may opt into
+transient-mount retries, and autoevo callers may opt into the bot identity.
 """
 
 from __future__ import annotations
@@ -28,7 +16,6 @@ from _paths import TRANSIENT_MOUNT_ERRNOS, retry_transient
 BOT_NAME = "Atelier Autoevo Bot"
 BOT_EMAIL = "noreply@atelier.local"
 
-# git-path names that exist only while an operation is in progress.
 IN_PROGRESS_MARKERS = (
     "MERGE_HEAD",
     "CHERRY_PICK_HEAD",
@@ -132,6 +119,18 @@ def git_path(cwd: Path, name: str, timeout: float = 30) -> Path | None:
         return None
     path = Path(raw)
     return path if path.is_absolute() else cwd / path
+
+
+def default_branch(cwd: Path) -> str | None:
+    """Use origin's declared default, or an unambiguous local main/master."""
+    remote = run_git(cwd, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    if remote.returncode == 0:
+        prefix = "refs/remotes/origin/"
+        name = remote.stdout.strip().removeprefix(prefix)
+        return name if run_git(cwd, "show-ref", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0 else None
+    branches = [name for name in ("main", "master")
+                if run_git(cwd, "show-ref", "--verify", "--quiet", f"refs/heads/{name}").returncode == 0]
+    return branches[0] if len(branches) == 1 else None
 
 
 def merge_state(cwd: Path, timeout: float = 30) -> list[str]:

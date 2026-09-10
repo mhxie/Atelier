@@ -1,33 +1,16 @@
-"""Path resolution helpers for atelier scripts. Stdlib-only.
+"""Registry-backed path helpers for the Atelier vault.
 
-Why this exists: every script that walks the vault used to hardcode
-relative `Path("zk/...")` literals. When run with $OV unset (or from a
-cwd without a `zk/` subdir), they either silently created stray
-directories in the project root or returned empty results. Centralizing
-$OV resolution here gives every script the same fail-loud behavior and
-the same token-efficient output format.
-
-Registry layer: `harness/paths.toml` (canonical, committed) maps logical
-tier names to physical segments under $OV. `harness/paths.local.toml`
-(gitignored, per-user) layers extensions on top (localized wikis,
-sandbox overrides). A tier rename happens in the canonical file, not
-across N markdown files. Scripts that previously wrote `OV / "wip"`
-should call `wip_dir()` etc. so the rename propagates automatically.
-
-Usage:
-    from _paths import vault_root, fmt, tier, wiki_dirs
-
-    OV = vault_root()                # absolute Path; for filesystem operations
-    WIP_DIR = tier("wip")            # registry-aware
-    WIKI_DIRS = wiki_dirs()          # list[Path]: primary wiki + localized
-    print(fmt(some_file))            # '$OV/wiki/Foo.md' (token-efficient output)
+Paths resolve through the committed registry plus its optional local overlay.
+An unset ``$OV`` fails loudly; no helper falls back to a relative vault.
 """
 
 from __future__ import annotations
 
 import errno
 import os
+import re
 import sys
+import tempfile
 import time
 import tomllib
 from functools import lru_cache
@@ -92,7 +75,6 @@ def _registry() -> dict:
         )
     with canonical_path.open("rb") as f:
         merged = tomllib.load(f).get("paths", {})
-    # Ensure wiki_localized exists so callers can iterate without KeyError.
     merged.setdefault("wiki_localized", {})
 
     local_path = _atelier_root() / "harness" / "paths.local.toml"
@@ -145,19 +127,10 @@ def tier(name: str) -> Path:
 
 
 def tier_files(name: str, pattern: str = "*.md") -> list[Path]:
-    """Return files matching `pattern` anywhere under a tier, sorted by name.
+    """Return recursive matches sorted by filename/path, or [] for a missing tier.
 
-    Tiers undergo directory fission (`scripts/fission.py`, repo-conventions
-    32-entry rule; the per-tier split axes live in that protocol's table,
-    e.g. `reflections/` and `agent-findings/` by year-month, `wiki/` by
-    topic cluster, `people/` by first letter). A non-recursive `tier(x).glob()`
-    silently returns nothing once a tier has been split, which is how the
-    weekly cue and the TODO digest went blind on 2026-08-22. Readers must use
-    this helper (or `rglob`) so bucket layout is never a reader's concern.
-
-    Sort key is the file name, which for date-prefixed names yields
-    chronological order regardless of bucket. Returns [] when the tier
-    directory does not exist.
+    Fission puts files in buckets: plain glob silently misses them. Filename
+    sorting keeps date-prefixed files chronological across those buckets.
     """
     root = tier(name)
     if not root.is_dir():
@@ -194,26 +167,17 @@ def wiki_dirs() -> list[Path]:
 
 
 def atomic_write(path: Path, text: str, *, fsync: bool = True, newline: str | None = None) -> None:
-    """Write text atomically: unique temp name, optional fsync, os.replace.
-
-    Eleven independent re-implementations of this existed by 2026-08-23; two
-    used a FIXED temp name and could race concurrent invocations into
-    FileNotFoundError, and five skipped fsync. One helper, one guarantee:
-    concurrent writers cannot corrupt or cross-clobber, and a crash after
-    return cannot lose the write (fsync=True). An existing file keeps its
-    permission bits, so a private (0600) file stays private after a rewrite.
-    """
-    import os
-
+    """Replace a complete file using a unique sibling, preserving existing permissions."""
     path.parent.mkdir(parents=True, exist_ok=True)
     mode: int | None = None
     try:
         mode = path.stat().st_mode & 0o777
-    except OSError:
+    except FileNotFoundError:
         mode = None
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
     try:
-        with temporary.open("w", encoding="utf-8", newline=newline) as handle:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline=newline) as handle:
             if mode is not None:
                 os.fchmod(handle.fileno(), mode)
             handle.write(text)
@@ -223,6 +187,9 @@ def atomic_write(path: Path, text: str, *, fsync: bool = True, newline: str | No
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+_DATE_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def parse_iso_date(value: object):
@@ -243,6 +210,18 @@ def parse_iso_date(value: object):
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def date_in_text(value: object):
+    """First `YYYY-MM-DD` found anywhere in the text, else None.
+
+    The search sibling of `parse_iso_date`: five scripts each carried their own
+    filename or date-column regex with this same skip-on-miss contract.
+    """
+    if value is None:
+        return None
+    match = _DATE_IN_TEXT.search(str(value))
+    return parse_iso_date(match.group(0)) if match else None
 
 
 def fmt(p: Path) -> str:

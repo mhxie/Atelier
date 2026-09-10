@@ -73,7 +73,6 @@ def load_registry() -> dict[str, Any]:
         "label": str,
         "executable": str,
         "command_prefix": str,
-        "native_shadow_identity": str,
         "shell_args": list,
         "interactive_args": list,
         "non_interactive_args": list,

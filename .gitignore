@@ -36,6 +36,7 @@ handoffs
 
 # Build state
 *.build-state.json
+node_modules/
 
 # Python virtual environment (typically a symlink to ~/.cache/atelier/.venv
 # on the contributor's machine; never committed)
@@ -57,12 +58,12 @@ harness/intents.local.toml
 harness/runtime.local.toml
 harness/.runtime.local.*.tmp
 
-# Per-machine identity for single-owner local routine scheduling.
+# Machine identity outliving the single-owner scheduler; never commit it.
 harness/routine_owner.local.toml
 harness/.routine_owner.local.toml.*
 
 # Per-user environment overrides for headless launchd invocations (export OV=..., etc.).
-# Sourced by scripts/launchd/com.atelier.autoevo-nightly.plist. Contains the user's
+# Sourced by scripts/routine_prefect_service.sh. Contains the user's
 # absolute vault path; should never be committed.
 harness/env.local.sh
 

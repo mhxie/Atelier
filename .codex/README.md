@@ -53,9 +53,9 @@ loads its authoritative `.claude/agents/*.md` role brief. Inspect active
 subagents with `/agent` in the CLI.
 
 Native hooks provide session cues, session-lock refresh, out-of-band intent
-miss logging, and turn-stop shadow-log cleanup. On the first session after
-checkout or after a hook change, open `/hooks` and trust the project
-definitions.
+miss logging, and retirement cleanup for legacy direct-API invocation logs.
+New direct calls are not logged. On the first session after checkout or after
+a hook change, open `/hooks` and trust the project definitions.
 
 Literal project slash commands are unavailable because the Codex TUI owns the
 slash namespace. Use the corresponding explicit skill:

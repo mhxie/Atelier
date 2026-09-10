@@ -1,40 +1,18 @@
 #!/usr/bin/env python3
-"""privacy_index.py: derive the private-entity index the privacy gate scans with.
+"""Build `$OV/_meta/privacy_index.json` with provenance for the privacy gate.
 
-A hand-written term list does not scale; the vault already knows every name
-that must never reach a public commit. This builds `$OV/_meta/privacy_index.json`
-from those sources, with provenance per term, so `scripts/privacy_check.py` can
-match against it and explain any hit (`why`).
+Sources: content-tier directory names/paths, note stems, wikilinks, private
+routine/digest/feature/intent registries, and identity-bearing frontmatter.
+Profile prose is excluded: bold labels are not identities; semantic review
+owns those leaks. Public tier segments, dates, numbers, and plain single words
+are excluded; compounds, phrases, and non-ASCII names qualify. Single-word
+codenames belong in profile/private_slugs.txt. The path rule matches compounds
+or words absent from /usr/share/dict/words, distinguishing taxonomy from schema.
+scripts/privacy_allowlist.txt is the only deliberate-public-literal opt-out.
 
-Sources (kind → what is indexed):
-  dir          every directory name and vault-relative directory path under the
-               content tiers (public tier segments from harness/paths.toml are
-               never terms; `paths` feed the path-shape rule)
-  stem         multi-word note filename stems (the historical source)
-  wikilink     `[[targets]]` in vault content (the historical source)
-  registry     routine names, labels, and output dirs from `_meta/routine_watch.toml`;
-               names from `_meta/digest_updates.toml`; private feature directory
-               names; private rows in the repo's gitignored `intents.local.toml`
-  frontmatter  `title`, `aliases`, `people`, `org`, `company`, `employer`,
-               `project`, `client` values in note frontmatter
-Profile prose is deliberately not a source: its bold spans are labels, and
-identity leaks from it are the semantic reviewer's job.
-
-Specificity filter (why a generic word does not become a term): public tier
-segments, dates, numbers, and plain single words are never terms (a
-single-word codename belongs in `profile/private_slugs.txt`); hyphenated
-compounds, multi-word phrases, and non-ASCII names are. The path rule fires
-only on a path segment that looks like a name (a compound, or a word not in
-`/usr/share/dict/words`), so `gtd/decisions` in a public procedure is schema,
-while `research/<topic-name>` is taxonomy. `scripts/privacy_allowlist.txt`
-remains the only opt-out for a deliberately public literal.
-
-CLI:
-    uv run scripts/privacy_index.py build [--force]      write the index
-    uv run scripts/privacy_index.py why "<term>"          provenance or the reason it is not indexed
-    uv run scripts/privacy_index.py stats                 counts by kind
-The gate rebuilds a missing or day-old index by itself; `build` is for
-inspection and for the routine that keeps it fresh.
+Run `uv run scripts/privacy_index.py build [--force]` to write the index, or
+`why "<term>"` for provenance/exclusion reasons. The gate automatically rebuilds
+a missing or day-old index.
 """
 
 from __future__ import annotations
@@ -52,7 +30,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import privacy_check as pc  # noqa: E402
-from _paths import atomic_write  # noqa: E402
+from _paths import atomic_write, vault_root  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 INDEX_NAME = "privacy_index.json"
@@ -476,13 +454,6 @@ def explain(data: dict[str, Any], term: str) -> dict[str, Any]:
     return {"term": term, "indexed": False, "reasons": reasons or ["no vault source produced it; add it to profile/private_terms.txt if it is private"]}
 
 
-def _vault() -> Path:
-    raw = os.environ.get("OV")
-    if not raw:
-        raise SystemExit("privacy_index: $OV is not set")
-    return Path(raw).expanduser().resolve()
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -491,9 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--json", action="store_true")
     w = sub.add_parser("why")
     w.add_argument("term")
-    sub.add_parser("stats")
     args = parser.parse_args(argv)
-    vault = _vault()
+    vault = vault_root()
     if args.command == "build":
         data = load_or_build(vault, force=True)
         if args.json:
@@ -502,10 +472,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"privacy_index: {data['counts']['terms']} terms, {data['counts']['paths']} paths -> {index_path(vault)}")
         return 0
     data = load_or_build(vault)
-    if args.command == "why":
-        print(json.dumps(explain(data, args.term), ensure_ascii=False, indent=1))
-        return 0
-    print(json.dumps({"built": data.get("built"), **data.get("counts", {})}, ensure_ascii=False, indent=1))
+    print(json.dumps(explain(data, args.term), ensure_ascii=False, indent=1))
     return 0
 
 

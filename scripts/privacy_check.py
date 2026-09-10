@@ -1,47 +1,11 @@
 #!/usr/bin/env python3
-"""
-privacy_check.py: Detect private identifiers in public-bound repository files.
+"""Detect private identifiers in public-bound repository files.
 
-Terms come from the private-entity index `scripts/privacy_index.py` builds
-at `$OV/_meta/privacy_index.json` (directory names and paths, filename stems,
-wiki-link targets, routine and feature registries, note frontmatter, profile
-proper nouns; each with provenance), rebuilt automatically when missing or a
-day old. Two rules run over every public-bound source:
-
-  1. Term rule: any indexed term, case-insensitive with word boundaries.
-  2. Path rule: any path-shaped token that names a real directory under a
-     content tier of `$OV` (public tier segments from harness/paths.toml are
-     never hits). This is what catches `research/<private-dir>/` in prose.
-
-Optional `profile/private_terms.txt` (one phrase per line) and
-`profile/private_slugs.txt` (single words) still add explicit terms for what
-no vault source can derive.
-
-The scanner reads public-bound pathnames, working-tree content, and staged
-index blobs when they differ. A filename-only or partially staged leak
-therefore cannot hide behind a cleaned-up working copy.
-
-Auto-skip rules (all fully automated):
-  - Single ASCII words from wiki-links (too generic: Reflect, Protocol).
-  - File paths (contain `/`), dates, noise patterns.
-  - Explicit opt-out via `privacy_allowlist.txt` for edge cases.
-
-Existing public filenames are not automatically trusted. If a private title is
-also deliberately public, it must be named in `privacy_allowlist.txt`. This
-keeps an earlier leak from silently exempting itself forever.
-
-CLI:
-    uv run scripts/privacy_check.py                   human report
-    uv run scripts/privacy_check.py --json            machine-readable output
-    uv run scripts/privacy_check.py --range A..B      scan every commit in a
-                                                      history range (pre-push)
-    uv run scripts/privacy_check.py --why "<term>"    provenance of a term
-    uv run scripts/privacy_check.py --rebuild-index   refresh the index first
-    uv run scripts/privacy_check.py --allow-empty-ov  exit 0 when $OV is unset
-
-Exit code: 0 if no hits, 1 if any hit (treat as ERROR), 2 on IO error or
-when the gate cannot meaningfully run (missing/empty $OV without
---allow-empty-ov).
+The derived private-entity index and explicit sidecars feed literal-term and
+vault-path rules. Scans cover public pathnames, working-tree content, divergent
+staged blobs, and optional commit ranges. Existing public names are not trusted;
+``privacy_allowlist.txt`` is the explicit opt-out. Exit status distinguishes a
+clean scan, a hit, and a gate that could not run meaningfully.
 """
 
 from __future__ import annotations

@@ -1,7 +1,4 @@
-"""smoke_common.py: the shared runner, assertion, and paths for every smoke check.
-
-Split out of harness_smoke.py; harness_smoke.py re-exports every name so callers and tests are unchanged.
-"""
+"""Small process and assertion helpers shared by integration tests."""
 
 from __future__ import annotations
 
@@ -11,12 +8,12 @@ import sys
 from pathlib import Path
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parent.parent
 
 PYTHON = sys.executable
 
-class SmokeFailure(Exception):
-    pass
+class IntegrationFailure(AssertionError):
+    """An integration subprocess or outcome assertion failed."""
 
 def run(
     args: list[str],
@@ -36,7 +33,7 @@ def run(
         env=env,
     )
     if result.returncode != 0:
-        raise SmokeFailure(
+        raise IntegrationFailure(
             f"`{PYTHON} {' '.join(args)}` failed with exit {result.returncode}\n"
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
@@ -45,4 +42,4 @@ def run(
 
 def expect(condition: bool, message: str) -> None:
     if not condition:
-        raise SmokeFailure(message)
+        raise IntegrationFailure(message)

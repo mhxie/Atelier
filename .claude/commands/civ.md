@@ -1,5 +1,5 @@
 ---
-description: Read-only life dashboard over resources, civilizations, and terminal values.
+description: Read-only life dashboard over privately configured resources, civilizations, and terminal values.
 ---
 # Civilization Report
 
@@ -10,85 +10,55 @@ Read-only life dashboard. Single-pass render from vault signals. No new state fi
 Three conceptual layers, inspired by Civ 6:
 
 ```
-Resources (7 inputs)  →  Civilizations (7 conversion engines)  →  Terminal Values (5 outputs)
-时气金识缘心誉           Health..Experience                       意义 成就 幸福 自由 健康
+Resources → Civilizations → Terminal Values
+Configured inputs → Configured conversion engines → Configured outputs
 ```
 
 **Resources** are what you spend. **Civs** are where you invest them. **Terminal Values** are what you're optimizing for. The dashboard shows all three and whether your resource allocation is actually producing terminal value.
 
-## Resources (7 layers)
+## Private Framework
 
-Spendable, tradeable inputs. Lower layers supply upper ones. From the user's resource framework note: 金钱, 时间, 能量, 技能 are Tier-1 instrumental; 声誉/信任 is Tier-2. 连接 is instrumental (not terminal), pending Test 1.
+Load the user's framework from a private source referenced by
+`profile/identity.md` or located through bounded local retrieval.
+Names, symbols, counts, ordering, layers, mappings, trade rules,
+weights, assessment criteria and unresolved questions belong to that
+source, not this command. Historical reflections are evidence, not
+automatically current configuration. Missing configuration remains
+unknown; do not invent defaults or write new state.
 
-| Layer | Token | What it is | Renewable | Compounds | Vault signal |
-|---|---|---|---|---|---|
-| 0 | **时 Time** | Hours/week allocated | No | No | Not directly tracked; inferred from reflection density per civ |
-| 1 | **气 Energy** | Physical + mental reserves | Yes (rest, exercise) | Yes (health habits) | Health-plan progress, sleep signal, exercise mentions |
-| 2 | **金 Money** | Financial position | Yes (income) | Yes (investment) | Most recent NW figure from financial plan/reflection |
-| 3 | **识 Skills/Knowledge** | Human capital | Yes | Strongly | Wiki count + reading sessions (30d) |
-| 4 | **缘 Social Capital** | Relationship goodwill, network | Yes (fragile) | Yes (network effects) | Interaction count estimate (30d) + DL0 from PRM |
-| 5 | **心 PsyCap** | Self-efficacy + resilience + hope + optimism (HERO) | Yes (practice) | Yes (mutual reinforcement) | Qualitative: from reflection tone, self-knowledge entries |
-| 6 | **誉 Reputation/Optionality** | Trust, credibility, future options | Slowest | Yes | Ownership areas, publications, credentials, role level |
+## Resources
+
+Resources are spendable inputs. For each configured resource, read its
+definition, renewal and compounding properties, measurement rules and
+source artifacts from the private framework.
 
 ### Stock Sourcing
 
-Each stock from a **specific vault artifact** with a known date. If >30 days stale, flag and prompt for update.
+Ground each stock in a specific dated vault artifact. Report its
+measurements, source and date. Flag evidence older than 30 days.
+Distinguish measured stocks, qualitative assessments and inferred
+allocations. State the method and limitations of counts or estimates;
+missing evidence remains unknown.
 
-- **金**: Most recent explicit NW/asset figure from financial plan or reflection. Report value + source date.
-- **气**: Weight from plan file or daily notes. Sleep pattern (regular/drifting/unknown). Exercise frequency estimate.
-- **识**: Wiki count (`find "$OV/wiki" -name '*.md' ! -name 'index.md' | wc -l`; the wiki is bucketed into topic subdirectories, so a flat `ls` undercounts) + reading sessions in 30d. Note bulk-sync caveat.
-- **缘**: Estimate: distinct social interactions in daily notes + reflections (30d). DL0 count from PRM.
-- **心**: Qualitative read from recent reflections: evidence of self-efficacy, resilience, hope, optimism. Report as `high/stable/fragile/unknown`.
-- **誉**: Role level + tenure + ownership areas + publications/reviews. From profile + career reflections.
-- **时**: Not stockpiled; shown as allocation % across civs based on reflection density.
+### Trade Rules
 
-### Trade Rules (from the user's resource framework note)
+Read permitted exchanges, protected outcomes and irreversibility
+constraints from the private framework. Missing rules remain unknown.
 
-- **Instrumental ↔ instrumental OK**: 金 ↔ 时 (buy services), 识 ↔ 时 (learning costs time), 缘 ↔ 时 (invest in people)
-- **Never trade terminal for instrumental**: no 健康 for productivity; no 意义 for 金钱 premium; no 自由 for external validation
-- **Irreversibility hierarchy**: 健康 (post-60 irreversible) > 父母陪伴 (finite quota) > 备孕 window > relationship depth before transitions > green card process
+## Terminal Values
 
-## Terminal Values (5 outputs)
+Load configured outputs, current priorities and assessment criteria.
+Display order does not imply ranking. Apply stage-specific weighting
+only when supported by current private evidence.
 
-From the user's resource framework note (provisional, 2026-04-19). The optimization target.
+Assess each value from recent reflections and report:
+`rising` | `stable` | `declining` | `neglected` | `unknown`.
 
-| # | Value | Current weight | Measured by |
-|---|---|---|---|
-| 1 | **意义 Meaning** | Highest | Identity coherence: are you building what matters to you? Evidence: atelier, systems research identity, "consumer vs creator" |
-| 2 | **成就感 Achievement** | Very high (coupled with 意义) | Craft mastery, not external validation. Evidence: ownership, wiki compound, "bugs others would miss" |
-| 3 | **幸福感 Wellbeing** | High | Eudaimonic-heavy: relational depth + intellectual engagement + exploration. Evidence: reading sessions, social interactions, flow states |
-| 4 | **自由 Autonomy** | High | Optionality, self-determination. Evidence: career mobility, financial runway, epistemic sovereignty |
-| 5 | **健康/长寿 Health** | Medium explicit, high instrumental | Physical foundation. Evidence: weight progress, sleep, exercise, medical actions |
+## Civilizations
 
-**连接 (Connection)** is instrumental (Tier-1), not terminal. It supports 幸福感 + some 意义. Three consistency tests pending (see the user's resource framework note).
-
-**Stage weighting** (Rule 4): the user's current life stage biases the terminal-value weighting per `profile/identity.md`. The Researcher reads identity.md for the actual stage label, age range, and weighting; re-evaluate at major stage transitions.
-
-### Terminal Value Signals
-
-The Researcher assesses each terminal value qualitatively from recent reflections:
-
-- **意义**: Is the user doing identity-coherent work? Building, not just consuming? Evidence of craft, creation, or "constraint creates meaning" moments.
-- **成就感**: Craft milestones, ownership earned, technical depth built. Not promotions or titles.
-- **幸福感**: Flow states, intellectual engagement, relational warmth, exploration. Diverse sources, not monocultural.
-- **自由**: Options expanding or contracting? Job lock, financial constraints, immigration gates.
-- **健康/长寿**: Trend toward or away from targets. Sleep, weight, medical actions.
-
-Report each as: `rising` | `stable` | `declining` | `neglected` | `unknown`
-
-## Civilizations (7 conversion engines)
-
-Civs convert resources into terminal values. Each civ has a primary terminal output.
-
-| Civ | Layer | Primary terminal output | Key resources consumed |
-|---|---|---|---|
-| **Health** | Foundation | 健康/长寿 | 时, 气, 金 (medical) |
-| **Finance** | Foundation | 自由 (optionality) | 时, 金, 识 (financial literacy) |
-| **Immigration** | Enabler | 自由 (gates mobility, housing, family) | 时, 金 (legal fees), 誉 (credentials for EB-1B) |
-| **Relationships** | Enabler | 幸福感 (instrumental 连接 → terminal 幸福) | 时, 气, 缘 |
-| **Career** | Expression | 成就感 + 意义 | 时, 气, 识, 缘, 誉 |
-| **Learning** | Expression | 意义 + 成就感 | 时, 气, 识 |
-| **Experience** | Expression | 幸福感 + 意义 (memories) | 时, 金, 气 |
+Civilizations convert resources into terminal values. Load each
+configured civilization's layer, consumed resources, terminal outputs
+and dependencies from the private framework.
 
 ## Civ 6 Mechanics
 
@@ -117,11 +87,9 @@ Self-estimated composite percentile vs peer cohort (read the user's peer-cohort 
 | **Average** | Top 50% | Normal `·` | Holding ground; no major wins or losses |
 | **Below** | Under 50% | Dark `◆` | Falling behind your own baseline or peer trajectory |
 
-**Anchoring with hard data where available:**
-- 金: Use actual percentile data (NW percentile from the user's percentile data note, income from tax returns)
-- 誉: Role level + tenure vs age cohort; publication count for field
-- 气: BMI/weight vs age-cohort norms; sleep quality vs guidelines
-- 识/缘/心: Self-assessed; no external benchmark. Update estimate when running `/civ`.
+Use dated benchmarks appropriate to each configured metric and the private
+cohort definition. Identify the source and comparison basis. Where no
+defensible benchmark exists, label the assessment qualitative or unknown.
 
 **The Researcher proposes a tier** based on: resource stocks, terminal value trends, civ ages, wonders, emergencies, and 知行 alignment. The user confirms or overrides. The system never assigns a tier silently.
 
@@ -139,7 +107,9 @@ Self-estimated composite percentile vs peer cohort (read the user's peer-cohort 
 
 ### Emergencies (⚡)
 
-Deadlines <90 days from today. Scan directions.md and reflections for dates + deadline language. Report: `description (Nd) → affected civs`
+Deadlines <90 days from today. Scan directions.md and reflections for dates + deadline language. Report: `description (Nd) [state] → affected civs`
+
+Closure is three-valued: `open` (date ahead), `done` (closing evidence found, cite it), `unknown` (date passed with no closing evidence, or two files disagree). An unticked box past its due date is not evidence the work did not happen; render `(Nd, closure unknown)` and name where you looked. When files disagree about one fact, render `(Nd, conflict: A vs B)` and cite both sides rather than the copy that scans first.
 
 ### Dedications
 
@@ -165,12 +135,12 @@ All reads local. No hardcoded regex; derive terms from profile files at runtime.
 
 1. **Profile context**: era, goals, completed, stale, insights, employer, partner, key people.
 2. **Term derivation**: per civ, extract nouns from goal lines, build ephemeral regex.
-3. **Resource stocks**: read each of 7 tokens per Stock Sourcing rules. Flag stale.
+3. **Resource stocks**: read each configured resource per Stock Sourcing rules. Flag stale.
 4. **Per-civ signals**: goal inventory, reflection scan (30d/60d), governor check, age classification.
-5. **Terminal value assessment**: qualitative read of each of 5 values from recent reflections.
-6. **Emergencies**: deadlines <90d from today.
+5. **Terminal value assessment**: assess each configured value from recent reflections.
+6. **Emergencies**: deadlines <90d from today, each with a three-valued closure state (open / done / unknown) plus the evidence, or the named absence, that decided it.
 7. **Era score**: propose a tier (Legendary/Elite/Strong/Average/Below) per the Era Score percentile table; list signals_up and signals_down from the bullet lists in that section. The user confirms or overrides the proposed tier.
-8. **Constraints**: directed edges between civs. Immigration as strategic resource.
+8. **Constraints**: directed dependencies between configured civilizations, including any evidence-backed strategic resources.
 9. **Wonders** (60d): 3-5 accomplishments from strikethrough, completed goals, milestone language.
 10. **知行合一**: declared focus vs actual activity distribution.
 
@@ -180,28 +150,18 @@ All reads local. No hardcoded regex; derive terms from profile files at runtime.
 era: { current, theme, dedication, phase_context }
 
 resources:
-  时: { allocation: { civ: N% per civ based on reflection density } }
-  气: { weight, sleep, exercise_freq, source, as_of, stale }
-  金: { value, source, as_of, stale }
-  识: { wiki, reading_sessions_30d, bulk_synced }
-  缘: { interactions_30d_est, dl0, prm_date, stale }
-  心: { level: high/stable/fragile/unknown, evidence }
-  誉: { level, day, ownership_areas, publications }
+  [resource_id]: { display_name, layer, measurements, allocation, source, as_of, stale, limitations }
 
 terminal_values:
-  意义: { status: rising/stable/declining/neglected, evidence }
-  成就感: { status, evidence }
-  幸福感: { status, evidence }
-  自由: { status, evidence }
-  健康: { status, evidence }
+  [value_id]: { display_name, status, evidence }
 
 civilizations:
-  [per civ]: { layer, age, governor, key_evidence (2-3 lines), wins, terminal_output }
+  [civ_id]: { display_name, layer, age, governor, key_evidence, wins, resources_consumed, terminal_output }
 
 strategic_resource:
-  immigration: { status, constraints_on, evidence }
+  [resource_id]: { status, constraints_on, evidence }
 
-emergencies: [{ description, deadline, days_remaining, affected_civs, action_evidence }]
+emergencies: [{ description, deadline, days_remaining, affected_civs, closure: open|done|unknown, evidence_or_absence, conflict_sources }]
 
 era_score: { proposed_tier, reasoning (2-3 sentences), signals_up: [...], signals_down: [...] }
 
@@ -213,37 +173,50 @@ gaps: [...]
 
 ## Synthesizer: Compact Tree
 
-~25 lines. Orchestrator handles drill-down from brief in context.
+One screen, readable without scrolling. Orchestrator handles drill-down from brief in context.
 
 ```
 ## Civ Report (YYYY-MM-DD)
 _Era · Phase · Dedication: [focus]_
 
-Resources:  金 $NNK (MM-DD)  气 NNkg·[sleep]  识 Nw·Nr  缘 ~Ni·DL0:N  心 [level]  誉 LN·Nown
-[stale flags if any]
+RESOURCE    UPDATED  STALENESS (|=30d, 1 cell=10d)   STALE  DETAIL
+[resource]  MM-DD    ###|#######......  NNNd !  [measurement, CJK allowed here]
+[one row per configured resource; filled cells = stale_days/10 capped
+ at 16; `|` fixed after cell 3; trailing `!` when past 30d]
 
-Terminal Values:  意义 [↑→↓]  成就 [↑→↓]  幸福 [↑→↓]  自由 [↑→↓]  健康 [↑→↓]
+VALUES    [value] =   [value] ^   [value] v   [value] X
 
-Foundation
-├─ Health       [age][gov]  [≤8 words]
-└─ Finance      [age][gov]  [≤8 words]
+LAYER      CIV          AGE GOV  NOTE
+[layer]    [civ]         D   ~    [<=10 words, CJK allowed]
+[AGE: G golden, N normal, D dark, H heroic. GOV: + fresh, ~ stale/partial, - none]
 
-Enabler
-├─ Immigration  [age][gov]  [≤8 words]  ⊳ gates: [list]
-└─ Relationships [age][gov]  [≤8 words]
+90-DAY DEADLINES                                    today YYYY-MM-DD
+WHEN     DATE   ST   CHAIN  ITEM
+CLOSED   MM-DD  [x]         [item]
+OVERDUE  MM-DD  [!]  [tag]  [item]  CHAIN HEAD, Nd late
+MON      MM-DD  [ ]  [tag]  [item]  <- MM-DD
+         ===== MM-DD  [irreversible deadline] / IRREVERSIBLE =====
 
-Expression
-├─ Career       [age][gov]  [≤8 words]  → 成就+意义
-├─ Learning     [age][gov]  [≤8 words]  → 意义+成就
-└─ Experience   [age][gov]  [≤8 words]  → 幸福+意义
+ALIGNMENT  DECLARED           ACTUAL (week NNhNNm)
+           [leg]        [x]   [category] ###  NN.N%  <- [note]
 
-⚡ [emergency (Nd)] · [emergency (Nd)]
-Era: [proposed tier] (Top N%). [1-line reasoning]. Confirm? [highest-leverage action to tier up]
-知行: [dedication] → [aligned] | gap: [gap]
-Next: [foundation] → [enabler] → [expression]
+Era: [tier] (Top N%). [1-line reasoning]. Confirm? [highest-leverage action]
+Next: [configured dependency sequence]
 
 > Expand: civ name, resource, terminal value, "era score", "constraints", "wonders"
 ```
+
+Render rules. Aligned columns must contain ONLY unambiguous single-width
+ASCII. Box-drawing, block, arrow and star glyphs (U+2500 block, ### ###, arrows,
+stars, middots) are East Asian Ambiguous: one column in a Latin terminal, two in
+a CJK-configured one, so they silently break every column to their right. CJK
+text is double-width and belongs only in the trailing free column of a row.
+Never hand-count alignment; compute display width with
+`unicodedata.east_asian_width` (W and F are 2, A is 2 in a CJK terminal) and
+verify a row renders identically under both assumptions before emitting it.
+Express dependencies as an explicit `<- MM-DD` predecessor column plus a chain
+summary line, not as drawn connector art, so a slipped prerequisite is legible
+and greppable.
 
 ### Drill-Down Templates
 
@@ -261,7 +234,7 @@ Next: [one action]
 
 **Resource:**
 ```
-### [Token] ([Chinese name])
+### [Resource] ([display name])
 Stock: [value] (as of MM-DD) [stale flag if applicable]
 Trades: [what this resource can be exchanged for]
 Spending on: [current civ allocations]
@@ -270,7 +243,7 @@ Bottleneck: [what limits this resource]
 
 **Terminal Value:**
 ```
-### [Value] ([Chinese])
+### [Value] ([display name])
 Status: [rising/stable/declining/neglected]
 Fed by: [which civs produce this]
 Evidence: [2-3 sentences from recent reflections]
@@ -279,7 +252,7 @@ Risk: [what would cause decline]
 
 **Era Score:** Proposed tier with reasoning, signals_up and signals_down lists, and "to reach next tier: [specific actions]"
 
-Other sections (constraints, wonders, full 知行) on request. Each drill-down ≤15 lines.
+Other sections (constraints, wonders, full 知行) on request. A drill-down answers the one section asked for and stops.
 
 ## Style
 
@@ -288,6 +261,7 @@ Other sections (constraints, wonders, full 知行) on request. Each drill-down �
 - Citations (`[[Title]]`) in drill-downs only.
 - Default English. Chinese for token/value names and natural expressions.
 - No vibes-based scores. Stocks are grounded in artifacts; terminal values in reflection evidence.
+- Missing evidence renders as unknown, never as a negative. A tracker checkbox is derived state; when it disagrees with the file owning that fact, render the conflict instead of picking a side.
 
 ## Frequency
 
@@ -295,4 +269,4 @@ Ad hoc. Identical output on unchanged vault.
 
 ## Evolution
 
-Persistent era score ledger and historical snapshots are out of scope. If demand emerges, evolve toward a dedicated state directory. The 3 pending consistency tests in the user's resource framework note may change the terminal value structure; the dashboard adapts when those resolve.
+Persistent era score ledger and historical snapshots are out of scope. If demand emerges, evolve toward a dedicated state directory. Re-read the private framework when its configuration or unresolved questions change.

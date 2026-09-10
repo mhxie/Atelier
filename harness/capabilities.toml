@@ -18,7 +18,7 @@ description = "Run deterministic project scripts and shell commands."
 codex = ["shell"]
 
 [capabilities.semantic_query]
-description = "Run conceptual local search over the user's Zettelkasten vault at $OV/."
+description = "Run bounded local QMD retrieval over the user's vault; read cited source files before quoting."
 codex = ["shell: uv run scripts/semantic.py query"]
 
 [capabilities.web_search]

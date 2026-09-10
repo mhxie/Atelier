@@ -20,8 +20,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from pathlib import Path
+from threading import Barrier
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO_ROOT / "scripts"
@@ -128,10 +131,6 @@ class BucketedReadersTest(unittest.TestCase):
             self.assertIn("do the thing", proc.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # Glitch (2026-08-27/28): the nightly sweep aborted mid-plan reading a tracked
 # `_meta/*.toml` with `OSError: [Errno 11] Resource deadlock avoided`, and two
 # routine cycles failed lock acquisition with the same errno. The vault sits on
@@ -146,42 +145,71 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "scripts"))
 import _paths  # noqa: E402
 
 
-def test_transient_mount_error_is_retried_then_succeeds():
-    calls = []
+class TransientMountRetryTests(unittest.TestCase):
+    def test_transient_mount_error_is_retried_then_succeeds(self):
+        calls = []
 
-    def flaky():
-        calls.append(1)
-        if len(calls) < 3:
+        def flaky():
+            calls.append(1)
+            if len(calls) < 3:
+                raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+            return "materialized"
+
+        self.assertEqual(
+            _paths.retry_transient(flaky, delay=0, what="test read"),
+            "materialized",
+        )
+        self.assertEqual(len(calls), 3)
+
+    def test_persistent_transient_error_still_raises(self):
+        def always():
             raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
-        return "materialized"
 
-    assert _paths.retry_transient(flaky, delay=0, what="test read") == "materialized"
-    assert len(calls) == 3
+        with self.assertRaises(OSError) as caught:
+            _paths.retry_transient(always, attempts=2, delay=0, what="test read")
+        self.assertEqual(caught.exception.errno, _errno.EDEADLK)
+
+    def test_unrelated_oserror_is_not_retried(self):
+        calls = []
+
+        def missing():
+            calls.append(1)
+            raise FileNotFoundError(_errno.ENOENT, "No such file")
+
+        with self.assertRaises(FileNotFoundError):
+            _paths.retry_transient(missing, delay=0, what="test read")
+        self.assertEqual(
+            len(calls), 1,
+            "widening the retry beyond the mount's errno hides real bugs",
+        )
 
 
-def test_persistent_transient_error_still_raises():
-    def always():
-        raise OSError(_errno.EDEADLK, "Resource deadlock avoided")
+class AtomicWriteTests(unittest.TestCase):
+    def test_threads_publish_complete_values_without_colliding_or_changing_permissions(self):
+        barrier = Barrier(2)
+        replace = os.replace
+        def synchronized(source, target):
+            barrier.wait(timeout=5)
+            return replace(source, target)
+        with tempfile.TemporaryDirectory(prefix="atelier-atomic-") as directory:
+            target = Path(directory) / "result.json"
+            target.write_text("original")
+            target.chmod(0o600)
+            with mock.patch.object(_paths.os, "replace", side_effect=synchronized), ThreadPoolExecutor(max_workers=2) as executor:
+                list(executor.map(lambda value: _paths.atomic_write(target, value), ("first\n", "second\n")))
+            self.assertIn(target.read_text(), {"first\n", "second\n"})
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(list(Path(directory).iterdir()), [target])
 
-    try:
-        _paths.retry_transient(always, attempts=2, delay=0, what="test read")
-    except OSError as exc:
-        assert exc.errno == _errno.EDEADLK
-    else:
-        raise AssertionError("a permanently failing operation must still raise")
+    def test_failed_replacement_preserves_original_and_cleans_temporary(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-atomic-") as directory:
+            target = Path(directory) / "result.json"
+            target.write_text("original")
+            with mock.patch.object(_paths.os, "replace", side_effect=OSError("fixture failure")), self.assertRaises(OSError):
+                _paths.atomic_write(target, "replacement")
+            self.assertEqual(target.read_text(), "original")
+            self.assertEqual(list(Path(directory).iterdir()), [target])
 
 
-def test_unrelated_oserror_is_not_retried():
-    calls = []
-
-    def missing():
-        calls.append(1)
-        raise FileNotFoundError(_errno.ENOENT, "No such file")
-
-    try:
-        _paths.retry_transient(missing, delay=0, what="test read")
-    except FileNotFoundError:
-        pass
-    else:
-        raise AssertionError("ENOENT must surface immediately")
-    assert len(calls) == 1, "widening the retry beyond the mount's errno hides real bugs"
+if __name__ == "__main__":
+    unittest.main()

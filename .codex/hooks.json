@@ -18,11 +18,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"${XDG_CONFIG_HOME:-$HOME/.config}/atelier/session-replay.toml\" ] || [ -n \"$ATELIER_SESSION_REPLAY_ENABLED\" ] && uv run \"$(git rev-parse --show-toplevel)/scripts/session_replay.py\" hook --runtime codex || true",
-            "timeout": 10
-          },
-          {
-            "type": "command",
             "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/cues.py\" --touch-lock",
             "timeout": 3
           }
@@ -34,12 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -f \"${XDG_CONFIG_HOME:-$HOME/.config}/atelier/session-replay.toml\" ] || [ -n \"$ATELIER_SESSION_REPLAY_ENABLED\" ] && uv run \"$(git rev-parse --show-toplevel)/scripts/session_replay.py\" hook --runtime codex || true",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/shadow.py\" gc 2>/dev/null || true",
+            "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/invocation_log_gc.py\" 2>/dev/null || true",
             "timeout": 10
           }
         ]

@@ -1,96 +1,17 @@
 #!/usr/bin/env python3
-"""
-chat_completion.py: stdlib-only OpenAI-compatible chat completion invoker.
+"""Invoke provider-bound chat completions through the official SDK.
 
-Provider-neutral by design. The committed `harness/models.toml` declares
-model identities (opus, sonnet, deepseek_pro_max, ...); the gitignored
-`profile/models.toml` supplies the actual provider/model bindings. Swapping
-providers is a binding-file edit, not a script change.
+Committed model identities merge with gitignored provider bindings. Usage:
+  scripts/chat_completion.py --model X --prompt "..."  # stateless
+  scripts/chat_completion.py --model X --session /tmp/s.json --prompt -  # stdin
+Without --model, supply --endpoint, --api-model, and --api-key-env instead.
+Sessions replay a JSON array of {role, content} messages and append a turn
+only after a successful response.
 
-Two modes — pick by use case:
-
-  STATELESS (default, no flag)
-      One-shot call. No history. Use for mechanical lookups, single
-      bulk transforms, classification, anything where the prompt
-      is self-contained.
-
-      scripts/chat_completion.py --model deepseek_pro --prompt "..."
-
-  STATEFUL (--session FILE)
-      Multi-turn. The script loads prior messages from FILE, sends
-      them along with the new prompt, then appends the new turn and
-      response back to FILE. Use for conversations, iterative
-      refinement, deliberation chains. The provider's API is itself
-      stateless — we replay history each call. Token cost grows
-      linearly with session length; start a new session when the
-      thread is done.
-
-      scripts/chat_completion.py --model X --session /tmp/s.json --prompt "first"
-      scripts/chat_completion.py --model X --session /tmp/s.json --prompt "second"
-
-Other invocation flavors:
-
-  Stdin via '-':
-      echo "Hello" | scripts/chat_completion.py --model X --prompt -
-
-  Direct flags (no --model — ad-hoc):
-      scripts/chat_completion.py --endpoint https://api.example.com/v1/chat/completions \\
-                                 --api-model some-model --api-key-env EXAMPLE_KEY \\
-                                 --prompt "..."
-
-Model entry keys read from the merged config (any may be overridden by flags):
-    direct_api          provider's model identifier
-    direct_api_base     full endpoint URL (host + path)
-    api_env             env var holding the API key
-    direct_api_extras   inline table merged into request body for
-                        provider-specific extensions (e.g., a `thinking`
-                        block for reasoning-control providers)
-
-Session file format: JSON array of `{"role": ..., "content": ...}` messages.
-Inspectable, hand-editable, gitignore-worthy.
-
-Invocation log (default ON): every successful or failed call appends one
-JSON line to `~/.cache/atelier/llm_calls/<YYYY-MM-DD>.jsonl`. The event
-records timestamp, model name, api model id, endpoint, prompt, response
-content, reasoning_content (when thinking is enabled), `usage` token counts,
-finish_reason, latency, and error kind on failure. Used for after-the-fact
-quality evaluation, latency drift tracking, and reasoning-mode auditing.
-The log dir is machine-local (parallel to ~/.cache/atelier/lance/) so it
-does not sync into a Drive-mounted vault. Pass --no-log to skip the log
-for sensitive prompts; --log-dir overrides the default location.
-
-Shadow-group correlation (optional). When `--shadow-group <uuid>` is passed
-or env `ATELIER_SHADOW_GROUP` is set, the log event carries the group_id;
-`--task-type <name>` / `ATELIER_TASK_TYPE` likewise carries the task class
-(e.g., `system-review`, `decision`, `privacy-review`). Env vars take
-precedence ONLY when the flag is absent; explicit --flag overrides env.
-Every shadow-correlated event ALSO appends a ≤500B correlation skeleton
-to `$OV/_meta/shadow_logs/<YYYY-MM-DD>.jsonl` (machine-local stays the
-source-of-record for full prompts/responses; $OV gets the bones for
-cross-machine + cross-leg report aggregation). `task_dispatch_kind` in
-the event is always `direct` for chat_completion.py calls; native-leg
-entries (written explicitly by `scripts/shadow.py log --leg native`
-in-band after each native project-agent dispatch; the runtime-aware identity
-comes from `scripts/shadow.py native-model` - see Pattern B in
-`protocols/shadow-log.md`) carry `native`.
-Cost is NOT computed at write time; `scripts/shadow.py report` derives
-cost retroactively from the latest `harness/model_costs.toml` so a price
-refresh applies to historical logs. The $OV mirror is best-effort and
-silently skipped when $OV is unset or unwritable.
-
-Auth is `Authorization: Bearer $<api_env>`. Providers that use a different
-header scheme need their own helper (or a future --auth-header flag).
-
-Exit codes:
-    0  ok
-    1  API error (non-2xx, malformed JSON, missing fields)
-    2  config error (env var missing, model not found, model entry incomplete,
-       or session file invalid)
-    3  timeout
-    4  invalid arguments (empty prompt, conflicting flags)
-    5  response truncated at max_tokens (finish_reason=length); partial
-       content is written to stdout, but caller must re-run with a higher
-       --max-tokens to get the full response
+Exit codes: 0 success; 1 API/response error; 2 invalid configuration/session;
+3 timeout; 4 invalid arguments; 5 max_tokens truncation. Exit 5 writes partial
+content to stdout; a caller needing the full response must explicitly rerun
+with higher --max-tokens.
 """
 
 from __future__ import annotations
@@ -98,60 +19,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import socket
 import sys
-import time
-import tomllib
-import urllib.error
-import urllib.request
-from datetime import datetime
 from pathlib import Path
 
-import sys as _sys
-from pathlib import Path as _Path
-_sys.path.insert(0, str(_Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _models  # noqa: E402
 from _paths import atomic_write  # noqa: E402
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SCHEMA_TOML = REPO_ROOT / "harness" / "models.toml"
-BINDINGS_TOML = REPO_ROOT / "profile" / "models.toml"
-DEFAULT_LOG_DIR = Path.home() / ".cache" / "atelier" / "llm_calls"
-# Correlation-skeleton fields written to the $OV mirror. Keep this list
-# minimal — full prompts/responses stay machine-local; the mirror is for
-# cross-leg report aggregation and cross-machine survival.
-_SKELETON_FIELDS = (
-    "timestamp", "shadow_group_id", "task_type", "task_dispatch_kind",
-    "model", "api_model", "usage", "latency_s", "finish_reason",
-    "status", "error_kind",
-)
-
-
-def _load_model(name: str) -> dict | None:
-    """Merge committed model schema with gitignored bindings, by name.
-
-    Returns the per-model dict (claude_code, codex, direct_api, api_env, ...)
-    with binding values overlaid on the schema. The committed schema in
-    `harness/models.toml` declares model identities; bindings in
-    `profile/models.toml` (gitignored) supply provider/model strings,
-    endpoints, env vars, and request extras. Returns None if the model
-    is not in the schema. If the bindings file is absent, returns the
-    schema-only entry (which will fail downstream when a binding key is
-    required — by design).
-    """
-    if not SCHEMA_TOML.exists():
-        return None
-    with SCHEMA_TOML.open("rb") as f:
-        schema = tomllib.load(f)
-    model = dict(schema.get("models", {}).get(name) or {})
-    # Schema entry may exist as an empty table (just a docstring); accept it.
-    if name not in (schema.get("models") or {}):
-        return None
-    if BINDINGS_TOML.exists():
-        with BINDINGS_TOML.open("rb") as f:
-            bindings = tomllib.load(f)
-        model.update(bindings.get("models", {}).get(name) or {})
-    return model
+DEFAULT_TIMEOUT = 120.0
 
 
 def _read_prompt(args: argparse.Namespace) -> str:
@@ -175,187 +51,91 @@ def _load_session(path: Path) -> list[dict]:
     return data
 
 
-def _save_session(path: Path, messages: list[dict]) -> None:
-    atomic_write(path, json.dumps(messages, ensure_ascii=False, indent=2))
-
-
-def _resolve_extras(
-    model_entry: dict | None, override_json: str | None, extras_field: str = "direct_api_extras"
-) -> dict:
+def _resolve_extras(model_entry: dict | None, override_json: str | None) -> dict:
     extras: dict = {}
     if model_entry:
-        extras.update(model_entry.get(extras_field, {}) or {})
+        extras.update(model_entry.get("direct_api_extras", {}) or {})
     if override_json:
         extras.update(json.loads(override_json))
     return extras
 
 
-def _post(endpoint: str, body: dict, api_key: str, timeout: float) -> dict:
-    req = urllib.request.Request(
-        endpoint,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+class ProviderError(Exception):
+    """A transport failure normalized to this script's exit-code contract.
 
-
-# Retriable HTTP statuses: rate limit (429) and the transient 5xx family.
-# 4xx other than 429 are client bugs (bad request, auth, not found) and
-# should not be retried.
-_RETRIABLE_HTTP = {429, 500, 502, 503, 504}
-
-
-def _backoff_seconds(attempt: int) -> float:
-    """Exponential backoff schedule: 1s, 4s, 16s, ... capped at 60s."""
-    return min(60.0, 4.0 ** attempt)
-
-
-def _retry_after_seconds(exc: urllib.error.HTTPError) -> float | None:
-    """Read Retry-After header from a 429/503 response. Returns seconds or None.
-
-    The header may be either a number-of-seconds or an HTTP-date. We honor
-    the numeric form; the date form falls through to the default backoff.
+    Carries no SDK object, so callers see one vocabulary per exit code
+    regardless of which SDK ran the call.
     """
-    headers = getattr(exc, "headers", None)
-    if not headers:
-        return None
-    val = headers.get("Retry-After")
-    if not val:
-        return None
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _openai_client(**kwargs):
+    import openai
+
+    return openai.OpenAI(**kwargs)
+
+
+def _guarded(sdk, timeout: float, call):
+    """Run an SDK call, translating its exceptions into ProviderError."""
     try:
-        return max(0.0, float(val))
-    except (TypeError, ValueError):
-        return None
+        return call()
+    except sdk.APITimeoutError as e:
+        raise ProviderError(3, f"request timed out after {timeout}s") from e
+    except sdk.APIConnectionError as e:
+        raise ProviderError(1, f"network error: {e}") from e
+    except sdk.APIStatusError as e:
+        body = e.body if e.body is not None else {"raw": str(e)}
+        raise ProviderError(
+            1, f"HTTP {e.status_code}: {json.dumps(body, ensure_ascii=False, default=str)}"
+        ) from e
+    except json.JSONDecodeError as e:
+        raise ProviderError(1, f"response not JSON: {e}") from e
 
 
-def _post_with_retry(
-    endpoint: str,
-    body: dict,
-    api_key: str,
-    timeout: float,
-    *,
-    max_attempts: int,
+def _call_openai(
+    *, endpoint: str, api_model: str, api_key: str, messages: list[dict], max_tokens: int,
+    extras: dict, timeout: float, max_retries: int,
 ) -> dict:
-    """POST with exponential backoff on transient failures.
+    """Chat completions through the openai SDK; returns the provider's JSON.
 
-    Retries: HTTP 429 (honoring Retry-After), 5xx, TimeoutError, URLError
-    (network-level). Does NOT retry: 4xx other than 429 (client bug),
-    JSONDecodeError (bad response shape).
-
-    Re-raises the last exception when attempts are exhausted, so the
-    existing top-level handlers in main() still classify it correctly.
+    The raw-response path keeps provider extensions a typed model drops
+    (`reasoning_content`, and whatever a binding adds next).
     """
-    attempts = max(1, max_attempts)
-    last_exc: Exception | None = None
-    for attempt in range(attempts):
-        try:
-            return _post(endpoint, body, api_key, timeout)
-        except urllib.error.HTTPError as e:
-            if e.code not in _RETRIABLE_HTTP or attempt == attempts - 1:
-                raise
-            wait = _retry_after_seconds(e) or _backoff_seconds(attempt)
-            sys.stderr.write(
-                f"chat_completion: HTTP {e.code} on attempt {attempt+1}/{attempts}; "
-                f"retrying in {wait:.1f}s\n"
-            )
-            time.sleep(wait)
-            last_exc = e
-        except (TimeoutError, socket.timeout) as e:
-            if attempt == attempts - 1:
-                raise
-            wait = _backoff_seconds(attempt)
-            sys.stderr.write(
-                f"chat_completion: timeout on attempt {attempt+1}/{attempts}; "
-                f"retrying in {wait:.1f}s\n"
-            )
-            time.sleep(wait)
-            last_exc = e
-        except urllib.error.URLError as e:
-            if attempt == attempts - 1:
-                raise
-            wait = _backoff_seconds(attempt)
-            sys.stderr.write(
-                f"chat_completion: network error on attempt {attempt+1}/{attempts}: {e}; "
-                f"retrying in {wait:.1f}s\n"
-            )
-            time.sleep(wait)
-            last_exc = e
-    # Defensive: should be unreachable (the last attempt re-raises above).
-    if last_exc:
-        raise last_exc
-    raise RuntimeError("chat_completion: retry loop exited without success or exception")
+    import openai
 
+    body: dict = {"model": api_model, "messages": messages}
+    if max_tokens > 0:
+        body["max_tokens"] = max_tokens
+    client = _openai_client(
+        base_url=endpoint.rstrip("/").removesuffix("/chat/completions"),
+        api_key=api_key,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
 
-def _log_call(log_dir: Path, event: dict) -> None:
-    """Append a one-line JSON event for this call.
+    def call() -> dict:
+        raw = client.chat.completions.with_raw_response.create(**body, extra_body=extras or None)
+        return json.loads(raw.text)
 
-    Best-effort: any IOError, JSON-encoding error, or filesystem hiccup is
-    swallowed so logging never fails the API call. Logs land in date-bucketed
-    JSONL files under `log_dir` (default `~/.cache/atelier/llm_calls/`); the
-    location is machine-local, parallel to the lance index, so it does not
-    sync into a Drive-mounted vault. The log is a private record of every
-    direct-API call: prompt, response, reasoning content, usage tokens,
-    latency, finish_reason. Used for after-the-fact evaluation of response
-    quality, latency drift, and reasoning-mode behaviour.
-    """
-    try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
-        with log_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
-    except (OSError, ValueError, TypeError):
-        pass
-
-
-def _mirror_shadow_skeleton(event: dict) -> None:
-    """Append the correlation skeleton to $OV/_meta/shadow_logs/<date>.jsonl.
-
-    Only fires when `event["shadow_group_id"]` is set. Best-effort: $OV
-    missing or unwritable → silently skipped (machine-local log already won).
-    The skeleton omits full prompt/response text; it carries the fields
-    needed for cross-leg aggregation in `scripts/shadow.py report` plus a
-    response preview (first 200 chars + SHA-256) for quick inspection.
-    """
-    if not event.get("shadow_group_id"):
-        return
-    ov = os.environ.get("OV")
-    if not ov:
-        return
-    try:
-        skeleton: dict[str, object] = {k: event.get(k) for k in _SKELETON_FIELDS}
-        # Attach response preview when present (success path).
-        resp = event.get("response_content")
-        if isinstance(resp, str):
-            import hashlib
-            skeleton["response_first_200"] = resp[:200]
-            skeleton["response_sha256"] = hashlib.sha256(resp.encode("utf-8")).hexdigest()
-        mirror_dir = Path(ov) / "_meta" / "shadow_logs"
-        mirror_dir.mkdir(parents=True, exist_ok=True)
-        mirror_file = mirror_dir / f"{datetime.now().strftime('%Y-%m-%d')}.jsonl"
-        with mirror_file.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(skeleton, ensure_ascii=False) + "\n")
-    except (OSError, ValueError, TypeError):
-        pass
+    return _guarded(openai, timeout, call)
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="scripts/chat_completion.py",
-        description="OpenAI-compatible chat completion invoker. Stdlib only.",
+        description="Chat completion invoker over the provider's official SDK.",
     )
     ap.add_argument(
         "--model",
         help=(
             "Model identity name (e.g., opus, sonnet, deepseek_pro_max). "
             "Reads `direct_api`, `direct_api_base`, `api_env`, "
-            "`direct_api_extras` from the merged schema (harness/models.toml) "
-            "+ bindings (profile/models.toml). Any can be overridden by the "
-            "ad-hoc flags below."
+            "`direct_api_provider`, `direct_api_extras` from the merged "
+            "schema (harness/models.toml) + bindings (profile/models.toml). "
+            "Any can be overridden by the ad-hoc flags below."
         ),
     )
     ap.add_argument("--endpoint", help="Override the model's direct_api_base.")
@@ -388,16 +168,15 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=8192,
         help=(
-            "Output token cap. Defaults to 8192 (was 4096; raised because "
-            "system-review responses regularly need 8K+). When the response "
-            "hits the cap (finish_reason=length), the script writes the "
-            "partial content to stdout but exits 5 so callers see the "
-            "truncation. Pass a higher value (e.g., 16384) for review-grade "
-            "calls; pass 0 to OMIT max_tokens from the request entirely "
-            "(no cap; provider's model maximum applies; truncation detection "
-            "disabled). System-review callers SHOULD pass 0 — capping the "
-            "safety net of the evolution loop is the worst place to save "
-            "tokens."
+            "Output token cap. Defaults to 8192, which the precedent judge "
+            "responses regularly exceed. When the response hits the cap "
+            "(finish_reason=length), the script writes the partial content "
+            "to stdout but exits 5 so callers see the truncation. Pass a "
+            "higher value (e.g., 16384) for review-grade calls; pass 0 to "
+            "OMIT max_tokens from the request entirely (no cap; provider's "
+            "model maximum applies; truncation detection disabled). "
+            "System-review callers SHOULD pass 0 — capping the safety net "
+            "of the evolution loop is the worst place to save tokens."
         ),
     )
     ap.add_argument(
@@ -405,10 +184,11 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=3,
         help=(
-            "Total attempts for transient errors (429 with Retry-After, 5xx, "
-            "TimeoutError, network errors). Default 3. Set 1 to disable "
-            "retries (useful for tests and one-shot scripts that prefer a "
-            "fast fail)."
+            "Total attempts for transient errors (429, 408, 409, 5xx, "
+            "timeouts, network errors): one call plus `max_attempts - 1` "
+            "SDK retries with exponential backoff and jitter, honoring "
+            "Retry-After. Default 3. Set 1 to disable retries (useful for "
+            "tests and one-shot scripts that prefer a fast fail)."
         ),
     )
     ap.add_argument(
@@ -439,45 +219,9 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit full response object as JSON. Default emits message.content.",
     )
-    ap.add_argument(
-        "--no-log",
-        dest="log",
-        action="store_false",
-        default=True,
-        help=(
-            "Skip the invocation log. Use for sensitive prompts or test runs. "
-            "Default: log every call to ~/.cache/atelier/llm_calls/<date>.jsonl."
-        ),
-    )
-    ap.add_argument(
-        "--log-dir",
-        default=None,
-        help="Override the invocation log directory.",
-    )
-    ap.add_argument(
-        "--shadow-group",
-        default=None,
-        help=(
-            "UUID grouping this call with other legs of the same shadow "
-            "dispatch (multi-provider verification). When set, the log event "
-            "carries the group_id and a correlation skeleton is mirrored to "
-            "`$OV/_meta/shadow_logs/<date>.jsonl`. Falls back to env "
-            "ATELIER_SHADOW_GROUP when omitted. Aggregated by `scripts/shadow.py report`."
-        ),
-    )
-    ap.add_argument(
-        "--task-type",
-        default=None,
-        help=(
-            "Task class for shadow correlation (e.g., `system-review`, "
-            "`decision`, `privacy-review`). Falls back to env ATELIER_TASK_TYPE "
-            "when omitted. Used by `scripts/shadow.py report` for verdict-token "
-            "regex selection (see `harness/shadow_tasks.toml`)."
-        ),
-    )
     args = ap.parse_args(argv)
 
-    model_entry = _load_model(args.model) if args.model else None
+    model_entry = _models.resolve(args.model) if args.model else None
     if args.model and model_entry is None:
         sys.stderr.write(
             f"chat_completion: model '{args.model}' not found in harness/models.toml\n"
@@ -485,21 +229,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     binding_src = model_entry or {}
-    api_model_field = "direct_api"
-    base_field = "direct_api_base"
-    env_field = "api_env"
-    extras_field = "direct_api_extras"
-    timeout_field = "direct_api_timeout"
-
-    endpoint = args.endpoint or binding_src.get(base_field)
-    api_model = args.api_model or binding_src.get(api_model_field)
-    api_env = args.api_key_env or binding_src.get(env_field)
+    endpoint = args.endpoint or binding_src.get("direct_api_base")
+    api_model = args.api_model or binding_src.get("direct_api")
+    api_env = args.api_key_env or binding_src.get("api_env")
     if args.timeout is not None:
         timeout = args.timeout
-    elif binding_src.get(timeout_field):
-        timeout = float(binding_src[timeout_field])
+    elif binding_src.get("direct_api_timeout"):
+        timeout = float(binding_src["direct_api_timeout"])
     else:
-        timeout = 120.0
+        timeout = DEFAULT_TIMEOUT
 
     if not endpoint or not api_model or not api_env:
         sys.stderr.write(
@@ -508,19 +246,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
+    provider = str(binding_src.get("direct_api_provider") or "").strip().lower() or "openai"
+    if provider != "openai":
+        sys.stderr.write(
+            f"chat_completion: unknown provider '{provider}'; "
+            "direct_api_provider must be one of openai.\n"
+        )
+        return 2
+
     api_key = os.environ.get(api_env)
-    # Optional canonical-env-var fallbacks. Each entry maps a local alias
-    # (the model entry's `api_env`) to the provider's canonical env var,
-    # so a machine that only exports the canonical name still works without
-    # editing the binding file. Add new entries as needed; keep this list
-    # minimal — most providers should use a single env var.
-    _CANONICAL_ENV_FALLBACKS: dict[str, str] = {
-        # alias -> canonical
-    }
-    if not api_key:
-        canonical = _CANONICAL_ENV_FALLBACKS.get(api_env)
-        if canonical:
-            api_key = os.environ.get(canonical)
     if not api_key:
         sys.stderr.write(f"chat_completion: env var ${api_env} not set; cannot call API.\n")
         return 2
@@ -547,15 +281,10 @@ def main(argv: list[str] | None = None) -> int:
     messages = history + [user_msg]
 
     try:
-        extras = _resolve_extras(binding_src, args.extras_json, extras_field=extras_field)
+        extras = _resolve_extras(binding_src, args.extras_json)
     except json.JSONDecodeError as e:
         sys.stderr.write(f"chat_completion: --extras-json is not valid JSON: {e}\n")
         return 4
-
-    body: dict = {"model": api_model, "messages": messages}
-    if args.max_tokens > 0:
-        body["max_tokens"] = args.max_tokens
-    body.update(extras)
 
     # Optional pre-flight: refuse to send if the request would clearly bust
     # the model's context window. Estimate is rough (chars/4); the real
@@ -574,66 +303,27 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 4
 
-    log_dir = Path(args.log_dir) if args.log_dir else DEFAULT_LOG_DIR
-    shadow_group = args.shadow_group or os.environ.get("ATELIER_SHADOW_GROUP")
-    task_type = args.task_type or os.environ.get("ATELIER_TASK_TYPE")
-    log_event: dict = {
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-        "shadow_group_id": shadow_group,
-        "task_type": task_type,
-        "task_dispatch_kind": "direct",
-        "model": args.model,
-        "api_model": api_model,
-        "endpoint": endpoint,
-        "session": session_path.as_posix() if session_path else None,
-        "system": args.system,
-        "user_prompt": prompt,
-    }
-    started_at = time.monotonic()
-
-    def _maybe_log() -> None:
-        if args.log:
-            log_event["latency_s"] = round(time.monotonic() - started_at, 3)
-            _log_call(log_dir, log_event)
-            _mirror_shadow_skeleton(log_event)
-
-
-    def _fail(kind: str, code: int, message: str, **extra: object) -> int:
-        """One exit ramp for request failures: stderr + log event + exit code.
-
-        Five copy-pasted blocks lived here; forgetting `_maybe_log()` in a
-        sixth would silently drop the failure from the cost/latency audit
-        trail this log exists for.
-        """
+    def _fail(code: int, message: str) -> int:
         sys.stderr.write(f"chat_completion: {message}\n")
-        log_event.update({"status": "error", "error_kind": kind, **extra})
-        _maybe_log()
         return code
 
     try:
-        resp = _post_with_retry(
-            endpoint, body, api_key, timeout, max_attempts=args.max_attempts
+        resp = _call_openai(
+            endpoint=endpoint,
+            api_model=api_model,
+            api_key=api_key,
+            messages=messages,
+            max_tokens=args.max_tokens,
+            extras=extras,
+            timeout=timeout,
+            max_retries=max(0, args.max_attempts - 1),
         )
-    except urllib.error.HTTPError as e:
-        try:
-            err_body = json.loads(e.read().decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            err_body = {"raw": str(e)}
-        return _fail(f"http_{e.code}", 1, f"HTTP {e.code}: {json.dumps(err_body)}")
-    except (TimeoutError, socket.timeout):
-        return _fail("timeout", 3, f"request timed out after {timeout}s")
-    except urllib.error.URLError as e:
-        return _fail("network", 1, f"network error: {e}", error_message=str(e))
-    except json.JSONDecodeError as e:
-        return _fail("decode", 1, f"response not JSON: {e}")
+    except ProviderError as e:
+        return _fail(e.code, str(e))
 
     if "error" in resp:
-        sys.stderr.write(f"chat_completion: API error: {json.dumps(resp['error'])}\n")
-        log_event.update({"status": "error", "error_kind": "api", "error_message": resp["error"]})
-        _maybe_log()
-        return 1
+        return _fail(1, f"API error: {json.dumps(resp['error'])}")
 
-    # Successful response: capture for logging regardless of output mode.
     try:
         choice = resp["choices"][0]
         msg = choice["message"]
@@ -641,32 +331,18 @@ def main(argv: list[str] | None = None) -> int:
         reasoning = msg.get("reasoning_content")
         finish = choice.get("finish_reason")
     except (KeyError, IndexError) as e:
-        return _fail("malformed_response", 1, f"malformed response (missing choices/message/content): {e}")
+        return _fail(1, f"malformed response (missing choices/message/content): {e}")
 
     # Truncation = caller-visible failure (unless --max-tokens 0 opts out).
     # Partial content still written to stdout / session so the caller can
     # recover what arrived; exit code distinguishes truncation from other
-    # success/failure modes. Computed BEFORE _maybe_log() so the
-    # error_kind marker actually lands in the logged event.
+    # success/failure modes.
     truncated = finish == "length" and args.max_tokens > 0
     # A reasoning model can spend its whole budget on reasoning_content and
     # return an empty `content` with finish_reason=length; with --max-tokens 0
-    # that was logged as a clean success and the caller got a 0-byte report
-    # (2026-08-23, review.sh direct leg). Empty completions are failures.
+    # that once looked like a clean success and the caller got a 0-byte report
+    # (2026-08-23, direct leg). Empty completions are failures.
     empty = not (content or "").strip()
-
-    log_event.update({
-        "status": "ok" if not empty else "error",
-        "response_content": content,
-        "reasoning_content": reasoning,
-        "finish_reason": finish,
-        "usage": resp.get("usage"),
-    })
-    if truncated:
-        log_event["error_kind"] = "truncated_max_tokens"
-    if empty:
-        log_event["error_kind"] = "empty_completion"
-    _maybe_log()
 
     if empty:
         sys.stderr.write(
@@ -693,16 +369,12 @@ def main(argv: list[str] | None = None) -> int:
         history.append(user_msg)
         history.append({"role": "assistant", "content": content})
         try:
-            _save_session(session_path, history)
+            atomic_write(session_path, json.dumps(history, ensure_ascii=False, indent=2))
         except OSError as e:
             sys.stderr.write(f"chat_completion: failed to write session file: {e}\n")
             # Don't fail the command — response is in stdout, caller can recover
 
-    if args.emit_json:
-        sys.stdout.write(json.dumps(resp, ensure_ascii=False))
-        return 5 if truncated else 0
-
-    sys.stdout.write(content)
+    sys.stdout.write(json.dumps(resp, ensure_ascii=False) if args.emit_json else content)
     return 5 if truncated else 0
 
 
