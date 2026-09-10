@@ -54,19 +54,18 @@ another registered project command, Codex renders the `$command` form. Native
 Codex built-ins such as `/hooks` keep their slash form.
 
 Codex lifecycle hooks live in `.codex/hooks.json`. `SessionStart` reuses
-`scripts/cues.py --hook --runtime codex`; `UserPromptSubmit` optionally records
-the replay prompt and refreshes the session lock; `Stop` optionally
-reconciles the replay snapshot and runs shared shadow-log cleanup. Claude Code
-keeps the corresponding behavior in `.claude/settings.json`, using both `Stop`
-and `SessionEnd` for optional replay reconciliation. Replay capture is disabled
-by default. Both edges always call the shared script, which resolves the
-machine-local Atelier preference and optional process override. The canonical
-activation contract is in `protocols/session-replay.md`.
+`scripts/cues.py --hook --runtime codex`; `UserPromptSubmit` refreshes the
+session lock; `Stop` ages out legacy full-payload direct-API logs. Claude Code
+keeps the corresponding cue and lock behavior in `.claude/settings.json` and
+runs the same legacy-log cleanup at `SessionEnd`. Direct API calls no longer
+write invocation logs, so cleanup only drains existing machine-local files.
 
 Claude Code also loads the `hooks:` block of an agent's frontmatter and runs
 those hooks for that agent's own tool calls, so a boundary can be scoped to
 one role: the Reviewer's read-only Bash guard (`scripts/readonly_bash_guard.py`)
-is a `PreToolUse` hook there. Agent-scoped hooks have no Codex equivalent;
+is a `PreToolUse` hook there. The guard is an explicit allowlist of reading
+commands that denies everything it does not describe, and fails closed on a
+payload or shell shape it cannot read. Agent-scoped hooks have no Codex equivalent;
 there the role source's prose rule is the only boundary.
 
 ## Runtime Selection
@@ -87,9 +86,21 @@ Resolution order is:
 
 Direct CLI invocation always remains valid. The selector exists for interactive
 launches. Unattended local routines intentionally do not use this resolution
-chain: `scripts/routine_runner.sh` fixes them to Codex because their sandbox,
-plugin loading, sanitized environment, and approval policy are implemented and
-tested at that runtime edge.
+chain. launchd keeps a self-hosted Prefect server and deployment runner alive;
+Prefect owns schedules, run state, history, concurrency, and eligible retry
+timing. `scripts/routine_adapter.py` owns the fixed headless-Codex arguments,
+sanitized environment, profile boundary, prompt, and verified domain receipt.
+Scheduled model work has no runtime fallback.
+
+Autoevo is the narrow exception to the ordinary vault launch. Its adapter
+selects the pinned `atelier-autoevo-draft` permission profile and equivalent
+legacy workspace-only flags; a managed-profile rejection fails closed. Both
+paths permit `:root` reads and scratch-workspace writes only, keep its control
+directories read-only, disable network, and omit vault `--add-dir`. The model
+uses retained plan/snapshots, a staged QMD database,
+and cached GGUF files read-only, then authors only `proposal.json` plus its
+transport acknowledgment. The trusted parent publishes and records one
+canonical JSON domain result; Markdown is derived and Prefect owns run state.
 
 ## Plugins and Permissions
 
@@ -126,16 +137,6 @@ vice versa. References: [Codex plugins](https://learn.chatgpt.com/docs/plugins.m
 [sandbox and approvals](https://learn.chatgpt.com/docs/agent-approvals-security.md),
 [MCP configuration](https://learn.chatgpt.com/docs/extend/mcp).
 
-## Session replay
-
-When replay is enabled through the machine-local preference or process
-override, both runtime edges capture each user input before routing and
-reconcile a private native-transcript snapshot after work stops. Capture is off
-by default. The shared contract, storage boundary, privacy guard, and recovery
-procedure are in `protocols/session-replay.md`. This archive is operational
-evidence for deferred bot-only re-analysis, never ambient model context or a
-replacement for user-facing reflections.
-
 ## Provider-Neutral Rules
 
 - Do not add new provider-specific model names to shared protocols. Use a model
@@ -161,7 +162,7 @@ extras) live in `profile/models.toml` (gitignored). Loaders merge schema +
 bindings at runtime.
 
 Voice dispatch model: the single source of truth is
-`protocols/voice-dispatch.md`. The agent-to-voices mapping
+`protocols/agent-handoff.md`. The agent-to-voices mapping
 lives in `harness/agents.toml` as a `voices` keyed inline table per agent
 (`{native = "...", direct = "..."}` or single-leg variants). `native` means
 the selected runtime's project-agent surface, not Claude specifically. Claude
@@ -172,26 +173,11 @@ selected Codex model unless their project adapter pins a model. The shared
 Sonnet execution and retrieval roles use `xdeep`; they never silently inherit
 a lower Codex effort.
 External provider bindings remain in gitignored `profile/models.toml`.
-Shadow telemetry resolves native identity through
-`scripts/shadow.py native-model`: Claude uses the role binding, while Codex
-uses the dynamic `codex_native` slot so it never inherits an Anthropic cost
-row.
 
 ## Capability Profiles
 
-Capabilities describe what an agent needs, independent of the runtime:
-
-- `read_file`
-- `search_text`
-- `run_shell`
-- `semantic_query`
-- `web_search`
-- `web_fetch`
-- `write_local_file`
-- `spawn_role` (native `.codex/agents/<role>.toml`, sequential fallback)
-- `ask_user`
-
-The concrete tool mapping is in `harness/capabilities.toml`.
+`harness/capabilities.toml` owns the runtime-neutral role capabilities and
+their concrete tool mappings. Do not copy its inventory into guidance.
 
 Routine profiles in `harness/routine_profiles.toml` are a separate execution
 envelope, not additions to this role-capability vocabulary. Their permission
@@ -204,25 +190,8 @@ on a new provider-neutral capability.
 
 ## Codex Command Execution
 
-When a user asks Codex to run an Atelier command:
-
-1. Read `AGENTS.md`.
-2. Read `CLAUDE.md` for domain rules and safety constraints.
-3. Read `.claude/commands/<command>.md` for the workflow.
-4. Translate Claude-specific constructs using the table in `AGENTS.md` § Codex Adaptation.
-5. Dispatch referenced roles through `.codex/agents/<role>.toml`; the adapter
-   instructs the subagent to read the authoritative `.claude/agents/` brief.
-   If subagents are unavailable, emulate the brief sequentially and disclose it.
-6. Prefer local `$OV/` files, `rg`, and `uv run scripts/semantic.py`.
-7. Ask before user-facing note writes under `$OV/`. Scribe capture operations
-   (`daily_note`, `dining_row`, `gtd_entry`, `people_stub`, `generic`) write
-   directly because the user already authored the raw content. Bounded private
-   operational artifacts defined by `protocols/session-log.md` or
-   `protocols/session-replay.md` also write without approval. Other agents and
-   ad-hoc orchestrator writes still ask first.
-8. Report any downgraded capability, such as missing web access or unavailable
-   subagent dispatch.
-
-For command invocation, use the native `/name` or `$name` surface described
-above. Keep launch recipes in user-level CLI documentation rather than the
-always-loaded project adapter.
+`AGENTS.md` owns native invocation, tool translation, and role fallback;
+`CLAUDE.md` owns retrieval and write boundaries, including Scribe and bounded
+operational-artifact exceptions. Generated `$command` skills load both before
+the selected command specification. Keep launch recipes in user-level CLI
+documentation, not the always-loaded adapter.

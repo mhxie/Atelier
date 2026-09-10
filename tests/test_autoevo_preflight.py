@@ -1,19 +1,7 @@
-"""Regression tests for the autoevo deterministic preflight.
+"""Read-only preflight outcomes, source protection, and legacy-state refusal.
 
-Glitches (2026-08-22):
-
-1. The dirty-tree gate counted every Git status entry in the vault although
-   the bot stages explicit paths and commits with `--only`. On a Drive-synced
-   vault that is dirty by design, 73 of 103 attempts were blocked and the
-   bot never ran. The gate now inspects only autoevo's own scopes.
-2. A Drive File Provider read error (`[Errno 11] Resource deadlock avoided`)
-   while reading the owned-audit state file was classified as "requires
-   review", which made the runner exit 2 and mark the claim `failed`
-   (human retry approval needed). Storage and timeout errors are transient
-   and must defer with an hourly retry instead.
-
-The tests run every preflight call in a subprocess so `_paths`'s
-process-wide $OV cache never leaks into other test modules.
+Every call runs in a subprocess with a disposable vault and canonical-only
+path registry, so tests never load the user's private path overrides.
 """
 
 from __future__ import annotations
@@ -85,14 +73,45 @@ PRELUDE = """
 import json, sys
 sys.path.insert(0, 'scripts')
 import autoevo_preflight as ap
+import _paths, tomllib
 from pathlib import Path
-ok_probe = lambda: {"hits": 0, "detail": ""}
+_paths._registry = lambda: tomllib.loads(Path("harness/paths.toml").read_text())["paths"]
+ok_probe = lambda: {"hit_count": 0, "detail": ""}
 sem_probe = lambda: {"ready": True, "mode": "real", "duration_seconds": 0.01, "detail": ""}
 vault = Path(__import__('os').environ['OV'])
 """
 
 
 class DirtyGateScopeTest(unittest.TestCase):
+    def test_publication_rechecks_live_gates_without_repeating_input_probes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+            vault = _make_vault(Path(tmp))
+            out = _run_py(vault, """
+                def must_not_run():
+                    raise AssertionError("expensive drafting input probe repeated")
+                args = dict(vault=vault, privacy_probe=must_not_run,
+                            semantic_probe=must_not_run, publication_boundary=True)
+                ready = ap.inspect_preflight(**args)
+                (vault / 'cache' / 'atelier-session-lock').write_text('interactive session')
+                blocked = ap.inspect_preflight(**args)
+                print(json.dumps({'ready': ready['ready'], 'gate': blocked['gate']}))
+            """)
+            self.assertTrue(out["ready"])
+            self.assertEqual(out["gate"], "session_active")
+
+    def test_wrong_or_unknown_default_branch_is_read_only_blocked(self) -> None:
+        for setup in (("checkout", "-qb", "feature"), ("checkout", "--detach"), ("branch", "-m", "notes")):
+            with self.subTest(setup=setup), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+                vault = _make_vault(Path(tmp))
+                _git(vault, *setup)
+                before = {str(path.relative_to(vault)): path.read_bytes()
+                          for path in vault.rglob("*") if path.is_file()}
+                result = _run_py(vault, "print(json.dumps(ap.inspect_preflight(vault=vault, privacy_probe=ok_probe, semantic_probe=sem_probe)))")
+                self.assertFalse(result["ready"])
+                self.assertEqual(result["gate"], "git_not_default_branch")
+                self.assertEqual(before, {str(path.relative_to(vault)): path.read_bytes()
+                                          for path in vault.rglob("*") if path.is_file()})
+
     def test_out_of_scope_dirt_does_not_block(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
@@ -134,23 +153,6 @@ class DirtyGateScopeTest(unittest.TestCase):
             self.assertEqual(out["in_scope"], 1)
             self.assertEqual(out["protected"], ["wip/note.md"])
 
-    def test_dirty_scope_cli_counts_only_scoped_paths(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            (vault / "personal" / "diary.md").write_text("edited\n", encoding="utf-8")
-            (vault / "research" / "new.md").write_text("draft\n", encoding="utf-8")
-            proc = subprocess.run(
-                [sys.executable, "scripts/autoevo_preflight.py", "--dirty-scope"],
-                cwd=REPO_ROOT,
-                env={**os.environ, "OV": str(vault)},
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            self.assertEqual(proc.stdout.strip(), "1")
-
-
     def test_rename_out_of_scope_still_protects_source(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
@@ -168,108 +170,137 @@ class DirtyGateScopeTest(unittest.TestCase):
             self.assertEqual(out["in_scope"], 1)
 
 
-class TransientErrorsDeferTest(unittest.TestCase):
-    def test_recovered_audit_is_bot_authored_without_coauthor(self) -> None:
+class ReadOnlyReadinessTest(unittest.TestCase):
+    def test_ready_and_blocked_cli_leave_files_and_git_unchanged(self) -> None:
+        for blocked in (False, True):
+            with self.subTest(blocked=blocked), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+                vault = _make_vault(Path(tmp))
+                if blocked:
+                    (vault / ".git" / "index.lock").touch()
+                before = {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")}
+                out = _run_py(vault, """
+                    ap._default_privacy_probe = ok_probe
+                    ap._default_semantic_probe = sem_probe
+                    raise SystemExit(ap.main(["--json"]))
+                """)
+                self.assertEqual(out["ready"], not blocked, out)
+                if blocked:
+                    self.assertEqual(out["gate"], "git_index_lock_present")
+                self.assertEqual(
+                    before,
+                    {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")},
+                )
+                self.assertNotIn("output_file", out)
+                self.assertNotIn("owned_audit_recovery", out)
+
+    def test_git_operation_is_preserved_and_blocks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
-            audit = vault / "agent-findings" / "autoevo-applied-2099-01-02.md"
-            audit.write_text("## Autoevo Run\n", encoding="utf-8")
-            out = _run_py(
-                vault,
-                """
-                r = ap._commit_audit(vault, vault/'agent-findings'/'autoevo-applied-2099-01-02.md', '2099-01-02')
-                author = ap._git(vault, 'log', '-1', '--format=%an <%ae>').stdout.strip()
-                committer = ap._git(vault, 'log', '-1', '--format=%cn <%ce>').stdout.strip()
-                body = ap._git(vault, 'log', '-1', '--format=%B').stdout
-                print(json.dumps({'returncode': r.returncode, 'author': author,
-                                  'committer': committer, 'body': body}))
-                """,
-            )
-            self.assertEqual(out["returncode"], 0, out)
-            self.assertEqual(
-                out["author"], "Atelier Autoevo Bot <noreply@atelier.local>"
-            )
-            self.assertEqual(
-                out["committer"], "Atelier Autoevo Bot <noreply@atelier.local>"
-            )
-            self.assertNotIn("Co-Authored-By:", out["body"])
+            marker = vault / ".git" / "MERGE_HEAD"
+            marker.write_text("0" * 40 + "\n", encoding="utf-8")
+            out = _run_py(vault, """
+                print(json.dumps(ap.inspect_preflight(
+                    vault=vault, privacy_probe=ok_probe, semantic_probe=sem_probe)))
+            """)
+            self.assertEqual(out["gate"], "git_operation_in_progress", out)
+            self.assertEqual(marker.read_text(), "0" * 40 + "\n")
+            self.assertEqual(list((vault / "agent-findings").iterdir()), [])
 
-    def test_unreadable_owned_state_defers(self) -> None:
+    def test_privacy_hits_block_without_semantic_or_audit_work(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+            vault = _make_vault(Path(tmp))
+            out = _run_py(vault, """
+                def must_not_run():
+                    raise AssertionError("semantic probe ran after privacy failure")
+                print(json.dumps(ap.inspect_preflight(
+                    vault=vault, privacy_probe=lambda: {"hit_count": 2},
+                    semantic_probe=must_not_run)))
+            """)
+            self.assertEqual(out["gate"], "privacy_hits", out)
+            self.assertEqual(out["health"]["privacy_hits"], 2)
+            self.assertEqual(list((vault / "agent-findings").iterdir()), [])
+
+    def test_legacy_state_requires_review_without_reading_or_mutating_it(self) -> None:
+        for contents in ("{}", "{not json"):
+            with self.subTest(contents=contents), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+                vault = _make_vault(Path(tmp))
+                state = vault / "cache" / "autoevo-preflight-owned-audit.json"
+                state.write_text(contents, encoding="utf-8")
+                audit = vault / "agent-findings" / "autoevo-applied-2099-01-02.md"
+                audit.write_text("user-owned audit edit\n", encoding="utf-8")
+                head = (vault / ".git" / "index").read_bytes()
+                out = _run_py(vault, """
+                    from unittest.mock import patch
+                    original = Path.read_text
+                    def guarded(path, *args, **kwargs):
+                        if path.name == ap.LEGACY_OWNED_AUDIT_STATE:
+                            raise AssertionError("legacy state must not be read")
+                        return original(path, *args, **kwargs)
+                    with patch.object(Path, "read_text", guarded):
+                        raise SystemExit(ap.main(["--json"]))
+                """)
+                self.assertFalse(out["ready"], out)
+                self.assertEqual(out["gate"], "legacy_audit_review_required")
+                self.assertIsNone(out["retry_after_epoch"])
+                self.assertIn("review and migrate", out["detail"])
+                self.assertEqual(state.read_text(), contents)
+                self.assertEqual(audit.read_text(), "user-owned audit edit\n")
+                self.assertEqual((vault / ".git" / "index").read_bytes(), head)
+
+    def test_broken_legacy_symlink_also_requires_review(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
             state = vault / "cache" / "autoevo-preflight-owned-audit.json"
-            state.write_text("{}", encoding="utf-8")
-            state.chmod(0)
-            try:
-                out = _run_py(vault, "print(json.dumps(ap.recover_owned_audit()))")
-            finally:
-                state.chmod(0o600)
-            self.assertEqual(out["status"], "deferred", out)
-            self.assertIn("unreadable", out["detail"])
+            state.symlink_to("missing-state")
+            out = _run_py(vault, 'raise SystemExit(ap.main(["--json"]))')
+            self.assertEqual(out["gate"], "legacy_audit_review_required", out)
+            self.assertTrue(state.is_symlink())
 
-    def test_corrupt_owned_state_still_requires_review(self) -> None:
+    def test_legacy_stat_error_defers_instead_of_ignoring_state(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
-            state = vault / "cache" / "autoevo-preflight-owned-audit.json"
-            state.write_text("{not json", encoding="utf-8")
-            out = _run_py(vault, "print(json.dumps(ap.recover_owned_audit()))")
-            self.assertEqual(out["status"], "invalid", out)
+            out = _run_py(vault, """
+                from unittest.mock import patch
+                original = Path.lstat
+                def unavailable(path, *args, **kwargs):
+                    if path.name == ap.LEGACY_OWNED_AUDIT_STATE:
+                        raise OSError("fixture storage unavailable")
+                    return original(path, *args, **kwargs)
+                with patch.object(Path, "lstat", unavailable):
+                    raise SystemExit(ap.main(["--json"]))
+            """)
+            self.assertEqual(out["gate"], "environment_unavailable", out)
+            self.assertIsInstance(out["retry_after_epoch"], int)
+            self.assertIn("legacy audit state", out["detail"])
 
-    def test_environment_blocker_defers_and_records_audit(self) -> None:
+    def test_environment_failure_is_structured_and_deferred(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
-            out = _run_py(
-                vault,
-                """
-                r = ap.environment_blocker(ap.PreflightError("cannot run git: timed out"), now=1000)
-                rec = ap.record_blocker(r, run_date="2099-01-02", run_ts="t1", cycle="2099-01-02")
-                audit = Path(rec["output_file"]) if Path(rec["output_file"]).is_absolute() else vault / rec["output_file"]
-                print(json.dumps({"ready": r["ready"], "gate": r["gate"],
-                                  "retry": r["retry_after_epoch"],
-                                  "audit_commit": rec["audit_commit"],
-                                  "audit_text": audit.read_text()}))
-                """,
-            )
+            out = _run_py(vault, """
+                from unittest.mock import patch
+                with patch.object(ap, "inspect_preflight", side_effect=ap.PreflightError("fixture timeout")):
+                    raise SystemExit(ap.main(["--json"]))
+            """)
             self.assertFalse(out["ready"])
             self.assertEqual(out["gate"], "environment_unavailable")
-            self.assertEqual(out["retry"], 1000 + 3600)
-            self.assertIn(out["audit_commit"], {"committed", "deferred"})
-            self.assertIn("environment_unavailable: preflight could not inspect the vault", out["audit_text"])
-
-    def test_deferred_recovery_blocks_the_cycle(self) -> None:
-        """An unreadable owned-audit state must defer the run, not let it start."""
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            state = vault / "cache" / "autoevo-preflight-owned-audit.json"
-            state.write_text("{}", encoding="utf-8")
-            state.chmod(0)
-            try:
-                proc = subprocess.run(
-                    [sys.executable, "scripts/autoevo_preflight.py", "--json", "--run-date", "2099-01-02", "--cycle", "2099-01-02"],
-                    cwd=REPO_ROOT, env={**os.environ, "OV": str(vault)}, capture_output=True, text=True, timeout=120,
-                )
-            finally:
-                state.chmod(0o600)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            out = json.loads(proc.stdout.strip().splitlines()[-1])
-            self.assertFalse(out["ready"], out)
-            self.assertEqual(out["gate"], "audit_recovery_deferred")
             self.assertIsInstance(out["retry_after_epoch"], int)
+            self.assertEqual(list((vault / "agent-findings").iterdir()), [])
 
-    def test_lfs_timeout_is_health_not_crash(self) -> None:
+    def test_environment_retry_delay_is_stable(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
-            out = _run_py(
-                vault,
-                """
-                def boom(*a, **k):
-                    raise ap.PreflightError("cannot run git: timed out after 45 seconds")
-                ap._git = boom
-                print(json.dumps(ap._lfs_health(vault)))
-                """,
-            )
-            self.assertFalse(out["available"])
-            self.assertIn("timed out", out["detail"])
+            out = _run_py(vault, 'print(json.dumps(ap.environment_blocker(OSError("fixture timeout"), now=1000)))')
+            self.assertEqual(out["retry_after_epoch"], 4600)
+
+    def test_obsolete_write_and_identity_flags_are_rejected(self) -> None:
+        for flag in ("--record-blocker", "--result-file", "--run-date", "--cycle", "--run-ts", "--dirty-scope"):
+            with self.subTest(flag=flag):
+                proc = subprocess.run(
+                    [sys.executable, "scripts/autoevo_preflight.py", flag],
+                    cwd=REPO_ROOT, capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(proc.returncode, 2)
+                self.assertIn("unrecognized arguments", proc.stderr)
 
 
 if __name__ == "__main__":

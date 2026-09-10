@@ -3,38 +3,33 @@ version = 1
 # Public, routine-agnostic capability profiles. Private routine names and
 # output paths stay in $OV/_meta/routine_watch.toml and reference these rows.
 #
-# `fallback_runtime = "claude"` lets routine_runner.sh re-execute a cycle
-# through headless Claude Code when Codex fails before delivering (usage
-# limit, auth, crash). Never on a timeout, and never on a runner preflight
-# failure. routine_audit.py refuses the key on profiles whose effects are not
-# idempotent vault writes: Codex plugins, danger-full-access, Atelier
-# read-write, or any send / commit permission. The key is deliberately outside
-# the profile fingerprint; the claim records `runtime`, `fallback_from`, and
-# `fallback_reason`, and only Codex claims count as profile verification.
+# Unattended local model routines always use the fixed Codex adapter. Runtime
+# selection and fallback belong only to interactive launches.
+# Private rss_sources requires web:live; bounded pre-model collection is owned
+# by routine_adapter.py, without broadening the model's shell network access.
 
 [profiles.local-maintenance]
 surface = "local"
-sandbox = "danger-full-access"
-atelier_access = "read-write"
+sandbox = "workspace-write"
+atelier_access = "read"
 web_search = "disabled"
-shell_network = "unrestricted"
+shell_network = "disabled"
 user_config = "ignore"
 timeout_seconds = 7200
 reasoning_effort = "high"
 permissions = [
-  "atelier:read-write",
-  "vault:read-write",
-  "vault:git-commit",
+  "atelier:read",
+  "vault:read",
+  "staging:write",
   "shell:local",
 ]
-required_clis = ["git", "uv"]
+required_clis = ["git", "node"]
 required_plugins = []
 optional_plugins = []
 allowed_commands = ["/autoevo-nightly"]
 
 [profiles.local-research]
 surface = "local"
-fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "live"
@@ -54,7 +49,6 @@ allowed_commands = ["/run-routine"]
 
 [profiles.local-synthesis]
 surface = "local"
-fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "disabled"
@@ -92,7 +86,6 @@ allowed_commands = ["/run-routine"]
 
 [profiles.local-digest]
 surface = "local"
-fallback_runtime = "claude"
 sandbox = "workspace-write"
 atelier_access = "read"
 web_search = "live"
@@ -110,30 +103,8 @@ required_plugins = []
 optional_plugins = []
 allowed_commands = ["/run-routine"]
 
-# Digest mail: render a document from other routines' outputs and mail it.
-#
-# `shell_network = "enabled"` is the narrowest setting that works. The digest's
-# article picks are its only bridge into Readwise, and reading the Reader inbox
-# needs the `readwise` CLI, which needs egress. Under `workspace-write` this
-# maps to `sandbox_workspace_write.network_access=true`: the shell reaches the
-# network, the filesystem fence stays. `unrestricted` would have forced
-# `danger-full-access`, which is a different order of exposure for one CLI call.
-# `web_search` stays off: the model needs the CLI, not a browser.
-#
-# Delivery is SMTP through `routine_digest.py mail`, not a connector. That was
-# forced rather than chosen: the Codex Gmail plugin marks `send_email` as
-# requiring approval, and an unattended routine runs under
-# `approval_policy = "never"`, so the send fails outright (verified 2026-08-31
-# by the gmail:send-self smoke). The only way past it would be
-# `--dangerously-bypass-approvals-and-sandbox`, which drops the filesystem fence
-# for one API call.
-#
-# Doing it deterministically turned out to be the stronger design anyway. No
-# plugin means `user_config = "ignore"` comes back, and that was this profile's
-# largest exposure: loading user config also readmits user hooks and user MCP
-# servers into an unattended run. The recipient now lives in private config that
-# the model never reads, so the verb is a description rather than the only
-# enforcement.
+# Readwise and optional CodexBar OAuth reads plus deterministic self-mail need
+# shell egress; retain the filesystem fence, disabled web search, and no plugins.
 [profiles.local-digest-mail]
 surface = "local"
 sandbox = "workspace-write"
@@ -146,11 +117,8 @@ reasoning_effort = "medium"
 permissions = [
   "atelier:read",
   "vault:read-write",
-  # Read-only, and the reason the digest has a Readwise section at all. Without
-  # it the first run self-vetoed the article picks and reported
-  # `skipped_inputs: Readwise new-article feed (permission not allowlisted)`,
-  # which was the prompt allowlist working correctly on an incomplete profile.
   "readwise:read",
+  "quota:read",
   "mail:send-self",
 ]
 required_clis = ["python3", "readwise", "security"]

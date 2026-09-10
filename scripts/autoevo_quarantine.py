@@ -1,12 +1,8 @@
 #!/usr/bin/env python3
-"""Update autoevo quarantine state and place skip evidence in its audit section."""
+"""Own Autoevo's cross-run per-scope quarantine state."""
 
 from __future__ import annotations
 
-import argparse
-import json
-import os
-import sys
 import tomllib
 from datetime import date, timedelta
 from pathlib import Path
@@ -14,7 +10,7 @@ from typing import Any
 
 import sys as _s
 _s.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import retry_transient  # noqa: E402
+from _paths import atomic_write as _atomic_write, retry_transient  # noqa: E402
 
 QUARANTINE_EXPIRY_DAYS = 30
 QUARANTINE_THRESHOLD = 3
@@ -22,17 +18,7 @@ VALID_OUTCOMES = {"envelope_returned", "forgetter_no_envelope"}
 
 
 class QuarantineError(RuntimeError):
-    """Quarantine state or audit structure is unsafe to mutate."""
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        temporary.write_text(text, encoding="utf-8")
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
+    """Quarantine state or supplied outcomes are invalid."""
 
 
 def _load_active_entries(path: Path, today: date) -> dict[str, dict[str, Any]]:
@@ -101,16 +87,11 @@ def _load_active_entries(path: Path, today: date) -> dict[str, dict[str, Any]]:
 
 
 def _render_state(entries: dict[str, dict[str, Any]]) -> str:
-    lines: list[str] = []
-    for scope in sorted(entries):
-        entry = entries[scope]
-        lines.append("[[quarantine]]")
-        for key in ("scope", "first_failed", "reason", "expires_at"):
-            value = json.dumps(str(entry[key]), ensure_ascii=False)
-            lines.append(f"{key} = {value}")
-        lines.append(f"consecutive_failures = {int(entry['consecutive_failures'])}")
-        lines.append("")
-    return "\n".join(lines)
+    import tomli_w
+
+    text = tomli_w.dumps({"quarantine": [entries[scope] for scope in sorted(entries)]})
+    tomllib.loads(text)
+    return text
 
 
 def active_scopes(*, state_path: Path, today: date) -> list[str]:
@@ -125,18 +106,14 @@ def active_scopes(*, state_path: Path, today: date) -> list[str]:
 
 def update_state(
     *,
-    outcomes_path: Path,
+    outcomes: dict[str, str],
     state_path: Path,
-    count_path: Path,
     today: date,
 ) -> int:
     """Apply one run's outcomes after pruning expired quarantine entries."""
-    entries = _load_active_entries(state_path, today)
-    if not outcomes_path.is_file():
-        raise QuarantineError("required outcomes sidecar does not exist")
-    outcomes: object = json.loads(outcomes_path.read_text(encoding="utf-8"))
     if not isinstance(outcomes, dict):
-        raise QuarantineError("outcomes sidecar must be a JSON object")
+        raise QuarantineError("outcomes must be a mapping")
+    entries = _load_active_entries(state_path, today)
 
     crossed_threshold = 0
     today_text = today.isoformat()
@@ -144,7 +121,7 @@ def update_state(
     for scope, outcome in outcomes.items():
         if not isinstance(scope, str) or not scope:
             raise QuarantineError("outcome scope must be a non-empty string")
-        if outcome not in VALID_OUTCOMES:
+        if not isinstance(outcome, str) or outcome not in VALID_OUTCOMES:
             raise QuarantineError(f"unknown outcome for {scope!r}: {outcome!r}")
         if outcome == "envelope_returned":
             entries.pop(scope, None)
@@ -165,106 +142,5 @@ def update_state(
         if prior_count < QUARANTINE_THRESHOLD <= int(entry["consecutive_failures"]):
             crossed_threshold += 1
 
-    _atomic_write(count_path, f"{crossed_threshold}\n")
     _atomic_write(state_path, _render_state(entries))
     return crossed_threshold
-
-
-def insert_skipped(*, audit_path: Path, skipped_path: Path) -> bool:
-    """Insert generated quarantine lines into the latest audit Skipped section."""
-    if not skipped_path.is_file():
-        return False
-    additions = [
-        line.strip()
-        for line in skipped_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    if not additions:
-        return False
-    if not audit_path.is_file():
-        raise QuarantineError("audit file does not exist")
-
-    lines = audit_path.read_text(encoding="utf-8").splitlines()
-    run_indexes = [
-        index for index, line in enumerate(lines) if line.startswith("## Autoevo Run:")
-    ]
-    if not run_indexes:
-        raise QuarantineError("audit file has no Autoevo Run section")
-    run_start = run_indexes[-1]
-    try:
-        skipped_index = lines.index("### Skipped (reason)", run_start)
-        errors_index = lines.index("### Errors", skipped_index + 1)
-    except ValueError as exc:
-        raise QuarantineError(
-            "latest audit run is missing Skipped or Errors section"
-        ) from exc
-
-    existing = [
-        line.strip()
-        for line in lines[skipped_index + 1 : errors_index]
-        if line.strip() and line.strip() != "- (none)"
-    ]
-    normalized = [line if line.startswith("- ") else f"- {line}" for line in additions]
-    merged = list(existing)
-    changed = False
-    for line in normalized:
-        if line not in merged:
-            merged.append(line)
-            changed = True
-    if not changed:
-        return False
-
-    rendered = lines[: skipped_index + 1] + merged + [""] + lines[errors_index:]
-    _atomic_write(audit_path, "\n".join(rendered).rstrip() + "\n")
-    return True
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    update = subparsers.add_parser("update")
-    update.add_argument("--outcomes", type=Path, required=True)
-    update.add_argument("--state", type=Path, required=True)
-    update.add_argument("--count-file", type=Path, required=True)
-    update.add_argument("--today", type=date.fromisoformat, default=date.today())
-
-    active = subparsers.add_parser("active-scopes")
-    active.add_argument("--state", type=Path, required=True)
-    active.add_argument("--today", type=date.fromisoformat, required=True)
-
-    insert = subparsers.add_parser("insert-skipped")
-    insert.add_argument("--audit", type=Path, required=True)
-    insert.add_argument("--skipped-lines", type=Path, required=True)
-
-    args = parser.parse_args()
-    try:
-        if args.command == "update":
-            update_state(
-                outcomes_path=args.outcomes,
-                state_path=args.state,
-                count_path=args.count_file,
-                today=args.today,
-            )
-        elif args.command == "active-scopes":
-            for scope in active_scopes(state_path=args.state, today=args.today):
-                print(scope)
-        else:
-            insert_skipped(
-                audit_path=args.audit,
-                skipped_path=args.skipped_lines,
-            )
-    except (
-        OSError,
-        ValueError,
-        json.JSONDecodeError,
-        tomllib.TOMLDecodeError,
-        QuarantineError,
-    ) as exc:
-        print(f"autoevo_quarantine: {exc}", file=sys.stderr)
-        return 2
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())

@@ -1,49 +1,17 @@
 #!/usr/bin/env python3
-"""Deterministic reader/writer for `$OV/_meta/autoevo_pending.toml`.
+"""Atomic queue CLI for `$OV/_meta/autoevo_pending.toml`; one JSON result per call.
 
-Why this exists: the nightly command hand-emitted TOML from the model and
-appended findings without checking what the user had already dismissed, so
-the same clusters were re-proposed after every 30-day auto-dismiss. Queue
-writes are mechanical: escaping, dedupe, atomic replace, resolution, and
-auto-dismiss belong in a script.
+Use `<command> --help` for flags. `append --entries FILE|-` preserves existing
+entries and dedupes sorted peers against pending or recently resolved entries
+(--dedupe-days, default 90). `resolve` requires a reason, records the decision,
+and anchors dedupe at resolved_at. `auto-dismiss` handles surface_count >= 3
+or age beyond --max-age-days (default 30); `list` optionally filters status.
 
-Subcommands (all print one JSON object):
-
-  append --entries FILE|-   Append new findings (JSON list of entry dicts).
-                            Skips any finding whose sorted `peers` equal an
-                            existing entry's peers when that entry is
-                            pending, applied, or dismissed within
-                            --dedupe-days (default 90). Never rewrites
-                            existing entries.
-  auto-dismiss --today D    Mark pending entries with surface_count >= 3 or
-                            proposed_at older than --max-age-days (default
-                            30) as auto-dismissed.
-  resolve --id X --status applied|dismissed --reason R
-                            Record a decision (sets resolved_at, which
-                            anchors the dedupe window) and write it to the
-                            decision ledger. The reason is mandatory: it is
-                            what turns a click into a precedent.
-  set-default --id X --action A
-                            Give one pending entry a default (stale-banner |
-                            dismiss) with a fresh veto window; used by the
-                            precedent judge (scripts/precedent.py).
-  defer --id X              Increment surface_count, bump last_surfaced, and
-                            push a pending default's veto deadline out again.
-  veto-expired --today D    Pending entries whose `default_at` has passed:
-                            the nightly applies their `default_action`.
-  stamp-defaults --today D  One-time migration: give already-pending eligible
-                            entries a default with a fresh window from today.
-  list [--status S]         Entries, optionally filtered.
-
-Default-with-veto: an entry may carry `default_action` / `default_at`.
-`append --rule-defaults` stamps the fixed DEFAULT_ACTIONS rule (proposed_at
-+ DEFAULT_VETO_DAYS) on eligible categories; without the flag, defaults come
-only from `set-default`, which the precedent judge calls after reading the
-ledger. The veto is the action that contradicts the default: skip (dismissed)
-vetoes `stale-banner`, apply vetoes `dismiss`; skipping a `dismiss` default
-agrees with it. Defer pushes the deadline; the nightly applies what nobody
-vetoed. Entry fields follow
-protocols/autoevo.md § Pending queue.
+Defaults require `append --rule-defaults` or `set-default`; the latter starts
+a fresh veto window. `defer` bumps surface_count/last_surfaced and the deadline;
+`veto-expired` exposes due defaults to the nightly. A contradictory decision
+vetoes: skip vetoes stale-banner, apply vetoes dismiss; skip confirms dismiss.
+Schema and lifecycle: protocols/autoevo.md § Pending queue.
 """
 
 from __future__ import annotations
@@ -98,27 +66,12 @@ def load(path: Path) -> dict:
     return data
 
 
-def _esc(value: object) -> str:
-    return (
-        str(value)
-        .replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-        .replace("\t", "\\t")
-    )
-
-
-def _toml_value(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    if isinstance(value, float):
-        return repr(value)
+def _toml_value(value: object) -> object:
     if isinstance(value, list):
-        return "[" + ", ".join(_toml_value(v) for v in value) + "]"
-    return f'"{_esc(value)}"'
+        return [_toml_value(item) for item in value]
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    return str(value)
 
 
 ENTRY_KEY_ORDER = (
@@ -128,47 +81,27 @@ ENTRY_KEY_ORDER = (
 )
 
 
-def _render_table_body(entry: dict, key_order: tuple[str, ...] = ENTRY_KEY_ORDER) -> list[str]:
-    lines: list[str] = []
-    ordered = [k for k in key_order if k in entry] + [k for k in entry if k not in key_order]
-    for key in ordered:
-        value = entry[key]
-        if value is None or isinstance(value, dict):
-            continue  # nested tables are not part of this schema
-        if key == "peers" and not value:
-            continue
-        lines.append(f"{key} = {_toml_value(value)}")
-    return lines
-
-
-def render_entry(entry: dict, table: str = "pending") -> str:
-    return "\n".join([f"[[{table}]]", *_render_table_body(entry)]) + "\n"
+def _table_body(entry: dict) -> dict:
+    ordered = [k for k in ENTRY_KEY_ORDER if k in entry] + [k for k in entry if k not in ENTRY_KEY_ORDER]
+    return {
+        key: _toml_value(entry[key])
+        for key in ordered
+        if entry[key] is not None
+        and not isinstance(entry[key], dict)
+        and not (key == "peers" and not entry[key])
+    }
 
 
 def render(data: dict) -> str:
-    """Render the whole queue file. Unknown top-level tables are preserved.
+    """Render the queue while preserving unknown top-level TOML state."""
+    import tomli_w
 
-    The live file once gained an 18-entry `[[finding]]` array because a
-    model-emitted write used the wrong table name; the helper keeps such
-    data verbatim rather than silently dropping it.
-    """
-    out = [f"schema_version = {int(data.get('schema_version', 1))}", ""]
-    for key, value in data.items():
-        if key in {"schema_version", "pending"}:
-            continue
-        if isinstance(value, dict):
-            out.append(f"[{key}]")
-            out.extend(_render_table_body(value, ()))
-            out.append("")
-        elif isinstance(value, list) and all(isinstance(v, dict) for v in value):
-            for item in value:
-                out.append(render_entry(item, key))
-        else:
-            out.append(f"{key} = {_toml_value(value)}")
-            out.append("")
-    for entry in data.get("pending", []):
-        out.append(render_entry(entry))
-    return "\n".join(out)
+    document = dict(data)
+    document["schema_version"] = int(data.get("schema_version", 1))
+    document["pending"] = [_table_body(entry) for entry in data.get("pending", [])]
+    text = tomli_w.dumps(document)
+    tomllib.loads(text)
+    return text
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -247,7 +180,7 @@ def cmd_append(args: argparse.Namespace) -> int:
         valid = [e for e in new_entries if isinstance(e, dict) and not validate_entry(e)]
         if valid:
             sidecar.parent.mkdir(parents=True, exist_ok=True)
-            sidecar.write_text("".join(render_entry(e) + "\n" for e in valid), encoding="utf-8")
+            sidecar.write_text(render({"schema_version": 1, "pending": valid}), encoding="utf-8")
         print(
             json.dumps(
                 {
@@ -487,8 +420,7 @@ def cmd_veto_expired(args: argparse.Namespace) -> int:
     path = queue_path() if args.queue is None else Path(args.queue)
     data = load(path)
     today = _parse_date(args.today) or date.today()
-    expired, dismissed = [], []
-    changed = False
+    expired, dismissed, resolved = [], [], []
     for entry in data["pending"]:
         if entry.get("status") != "pending" or not entry.get("default_action"):
             continue
@@ -500,11 +432,21 @@ def cmd_veto_expired(args: argparse.Namespace) -> int:
             entry["resolved_at"] = today.isoformat()
             entry["last_surfaced"] = today.isoformat()
             entry["dismiss_reason"] = "default after veto window"
-            # An executed default is a resolution, and protocols/autoevo.md
-            # § Default after a veto window says every resolution lands in the
-            # ledger. The stale-banner path records one through `resolve_entry`;
-            # this path resolved in place and recorded nothing, so executed
-            # dismiss defaults were invisible to `decisions.py stats`.
+            dismissed.append(entry.get("id"))
+            resolved.append(entry)
+            continue
+        expired.append(
+            {
+                key: entry.get(key)
+                for key in (
+                    "id", "category", "default_action", "default_at", "proposed_at",
+                    "proposed_action", "evidence_summary", "peers",
+                )
+            }
+        )
+    if resolved:
+        atomic_write(path, render(data))
+        for entry in resolved:
             decisions.record_best_effort(
                 cls=f"autoevo/{entry.get('category')}",
                 subject=str(entry.get("id")),
@@ -516,51 +458,7 @@ def cmd_veto_expired(args: argparse.Namespace) -> int:
                 ts=f"{today.isoformat()}T00:00:00" if args.today else None,
                 path=Path(args.ledger) if args.ledger else None,
             )
-            dismissed.append(entry.get("id"))
-            changed = True
-            continue
-        expired.append(
-            {
-                key: entry.get(key)
-                for key in (
-                    "id", "category", "default_action", "default_at", "proposed_at",
-                    "proposed_action", "evidence_summary", "peers",
-                )
-            }
-        )
-    if changed:
-        atomic_write(path, render(data))
     print(json.dumps({"queue": str(path), "today": today.isoformat(), "expired": expired, "dismissed": dismissed}, sort_keys=True, default=str))
-    return 0
-
-
-def cmd_stamp_defaults(args: argparse.Namespace) -> int:
-    """Stamp defaults on pending entries queued before defaults existed.
-
-    The window starts today, not at proposed_at: the user never saw a
-    deadline on these, so they get the full veto period.
-    """
-    path = queue_path() if args.queue is None else Path(args.queue)
-    data = load(path)
-    today = _parse_date(args.today) or date.today()
-    stamped = []
-    for entry in data["pending"]:
-        if entry.get("status") != "pending" or entry.get("default_action"):
-            continue
-        action = default_for(entry)
-        if not action:
-            continue
-        stamped.append({"id": entry.get("id"), "default_action": action})
-        if args.dry_run:
-            continue
-        entry["default_action"] = action
-        entry["default_at"] = (today + timedelta(days=args.veto_days)).isoformat()
-    if stamped and not args.dry_run:
-        atomic_write(path, render(data))
-    payload = {"queue": str(path), "stamped": stamped, "default_at": (today + timedelta(days=args.veto_days)).isoformat()}
-    if args.dry_run:
-        payload["dry_run"] = True
-    print(json.dumps(payload, sort_keys=True))
     return 0
 
 
@@ -627,12 +525,6 @@ def main(argv: list[str] | None = None) -> int:
     p_veto.add_argument("--today", default=None)
     p_veto.add_argument("--apply-dismissals", action="store_true", help="Resolve expired `dismiss` defaults in place.")
     p_veto.set_defaults(func=cmd_veto_expired)
-
-    p_stamp = sub.add_parser("stamp-defaults")
-    p_stamp.add_argument("--today", default=None)
-    p_stamp.add_argument("--veto-days", type=int, default=DEFAULT_VETO_DAYS)
-    p_stamp.add_argument("--dry-run", action="store_true")
-    p_stamp.set_defaults(func=cmd_stamp_defaults)
 
     p_list = sub.add_parser("list")
     p_list.add_argument("--status", default=None)

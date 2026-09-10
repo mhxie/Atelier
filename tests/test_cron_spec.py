@@ -1,10 +1,4 @@
-"""Tests for scripts/cron_spec.py field parsing.
-
-Why this exists: routine_claim gates cycle selection on `is_evaluable` and
-`scheduled_dates`. Before these, a range (`1-5`), Sunday as `7`, or a month
-step all parsed as "evaluable" and then never matched, so the routine was
-skipped on every fire with `no-scheduled-occurrence-due` and nothing said why.
-"""
+"""Outcome tests for Prefect-backed routine cron evaluation."""
 
 from __future__ import annotations
 
@@ -12,65 +6,101 @@ import sys
 import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
+from unittest import mock
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import cron_spec as cs  # noqa: E402
 
-MON = date(2026, 8, 24)
-SUN = date(2026, 8, 30)
+
+class ScheduledDatesTests(unittest.TestCase):
+    def test_ranges_names_sunday_and_month_steps(self):
+        cases = (
+            ("0 9 * * mon-fri UTC", date(2026, 8, 24), date(2026, 8, 30), 5),
+            ("0 10 * * 7 UTC", date(2026, 8, 24), date(2026, 8, 30), 1),
+            ("0 9 1 */3 * UTC", date(2026, 1, 1), date(2026, 12, 31), 4),
+            ("0 9 1 mar * UTC", date(2026, 1, 1), date(2026, 12, 31), 1),
+        )
+        for cron, start, end, count in cases:
+            with self.subTest(cron=cron):
+                now = datetime.combine(end, datetime.max.time(), timezone.utc)
+                self.assertEqual(len(cs.scheduled_dates(cron, start, now)), count)
+
+    def test_prefect_day_of_month_and_week_use_or(self):
+        now = datetime(2026, 9, 1, 10, tzinfo=timezone.utc)
+        self.assertEqual(
+            cs.scheduled_dates("0 9 1 * 1 UTC", date(2026, 8, 31), now),
+            [date(2026, 8, 31), date(2026, 9, 1)],
+        )
+
+    def test_occurrence_at_now_is_included(self):
+        start = date(2026, 8, 31)
+        just_before = datetime(2026, 8, 31, 8, 59, tzinfo=timezone.utc)
+        on_time = datetime(2026, 8, 31, 9, 0, tzinfo=timezone.utc)
+        self.assertEqual(cs.scheduled_dates("0 9 * * * UTC", start, just_before), [])
+        self.assertEqual(cs.scheduled_dates("0 9 * * * UTC", start, on_time), [start])
+
+    def test_explicit_zone_defines_cycle_date(self):
+        start = date(2026, 8, 31)
+        now = datetime(2026, 9, 1, 0, 30, tzinfo=timezone.utc)
+        for zone, expected in (
+            ("UTC", [start, date(2026, 9, 1)]),
+            ("America/Los_Angeles", [start]),
+        ):
+            with self.subTest(zone=zone):
+                self.assertEqual(cs.scheduled_dates("0 0 * * *", start, now, zone), expected)
+        with mock.patch("tzlocal.get_localzone", return_value=ZoneInfo("America/Los_Angeles")):
+            self.assertEqual(cs.scheduled_dates("0 0 * * *", start, now, "local"), [start])
+
+    def test_explicit_zone_observes_spring_dst_cutoff(self):
+        start = date(2026, 3, 5)
+        before = datetime.fromisoformat("2026-03-08T15:30:00+00:00")
+        after = datetime.fromisoformat("2026-03-08T16:30:00+00:00")
+        expected = [date(2026, 3, day) for day in (5, 6, 7)]
+        self.assertEqual(cs.scheduled_dates("0 9 * * *", start, before, "America/Los_Angeles"), expected)
+        self.assertEqual(
+            cs.scheduled_dates("0 9 * * *", start, after, "America/Los_Angeles"),
+            [*expected, date(2026, 3, 8)],
+        )
+
+    def test_explicit_zone_observes_fall_dst_cutoff(self):
+        start = date(2026, 10, 29)
+        before = datetime.fromisoformat("2026-11-01T16:30:00+00:00")
+        after = datetime.fromisoformat("2026-11-01T17:30:00+00:00")
+        expected = [date(2026, 10, day) for day in (29, 30, 31)]
+        self.assertEqual(cs.scheduled_dates("0 9 * * *", start, before, "America/Los_Angeles"), expected)
+        self.assertEqual(
+            cs.scheduled_dates("0 9 * * *", start, after, "America/Los_Angeles"),
+            [*expected, date(2026, 11, 1)],
+        )
+
+    def test_invalid_declarations_have_no_dates_or_cadence(self):
+        now = datetime(2026, 8, 31, tzinfo=timezone.utc)
+        for cron in (
+            "0 9 32 * *",
+            "0 9 * 13 *",
+            "0 9 * * 8",
+            "0 9 */0 * *",
+            "0 9 r(1-7) * *",
+            "0 9 r/2 * *",
+            "0 9 h(1-7) * *",
+        ):
+            with self.subTest(cron=cron):
+                self.assertEqual(cs.scheduled_dates(cron, date(2026, 8, 1), now), [])
+                self.assertIsNone(cs.estimate_cadence_days(cron))
 
 
-class FieldValuesTests(unittest.TestCase):
-    def test_star_and_literals(self):
-        self.assertEqual(cs.field_values("*", 1, 3), {1, 2, 3})
-        self.assertEqual(cs.field_values("2,5", 1, 12), {2, 5})
-
-    def test_ranges_and_steps(self):
-        self.assertEqual(cs.field_values("1-5", 0, 7), {1, 2, 3, 4, 5})
-        self.assertEqual(cs.field_values("*/3", 1, 12), {1, 4, 7, 10})
-        self.assertEqual(cs.field_values("*/3", 0, 7), {0, 3, 6})
-        self.assertEqual(cs.field_values("1-10/4", 1, 31), {1, 5, 9})
-        self.assertEqual(cs.field_values("5/10", 1, 31), {5, 15, 25})
-
-    def test_invalid_fields_are_none_not_empty(self):
-        for field in ("x", "1-", "*/0", "0", "13", "5-2", "1-32", "a-b", "*/x"):
-            self.assertIsNone(cs.field_values(field, 1, 12 if field != "1-32" else 31), field)
-
-
-class MatchingTests(unittest.TestCase):
-    def test_weekday_range_matches_monday(self):
-        self.assertTrue(cs.matches_date("0 9 * * 1-5", MON))
-        self.assertFalse(cs.matches_date("0 9 * * 1-5", SUN))
-
-    def test_seven_is_sunday(self):
-        self.assertTrue(cs.matches_date("0 10 * * 7", SUN))
-        self.assertTrue(cs.matches_date("0 10 * * 0", SUN))
-        self.assertFalse(cs.matches_date("0 10 * * 7", MON))
-
-    def test_month_step_counts_from_january(self):
-        months = [m for m in range(1, 13) if cs.matches_date("0 9 1 */3 *", date(2026, m, 1))]
-        self.assertEqual(months, [1, 4, 7, 10])
-
-    def test_scheduled_dates_honours_ranges(self):
-        now = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
-        due = cs.scheduled_dates("0 9 * * 1-5 UTC", date(2026, 8, 24), now)
-        self.assertEqual([d.isoformat() for d in due], [
-            "2026-08-24", "2026-08-25", "2026-08-26", "2026-08-27", "2026-08-28",
-        ])
-
-
-class EvaluabilityTests(unittest.TestCase):
-    def test_valid_day_fields_are_evaluable(self):
-        for cron in ("0 9 * * 1-5", "0 10 * * 7", "0 9 1 */3 *", "0 13 * * 1 UTC (Mon)"):
-            self.assertTrue(cs.is_evaluable(cron), cron)
-
-    def test_unparseable_day_fields_fail_open(self):
-        """A typo must read as unevaluable, which routine_claim runs, not as never due."""
-        for cron in ("0 9 * * mon", "0 9 32 * *", "0 9 * 13 *", "0 9 * * 8", "0 9 */0 * *"):
-            self.assertFalse(cs.is_evaluable(cron), cron)
-            self.assertEqual(cs.scheduled_dates(cron, date(2026, 8, 1), datetime.now(timezone.utc)), [])
-
-    def test_cadence_for_month_step(self):
-        self.assertEqual(cs.estimate_cadence_days("0 9 1 */3 *"), 90)
-        self.assertEqual(cs.estimate_cadence_days("0 9 * * 1-5"), 7)
+class CadenceTests(unittest.TestCase):
+    def test_cadence_comes_from_occurrence_spacing(self):
+        cases = (
+            ("0 9 * * *", 1),
+            ("0 9 * * 1-5", 1),
+            ("0 9 * * 3", 7),
+            ("0 12 */3 * *", 3),
+            ("0 9 1 * *", 30),
+            ("0 9 15 2,5,8,11 *", 91),
+        )
+        for cron, expected in cases:
+            with self.subTest(cron=cron):
+                self.assertEqual(cs.estimate_cadence_days(cron), expected)

@@ -1,0 +1,24 @@
+version = 1
+
+# Repository-owned deterministic jobs. Private vault collectors use
+# `kind = "vault-script"` rows in `$OV/_meta/routine_watch.toml` instead.
+
+[[job]]
+name = "semantic-index"
+cron = ["30 7 * * *", "30 19 * * *"]
+timezone = "local"
+argv = ["uv", "run", "--offline", "--frozen", "scripts/semantic.py", "index"]
+timeout_seconds = 7200
+retry_safe = true
+retries = 1
+retry_delay_seconds = 300
+
+[[job]]
+name = "tracking-refresh"
+cron = ["30 5 * * *", "30 17 * * *"]
+timezone = "local"
+argv = ["{python}", "scripts/refresh_tracking.py", "--json"]
+timeout_seconds = 60
+retry_safe = true
+retries = 1
+retry_delay_seconds = 60

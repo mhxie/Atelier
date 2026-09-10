@@ -1,66 +1,98 @@
 #!/usr/bin/env python3
-"""Deterministic mechanics of /autoevo-nightly.
-
-The nightly command previously carried ~480 lines of inline bash the model
-re-read and re-executed every run. This script owns the mechanical steps;
-`.claude/commands/autoevo-nightly.md` keeps the judgment (dispatch, routing,
-Curator calls) and calls these subcommands:
-
-  identity        run identity: RUN_TS plus the validated RUN_DATE
-  plan            gates + path bindings + rotation + quarantine filter
-  outcome         record one dispatch outcome in the outcomes sidecar
-  route-bands     trust-band routing of Forgetter rows (thresholds live here)
-  tombstone-check both revert-tombstone layers for one candidate cluster
-  snapshot        all-or-nothing source snapshots + oldest-mtime target pick
-  verify-snapshot refuse an op whose sources changed since their snapshot
-  stage-merge     stage a merge op with the staged-set sanity check
-  archive-target  derive/validate the archive path for a low-signal op
-  merge-op        verify, write the merged body, stage, commit; roll back on failure
-  archive-op      verify, git mv, commit; roll back on failure
-  stale-op        verify, insert the stale banner, commit, resolve the queue entry
-  stale-banner    the banner insertion alone (idempotent)
-  finalize        quarantine update, skipped-line insertion, path-limited audit commit
-  rollback        restore one failed op's declared paths to pre-op state
-
-Every subcommand prints one JSON object. Errors exit 2 with {"error": ...}.
-Filenames (outcomes sidecar, snapshot slugs, quarantine files) are pinned by
-`scripts/autoevo_verify.py`; do not rename them here without updating the
-verifier and `tests/test_autoevo_run.py`.
-"""
+"""Prepare isolated Autoevo proposals and accept them through one trusted writer."""
 
 from __future__ import annotations
 
 import argparse
+from contextlib import redirect_stdout
+from datetime import date
+import hashlib
+import io
 import json
 import math
 import os
+from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
-import time
-from datetime import date
-from pathlib import Path, PurePosixPath
+import tempfile
+import tomllib
+import uuid
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write, tier, vault_root  # noqa: E402
-from _git import merge_state, run_git  # noqa: E402
-from autoevo_commit import archive_commit, audit_commit, cluster_hash, merge_commit, stale_commit  # noqa: E402
-from autoevo_preflight import (  # noqa: E402
-    autoevo_sidecar,
-    partition_dirty_scope,
-    _inside_worktree,
-    _status_entries,
-    autoevo_scope_prefixes,
-)
-from autoevo_quarantine import active_scopes  # noqa: E402
-import decay_scan  # noqa: E402
+from _git import git_paths, run_git
+from _paths import tier_segments
+import autoevo_commit as commits
+import autoevo_pending as pending
+import autoevo_preflight as preflight
+import autoevo_quarantine as quarantine
+import autoevo_verify as evidence
+import decay_scan
+import decisions
+import precedent
 
 ROOT = Path(__file__).resolve().parents[1]
-SESSION_LOCK_MAX_AGE_S = 21600
+WORKING_TIERS = ("wip", "research", "reflections")
+RESEARCH_EXCLUDED_SUBDIRS = ("cache", "images", "raw")
+TOMBSTONE_WINDOW = "90 days ago"
 
-# Trust-band thresholds: the single numeric source. protocols/autoevo.md
-# § Trust bands explains them and harness_lint checks that its table matches;
-# forgetter.md and autoevo-nightly.md point here instead of restating them.
+
+def _git(vault: Path, *args: str) -> subprocess.CompletedProcess:
+    return run_git(vault, *args, timeout=120)
+
+
+def _text(vault: Path, *args: str) -> str:
+    result = _git(vault, *args)
+    if result.returncode:
+        raise evidence.VerificationError(f"git {args[0]} failed: {result.stderr.strip()[:200]}")
+    return result.stdout.strip()
+
+
+def _segment(name: str) -> str:
+    return evidence.relative(tier_segments().get(name, name))
+
+
+def _prefixes(names: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(_segment(name) + "/" for name in names)
+
+
+def _protected(rel: str, paths: list[str]) -> bool:
+    return any(rel == path or path.endswith("/") and rel.startswith(path) for path in paths)
+
+
+def _file(vault: Path, rel: str) -> Path:
+    path = vault / evidence.relative(rel)
+    if path.resolve() != path.absolute() or path.is_symlink():
+        raise evidence.VerificationError(f"symlink path refused: {rel}")
+    if path.exists() and (not path.is_file() or path.stat().st_nlink != 1):
+        raise evidence.VerificationError(f"non-regular or hard-linked path refused: {rel}")
+    return path
+
+
+def _hash(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _assert_hashes(vault: Path, hashes: dict[str, str | None]) -> None:
+    for rel, expected in hashes.items():
+        if _hash(_file(vault, rel)) != expected:
+            raise evidence.VerificationError(f"source or decision state changed: {rel}")
+
+
+def _capture(function, *args, **kwargs) -> dict:
+    output = io.StringIO()
+    with redirect_stdout(output):
+        code = function(*args, **kwargs)
+    value = json.loads(output.getvalue())
+    if code or value.get("error") or value.get("invalid"):
+        raise evidence.VerificationError(str(value.get("error") or value.get("invalid") or "domain helper failed"))
+    return value
+
+
+def _pending(queue: Path, ledger: Path, *args: str) -> dict:
+    return _capture(pending.main, ["--queue", str(queue), "--ledger", str(ledger), *args])
+
+
 BAND_RULES = {
     "redundant-high": {
         "min_peers": 3,
@@ -87,539 +119,6 @@ def band_label(band: str) -> str:
         r = BAND_RULES[band]
         return f"low-signal-high (all {r['conditions']} Forgetter conditions + >{r['cold_days']}d cold)"
     return band
-RESEARCH_EXCLUDED_SUBDIRS = ("cache", "images", "raw")
-TOMBSTONE_WINDOW = "90 days ago"
-
-
-def _fail(message: str, code: int = 2) -> int:
-    print(json.dumps({"error": message}, ensure_ascii=False))
-    return code
-
-
-def _emit(payload: dict) -> int:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return 0
-
-
-def _emit_error(payload: dict, code: int = 2) -> int:
-    """An op that failed after side effects: report what was rolled back, exit 2."""
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    return code
-
-
-def _git(vault: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return run_git(vault, *args, timeout=60)
-
-
-def _path_slug(rel: str) -> str:
-    """wip/foo.md -> wip-foo (collision-safe across same-basename notes)."""
-    slug = rel[:-3] if rel.endswith(".md") else rel
-    return slug.replace("/", "-")
-
-
-def _snapshot_path(cache: Path, run_ts: str, rel: str) -> Path:
-    return cache / f"autoevo-{run_ts}-{_path_slug(rel)}.md"
-
-
-# --- plan -------------------------------------------------------------------
-
-
-def _gate_blockers(vault: Path, cache: Path, now: float) -> list[dict[str, str]]:
-    blockers: list[dict[str, str]] = []
-
-    lock = cache / "atelier-session-lock"
-    if lock.exists():
-        age = max(0, int(now - lock.stat().st_mtime))
-        if age < SESSION_LOCK_MAX_AGE_S:
-            blockers.append(
-                {
-                    "gate": "session_lock_fresh",
-                    "detail": f"session-active lock fresh (age {age}s < {SESSION_LOCK_MAX_AGE_S}s)",
-                }
-            )
-
-    if not _inside_worktree(vault):
-        blockers.append(
-            {
-                "gate": "git_not_worktree",
-                "detail": "$OV is not a git work tree (no recovery surface)",
-            }
-        )
-        return blockers  # index/status checks are meaningless without a repo
-
-    index = _git(vault, "rev-parse", "--git-path", "index").stdout.strip()
-    index_path = Path(index) if index.startswith("/") else vault / index
-    lock_path = index_path.with_name(index_path.name + ".lock")
-    if not index_path.is_file():
-        blockers.append(
-            {
-                "gate": "git_index_missing",
-                "detail": "Git index missing; refuse status-based classification",
-            }
-        )
-    if lock_path.exists():
-        blockers.append(
-            {
-                "gate": "git_index_lock_present",
-                "detail": "Git index.lock present; never delete or replace it",
-            }
-        )
-    in_progress = merge_state(vault)
-    if in_progress:
-        blockers.append(
-            {
-                "gate": "git_operation_in_progress",
-                "detail": (
-                    f"Git operation in progress ({', '.join(in_progress)}); a bot commit "
-                    "would complete the user's merge, rebase, cherry-pick, or bisect"
-                ),
-            }
-        )
-    if blockers and blockers[-1]["gate"] in {
-        "git_index_missing", "git_index_lock_present", "git_operation_in_progress",
-    }:
-        return blockers
-
-    prefixes = autoevo_scope_prefixes(vault)
-    blocking, _protected = partition_dirty_scope(
-        [path for _, path in _status_entries(vault)], prefixes
-    )
-    if blocking:
-        blockers.append(
-            {
-                "gate": "dirty_autoevo_state",
-                "detail": (
-                    f"{len(blocking)} Git status entries in autoevo state "
-                    "(_meta/autoevo_*.toml); the queue condition is unknown"
-                ),
-            }
-        )
-
-    zettelm = vault / "zettelm"
-    if zettelm.is_dir():
-        zm = _git(zettelm, "status", "--porcelain")
-        entries = [line for line in zm.stdout.splitlines() if line.strip()]
-        if zm.returncode == 0 and entries:
-            blockers.append(
-                {
-                    "gate": "zettelm_dirty",
-                    "detail": f"dirty zettelm submodule ({len(entries)} entries)",
-                }
-            )
-
-    privacy = subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "privacy_check.py"), "--json"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        timeout=300,
-        check=False,
-    )
-    try:
-        doc = json.loads(privacy.stdout)
-    except json.JSONDecodeError:
-        blockers.append(
-            {
-                "gate": "privacy_gate_error",
-                "detail": f"privacy_check emitted no JSON: {privacy.stderr.strip()[:160]}",
-            }
-        )
-    else:
-        hits = doc.get("hit_count", len(doc.get("hits", [])))
-        if not doc.get("zk_missing") and not doc.get("vacuous_gate") and hits:
-            blockers.append(
-                {
-                    "gate": "privacy_hits",
-                    "detail": f"privacy_check found {hits} hits",
-                }
-            )
-    return blockers
-
-
-def cmd_plan(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    run_date = date.fromisoformat(args.run_date)
-    cache, archive, findings = tier("cache"), tier("archive"), tier("agent_findings")
-    findings_rel = str(findings.relative_to(vault))
-
-    blockers = _gate_blockers(vault, cache, time.time())
-    payload: dict = {
-        "run_ts": args.run_ts,
-        "run_date": args.run_date,
-        "paths": {
-            "cache": str(cache),
-            "archive": str(archive),
-            "findings": str(findings),
-            "findings_rel": findings_rel,
-            "audit_rel": f"{findings_rel}/autoevo-applied-{args.run_date}.md",
-            "quarantine_state": str(vault / "_meta" / "autoevo_quarantine.toml"),
-        },
-    }
-    if blockers:
-        payload["gate"] = {"status": "blocked", "blockers": blockers}
-        return _emit(payload)
-    payload["gate"] = {"status": "ready", "blockers": []}
-
-    quarantined = set(
-        active_scopes(
-            state_path=vault / "_meta" / "autoevo_quarantine.toml", today=run_date
-        )
-    )
-    notes: list[str] = []
-    skipped_lines: list[str] = []
-
-    research_dir = tier("research")
-    subdirs = []
-    if research_dir.is_dir():
-        for child in sorted(research_dir.iterdir()):
-            if not child.is_dir():
-                continue
-            if child.name.startswith(".") or child.name in RESEARCH_EXCLUDED_SUBDIRS:
-                continue
-            subdirs.append(str(child))
-    live_subdirs = []
-    for scope in subdirs:
-        if scope in quarantined:
-            skipped_lines.append(
-                f"scope_quarantined: scope={scope} (research-tier rotation)"
-            )
-        else:
-            live_subdirs.append(scope)
-
-    research_tonight = ""
-    if not subdirs:
-        notes.append(f"research_rotation_empty: no eligible subdirs in {research_dir}")
-    elif not live_subdirs:
-        notes.append("research_all_quarantined")
-    else:
-        dom = run_date.day
-        research_tonight = live_subdirs[(dom - 1) % len(live_subdirs)]
-        notes.append(
-            f"research rotation: night {dom} -> {Path(research_tonight).name} "
-            f"(of {len(live_subdirs)} live subdirs; full sweep every {len(live_subdirs)} nights)"
-        )
-
-    dispatches = []
-    for scope, slug, cap in (
-        (str(tier("wip")), "wip", 12),
-        (research_tonight, Path(research_tonight).name if research_tonight else "", 15),
-        (str(tier("reflections")), "reflections", 12),
-    ):
-        if not scope:
-            continue
-        if scope in quarantined:
-            label = "wip" if slug == "wip" else "reflections" if slug == "reflections" else slug
-            skipped_lines.append(f"scope_quarantined: scope={scope} ({label})")
-            continue
-        dispatches.append(
-            {
-                "scope": scope,
-                "slug": slug,
-                "max_candidates": cap,
-                "time_budget_s": 240,
-            }
-        )
-
-    outcomes_file = autoevo_sidecar(cache, args.run_ts, "outcomes")
-    outcomes_file.write_text("{}", encoding="utf-8")
-    skipped_file = autoevo_sidecar(cache, args.run_ts, "quarantine-skipped")
-    skipped_file.write_text(
-        "".join(line + "\n" for line in skipped_lines), encoding="utf-8"
-    )
-
-    _, protected = partition_dirty_scope(
-        [path for _, path in _status_entries(vault)], autoevo_scope_prefixes(vault)
-    )
-    protected_file = autoevo_sidecar(cache, args.run_ts, "protected")
-    protected_file.write_text(
-        "".join(line + "\n" for line in protected), encoding="utf-8"
-    )
-    if protected:
-        notes.append(
-            f"protected_dirty: {len(protected)} in-scope paths carry uncommitted "
-            "user edits and are untouchable this run"
-        )
-
-    payload.update(
-        {
-            "protected_paths": protected,
-            "protected_file": str(protected_file),
-            "dispatches": dispatches,
-            "quarantine_skipped": skipped_lines,
-            "quarantine_skipped_file": str(skipped_file),
-            "outcomes_file": str(outcomes_file),
-            "notes": notes,
-        }
-    )
-    return _emit(payload)
-
-
-# --- outcome ----------------------------------------------------------------
-
-
-def cmd_outcome(args: argparse.Namespace) -> int:
-    path = Path(args.file)
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return _fail(f"cannot read outcomes sidecar: {exc}")
-    if args.result not in {"envelope_returned", "forgetter_no_envelope"}:
-        return _fail(f"invalid outcome: {args.result}")
-    data[args.scope.rstrip("/")] = args.result
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(path)
-    return _emit({"recorded": args.scope.rstrip("/"), "result": args.result})
-
-
-# --- tombstone-check --------------------------------------------------------
-
-
-_AUTOEVO_SUBJECT = re.compile(r"^\[autoevo:([a-zA-Z0-9-]+)\]")
-_REVERTS_SHA = re.compile(r"^This reverts commit ([0-9a-f]{7,40})", re.MULTILINE)
-_QUEUE_ENTRY = re.compile(r"^Queue entry: (\S+)", re.MULTILINE)
-
-
-def cmd_record_undos(args: argparse.Namespace) -> int:
-    """Turn `git revert` of an autoevo op into a human `undo` line in the ledger.
-
-    The stale banner tells the user to `git revert` the marked commit, and
-    protocols/decision-ledger.md promises the judge learns from its own misses.
-    It could not: a revert wrote nothing to the ledger, so the loudest possible
-    signal - the judge acted and the human undid it - was the one outcome
-    `precedent_stats` never saw. This closes that loop using the walk the
-    tombstone check already relies on.
-
-    Idempotent: a subject that already carries an `undo` line is skipped, so the
-    nightly can run this every cycle.
-    """
-    import decisions
-
-    vault = vault_root()
-    ledger = Path(args.ledger) if args.ledger else None
-    existing = {
-        (str(r.get("class")), str(r.get("subject")))
-        for r in decisions.load(ledger)
-        if r.get("verdict") == "undo"
-    }
-    today = date.fromisoformat(args.today) if args.today else date.today()
-    recorded, skipped = [], []
-    log = _git(vault, "log", f"--since={args.since}", '--grep=^Revert "', "--format=%H").stdout.split()
-    for sha in log:
-        body = _git(vault, "show", "-s", "--format=%B", sha).stdout
-        match = _REVERTS_SHA.search(body)
-        if not match:
-            continue
-        original = _git(vault, "show", "-s", "--format=%B", match.group(1)).stdout
-        subject = _AUTOEVO_SUBJECT.match(original.strip())
-        entry = _QUEUE_ENTRY.search(original)
-        if not subject or not entry:
-            continue
-        cls, subj = f"autoevo/{subject.group(1)}", entry.group(1)
-        if (cls, subj) in existing:
-            skipped.append(subj)
-            continue
-        decisions.record_best_effort(
-            cls=cls, subject=subj, verdict="undo",
-            reason=f"user reverted the autoevo commit ({sha[:7]})",
-            features={}, source="revert-scan", by="human",
-            ts=f"{today.isoformat()}T00:00:00" if args.today else None, path=ledger,
-        )
-        existing.add((cls, subj))
-        recorded.append(subj)
-    return _emit({"recorded": recorded, "already_recorded": skipped, "since": args.since})
-
-
-def cmd_tombstone_check(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    chash = cluster_hash(args.source)
-    today = date.fromisoformat(args.today)
-
-    # Layer A: a prior [autoevo:*] commit for this cluster that the user
-    # reverted. `git revert` records the FULL original sha in the revert
-    # body, so match against %B, not the subject line.
-    shas = _git(
-        vault, "log", f"--since={TOMBSTONE_WINDOW}", "--grep=^\\[autoevo:", "--format=%H"
-    ).stdout.split()
-    for sha in shas:
-        body = _git(vault, "show", "-s", "--format=%b", sha).stdout
-        original = next(
-            (
-                line.split(":", 1)[1].strip()
-                for line in body.splitlines()
-                if line.startswith("cluster_hash:")
-            ),
-            "",
-        )
-        if original != chash:
-            continue
-        reverts = _git(
-            vault,
-            "log",
-            f"--since={TOMBSTONE_WINDOW}",
-            '--grep=^Revert "',
-            "--format=%H %B",
-        ).stdout
-        if sha in reverts:
-            short = _git(vault, "rev-parse", "--short=7", sha).stdout.strip()
-            return _emit(
-                {
-                    "skip": True,
-                    "cluster_hash": chash,
-                    "reason": f"tombstoned cluster - user reverted {short}",
-                }
-            )
-
-    # Layer B: explicit TOML tombstones.
-    tomb_file = vault / "_meta" / "autoevo_tombstones.toml"
-    if tomb_file.is_file():
-        import tomllib
-
-        try:
-            data = tomllib.loads(tomb_file.read_text(encoding="utf-8"))
-        except (OSError, tomllib.TOMLDecodeError) as exc:
-            return _fail(f"cannot read tombstones: {exc}")
-        for entry in data.get("tombstone", []):
-            if entry.get("cluster_hash") != chash:
-                continue
-            expires = str(entry.get("expires_at", "") or "")
-            if expires and expires < today.isoformat():
-                continue
-            return _emit(
-                {
-                    "skip": True,
-                    "cluster_hash": chash,
-                    "reason": f"explicit tombstone: {entry.get('reason', 'no reason given')}",
-                }
-            )
-    return _emit({"skip": False, "cluster_hash": chash})
-
-
-# --- snapshot ---------------------------------------------------------------
-
-
-def cmd_snapshot(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    cache = tier("cache")
-    snapshots: list[str] = []
-    stats: list[tuple[float, str]] = []
-    for rel in args.source:
-        src = vault / rel
-        if not src.is_file():
-            return _fail(f"source missing on disk: {rel}")
-        snap = _snapshot_path(cache, args.run_ts, rel)
-        try:
-            snap.write_bytes(src.read_bytes())
-        except OSError as exc:
-            return _fail(f"snapshot failed for {rel}: {exc}")
-        snapshots.append(str(snap))
-        stats.append((src.stat().st_mtime, rel))
-    # Oldest mtime wins the surviving slug (preserves inbound wikilinks).
-    target_rel = min(stats)[1] if stats else ""
-    return _emit({"snapshots": snapshots, "target_rel": target_rel})
-
-
-# --- stage-merge ------------------------------------------------------------
-
-
-def cmd_stage_merge(args: argparse.Namespace) -> int:
-    result = stage_merge(vault_root(), args.target, list(args.source))
-    return _fail(result["error"]) if "error" in result else _emit(result)
-
-
-# --- archive-target ---------------------------------------------------------
-
-
-def cmd_archive_target(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    archive_rel = str(tier("archive").relative_to(vault))
-    target_rel = f"{archive_rel}/decayed/{args.run_date}-{_path_slug(args.source)}.md"
-    if (vault / target_rel).exists():
-        return _fail(f"archive target exists: {target_rel}")
-    (vault / archive_rel / "decayed").mkdir(parents=True, exist_ok=True)
-    return _emit({"target_rel": target_rel})
-
-
-# --- stale banner (time-stale-A default) ----------------------------------
-
-STALE_BANNER_TIERS = ("wip", "research")
-
-
-def _stale_banner_prefixes(vault: Path) -> tuple[str, ...]:
-    return tuple(f"{tier(name).relative_to(vault)}/" for name in STALE_BANNER_TIERS)
-
-
-def stale_banner_text(run_date: str, entry_id: str, phrase: str) -> str:
-    phrase = " ".join(str(phrase).split()).replace('"', "'")
-    return (
-        f'> Stale since {run_date} (autoevo {entry_id}): "{phrase}" passed with no '
-        "closure found; the veto window closed. `git revert` the marked commit to undo.\n"
-    )
-
-
-def insert_stale_banner(text: str, banner: str) -> str:
-    """Place the banner after frontmatter and a leading H1, else at the top."""
-    lines = text.splitlines(keepends=True)
-    index = 0
-    if lines and lines[0].strip() == "---":
-        for i in range(1, len(lines)):
-            if lines[i].strip() == "---":
-                index = i + 1
-                break
-    while index < len(lines) and not lines[index].strip():
-        index += 1
-    if index < len(lines) and lines[index].startswith("# "):
-        index += 1
-    head, tail = lines[:index], lines[index:]
-    if head and not head[-1].endswith("\n"):
-        head[-1] += "\n"
-    block = banner if not tail or tail[0].strip() == "" else banner + "\n"
-    if head and head[-1].strip():
-        block = "\n" + block
-    return "".join(head) + block + "".join(tail)
-
-
-def cmd_stale_banner(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    rel = _norm_rel(args.source)
-    if not rel.startswith(_stale_banner_prefixes(vault)):
-        return _fail(f"stale-banner refused outside {'/'.join(STALE_BANNER_TIERS)}: {rel}")
-    path = vault / rel
-    if not path.is_file():
-        return _fail(f"source missing: {rel}")
-    text = path.read_text(encoding="utf-8")
-    marker = f"(autoevo {args.entry_id})"
-    if marker in text:
-        return _emit({"changed": False, "reason": "banner already present", "source": rel})
-    updated = insert_stale_banner(text, stale_banner_text(args.run_date, args.entry_id, args.phrase))
-    path.write_text(updated, encoding="utf-8")
-    return _emit({"changed": True, "source": rel, "bytes_added": len(updated) - len(text)})
-
-
-# --- identity ---------------------------------------------------------------
-
-
-def cmd_identity(args: argparse.Namespace) -> int:
-    """RUN_TS plus the RUN_DATE an unattended cycle is allowed to claim."""
-    run_ts = time.strftime("%Y%m%d-%H%M%S")
-    profile = os.environ.get("ATELIER_ROUTINE_PROFILE", "").strip()
-    cycle = os.environ.get("ATELIER_ROUTINE_CYCLE", "").strip()
-    if profile and not cycle:
-        return _fail("unattended invocation omitted ATELIER_ROUTINE_CYCLE")
-    if cycle:
-        from routine_claim import validate_cycle_id
-
-        try:
-            run_date = validate_cycle_id(cycle)
-        except (ValueError, SystemExit) as exc:
-            return _fail(f"invalid ATELIER_ROUTINE_CYCLE: {exc}")
-    else:
-        run_date = date.today().isoformat()
-    return _emit({"run_ts": run_ts, "run_date": run_date, "unattended": bool(profile)})
-
-
-# --- route-bands ------------------------------------------------------------
-
 
 def _age_days(vault: Path, rel: str, today: date) -> int | None:
     path = vault / rel
@@ -643,7 +142,7 @@ def _norm_rel(rel: str) -> str:
 
 
 def _under_tiers(vault: Path, rel: str, tiers: tuple[str, ...]) -> bool:
-    prefixes = tuple(f"{tier(name).relative_to(vault)}/" for name in tiers)
+    prefixes = _prefixes(tiers)
     return _norm_rel(rel).startswith(prefixes)
 
 
@@ -676,6 +175,10 @@ def route_row(vault: Path, row: dict, today: date) -> tuple[str, str, str]:
             scores.append(score)
         if not candidate or not peers:
             return "invalid", category, "redundant row needs candidate and peers"
+        if row.get("mode") == "qmd":
+            if len(set(peers) - {candidate}) < rule["min_peers"]:
+                return "invalid", category, "QMD candidate needs three distinct non-self peers"
+            return "pending", "redundant", "QMD scores are uncalibrated; content review and human approval required"
         failures = []
         if confidence != "high":
             failures.append(f"confidence {confidence}")
@@ -732,366 +235,501 @@ def route_row(vault: Path, row: dict, today: date) -> tuple[str, str, str]:
     return "invalid", category or "(none)", "unknown category"
 
 
-def cmd_route_bands(args: argparse.Namespace) -> int:
-    vault = vault_root()
-    today = date.fromisoformat(args.today)
-    try:
-        rows = json.loads(Path(args.findings).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        return _fail(f"cannot read findings: {exc}")
-    if not isinstance(rows, list):
-        return _fail("findings must be a JSON list of rows")
-    buckets: dict[str, list[dict]] = {"auto_apply": [], "pending": [], "probe": [], "invalid": []}
-    for index, row in enumerate(rows):
-        if not isinstance(row, dict):
-            buckets["invalid"].append({"index": index, "reason": "row is not an object"})
-            continue
-        bucket, band, reason = route_row(vault, row, today)
-        entry = dict(row)
-        entry.update({"index": index, "band": band, "route_reason": reason})
-        if bucket == "auto_apply":
-            entry["band_label"] = band_label(band)
-        buckets[bucket].append(entry)
-    return _emit({"today": args.today, "rules": BAND_RULES, **buckets})
+
+def stale_banner_text(run_date: str, entry_id: str, phrase: str) -> str:
+    phrase = " ".join(str(phrase).split()).replace('"', "'")
+    return (
+        f'> Stale since {run_date} (autoevo {entry_id}): "{phrase}" passed with no '
+        "closure found; the veto window closed. `git revert` the marked commit to undo.\n"
+    )
 
 
-# --- verify-snapshot + ops ---------------------------------------------------
+def insert_stale_banner(text: str, banner: str) -> str:
+    """Place the banner after frontmatter and a leading H1, else at the top."""
+    lines = text.splitlines(keepends=True)
+    index = 0
+    if lines and lines[0].strip() == "---":
+        for i in range(1, len(lines)):
+            if lines[i].strip() == "---":
+                index = i + 1
+                break
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    if index < len(lines) and lines[index].startswith("# "):
+        index += 1
+    head, tail = lines[:index], lines[index:]
+    if head and not head[-1].endswith("\n"):
+        head[-1] += "\n"
+    block = banner if not tail or tail[0].strip() == "" else banner + "\n"
+    if head and head[-1].strip():
+        block = "\n" + block
+    return "".join(head) + block + "".join(tail)
 
 
-def snapshot_mismatch(vault: Path, cache: Path, run_ts: str, rel: str) -> str | None:
-    """Why the on-disk file no longer matches its step-4.1 snapshot, or None."""
-    snap = _snapshot_path(cache, run_ts, rel)
-    src = vault / rel
-    if not snap.is_file():
-        return f"no snapshot for {rel} (run 4.1 first)"
-    if not src.is_file():
-        return f"{rel} vanished since its snapshot"
-    if snap.read_bytes() != src.read_bytes():
-        return f"{rel} changed since its snapshot (user edit mid-run); refusing to touch it"
+
+def tombstone_reason(vault: Path, sources: list[str], today: date) -> str | None:
+    cluster = commits.cluster_hash(sources)
+    reverts = _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", '--grep=^Revert "', "--format=%B")
+    for sha in _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", "--grep=^\\[autoevo:", "--format=%H").split():
+        if sha in reverts and f"cluster_hash: {cluster}" in _text(vault, "show", "-s", "--format=%B", sha):
+            return f"user reverted cluster {cluster}"
+    path = _file(vault, f"{_segment('meta')}/autoevo_tombstones.toml")
+    if path.is_file():
+        for row in tomllib.loads(path.read_text()).get("tombstone", []):
+            if row.get("cluster_hash") == cluster and (not row.get("expires_at") or str(row["expires_at"]) >= today.isoformat()):
+                return f"explicit tombstone: {row.get('reason', cluster)}"
     return None
 
 
-def cmd_verify_snapshot(args: argparse.Namespace) -> int:
-    vault, cache = vault_root(), tier("cache")
-    for rel in args.source:
-        problem = snapshot_mismatch(vault, cache, args.run_ts, rel)
-        if problem:
-            return _fail(problem)
-    return _emit({"verified": list(args.source)})
-
-
-def _rollback(vault: Path, cache: Path, run_ts: str, paths: list[str], sources: list[str]) -> dict:
-    _git(vault, "restore", "--staged", "--", *paths)
-    restored, removed, recovered = [], [], []
-    for rel in paths:
-        if _git(vault, "cat-file", "-e", f"HEAD:{rel}").returncode == 0:
-            _git(vault, "restore", "--worktree", "--", rel)
-            restored.append(rel)
-        elif (vault / rel).is_file():
-            (vault / rel).unlink()
-            removed.append(rel)
-    for rel in sources:
-        if (vault / rel).is_file():
+def record_undos(vault: Path, ledger: Path, today: date) -> None:
+    existing = {(row.get("class"), row.get("subject")) for row in decisions.load(ledger) if row.get("verdict") == "undo"}
+    for sha in _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", '--grep=^Revert "', "--format=%H").split():
+        match = re.search(r"^This reverts commit ([0-9a-f]{7,40})", _text(vault, "show", "-s", "--format=%B", sha), re.MULTILINE)
+        if not match:
             continue
-        snap = _snapshot_path(cache, run_ts, rel)
-        if snap.is_file():
-            (vault / rel).write_bytes(snap.read_bytes())
-            recovered.append(rel)
-    return {"restored": restored, "removed": removed, "recovered_from_snapshot": recovered}
+        original = _text(vault, "show", "-s", "--format=%B", match.group(1))
+        category = re.match(r"^\[autoevo:([a-zA-Z0-9-]+)\]", original)
+        entry = re.search(r"^Queue entry: (\S+)", original, re.MULTILINE)
+        if category and entry and (f"autoevo/{category.group(1)}", entry.group(1)) not in existing:
+            decisions.record_best_effort(cls=f"autoevo/{category.group(1)}", subject=entry.group(1), verdict="undo",
+                reason=f"user reverted the autoevo commit ({sha[:7]})", features={}, source="revert-scan", by="human",
+                ts=f"{today.isoformat()}T00:00:00", path=ledger)
+            existing.add((f"autoevo/{category.group(1)}", entry.group(1)))
 
 
-def stage_merge(vault: Path, target: str, sources: list[str]) -> dict:
-    added = _git(vault, "add", "--", target)
-    if added.returncode != 0:
-        return {"error": f"git add failed: {added.stderr.strip()}"}
-    for rel in sources:
-        if rel == target:
+def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict) -> dict:
+    """Snapshot eligible clean sources; the parent retains this plan, not the model."""
+    today = date.fromisoformat(cycle)
+    meta = _segment("meta")
+    state_files = [f"{meta}/{name}" for name in ("autoevo_pending.toml", "autoevo_quarantine.toml", "autoevo_tombstones.toml", "decisions.jsonl")]
+    state_hashes = {rel: _hash(_file(vault, rel)) for rel in state_files}
+    quarantined = set(quarantine.active_scopes(state_path=vault / state_files[1], today=today))
+    research = vault / _segment("research")
+    children = sorted(path for path in research.iterdir() if path.is_dir() and not path.is_symlink()
+                      and not path.name.startswith(".") and path.name not in RESEARCH_EXCLUDED_SUBDIRS) if research.is_dir() else []
+    live = [path for path in children if str(path) not in quarantined]
+    selected = live[(today.day - 1) % len(live)] if live else None
+    scopes = [vault / _segment("wip"), *([selected] if selected else []), vault / _segment("reflections")]
+    skipped = [f"scope_quarantined: {path.relative_to(vault)}" for path in children if str(path) in quarantined]
+    dispatches = []
+    for path in scopes:
+        rel = evidence.relative(path.relative_to(vault).as_posix())
+        if str(path) in quarantined:
+            skipped.append(f"scope_quarantined: {rel}")
+        else:
+            dispatches.append({"scope": rel, "max_candidates": 15 if path == selected else 12, "time_budget_s": 240})
+    defaults = [row for row in pending.load(vault / state_files[0])["pending"]
+                if row.get("status") == "pending" and row.get("default_action")
+                and pending._parse_date(row.get("default_at")) is not None
+                and pending._parse_date(row["default_at"]) <= today]
+    protected = list(readiness.get("health", {}).get("protected_paths", []))
+    tracked = set(git_paths(vault, "ls-files"))
+    candidates = {rel for rel in tracked if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
+    candidates.update(peer for row in defaults for peer in row.get("peers", []) if isinstance(peer, str))
+    snapshots = workspace / "sources"
+    sources = {}
+    for rel in sorted(candidates):
+        if rel not in tracked or _protected(rel, protected) or not rel.startswith(_prefixes(WORKING_TIERS)):
             continue
-        removed = _git(vault, "rm", "--", rel)
-        if removed.returncode != 0:
-            return {"error": f"git rm failed for {rel}: {removed.stderr.strip()}"}
-    staged = set(_git(vault, "diff", "--cached", "--name-only").stdout.splitlines())
-    expected = set(sources) | {target}
-    if staged != expected:
-        _git(vault, "restore", "--staged", "--", *sorted(expected))
-        return {"error": f"staged paths diverged from expected: staged={sorted(staged)} expected={sorted(expected)}"}
-    return {"staged": sorted(staged)}
+        source = _file(vault, rel)
+        if not source.is_file():
+            continue
+        before = source.stat()
+        content = source.read_bytes()
+        destination = snapshots / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(content)
+        shutil.copystat(source, destination)
+        if source.stat() != before:
+            raise evidence.VerificationError(f"source changed while snapshotting: {rel}")
+        sources[rel] = {"before_sha256": hashlib.sha256(content).hexdigest(), "mtime_ns": before.st_mtime_ns,
+                        "mode": before.st_mode & 0o777, "snapshot": str(destination)}
+    _assert_hashes(vault, state_hashes)
+    return {"schema_version": evidence.VERSION, "cycle_id": cycle, "run_id": f"{today:%Y%m%d}-{uuid.uuid4().hex[:12]}",
+            "base_head": _text(vault, "rev-parse", "HEAD"), "dispatches": dispatches, "quarantine_skipped": skipped,
+            "retrieval_mode": readiness.get("health", {}).get("semantic_mode", "unavailable"),
+            "protected_paths": protected, "source_files": sources, "state_files": state_hashes, "defaults": defaults,
+            "notes": [] if selected else ["research_rotation_empty: no eligible research subdirectory"]}
 
 
-def cmd_merge_op(args: argparse.Namespace) -> int:
-    """Redundant auto-merge, end to end, after Curator returned auto_apply_safe."""
-    vault, cache = vault_root(), tier("cache")
-    sources = list(args.source)
-    if args.target not in sources:
-        return _fail("target must be one of the sources (the surviving slug)")
+def _curator_problem(row: dict, plan: dict, vault: Path, band: str) -> str | None:
+    curator = row.get("curator", {})
+    if curator.get("completion_status") != "complete" or curator.get("auto_apply_safe") is not True:
+        return "Curator did not return a complete safe proposal"
+    if curator.get("mode") != "auto-apply" or curator.get("band") != band or curator.get("remaining_work") or curator.get("gaps"):
+        return "Curator mode, band, or remaining work disagrees with the operation"
+    sources = sorted(set([row["candidate"], *row.get("peers", [])])) if band == "redundant-high" else [row["candidate"]]
+    if any(rel not in plan["source_files"] for rel in sources):
+        return "a source was not in the trusted clean snapshot"
+    if curator.get("snapshot_paths") != [plan["source_files"][rel]["snapshot"] for rel in sources]:
+        return "Curator did not use the exact trusted snapshots"
+    if tombstone_reason(vault, sources, date.fromisoformat(plan["cycle_id"])):
+        return "cluster is tombstoned"
+    if band == "redundant-high":
+        if curator.get("operation") not in {"compact", "merge"}:
+            return "Curator operation is not a merge"
+        target = min(sources, key=lambda rel: (plan["source_files"][rel]["mtime_ns"], rel))
+        if curator.get("target_path") != target:
+            return "merge target is not the oldest source"
+        body = curator.get("proposed_content")
+        integrity = curator.get("content_integrity", {})
+        if not isinstance(body, str) or not body.strip() or len(body.encode()) > 15_000:
+            return "merge body is empty or needs splitting"
+        if any(integrity.get(key) is not True for key in ("verbatim_preserved", "structures_preserved", "images_preserved", "checklist_passed")):
+            return "Curator content-preservation evidence is incomplete"
+        if curator.get("media_inventory") != curator.get("media_output_count") or not isinstance(curator.get("media_inventory"), dict):
+            return "Curator media inventory does not match"
+        for rel in sources:
+            original = _file(vault, rel).read_text(encoding="utf-8")
+            if any(line.strip() and line not in body for line in original.splitlines()):
+                return "a source line is absent from the merge"
+    elif (curator.get("operation") != "archive" or curator.get("source_path") != sources[0]
+          or curator.get("proposed_content") != _file(vault, sources[0]).read_bytes().decode("utf-8")):
+        return "Curator archive does not preserve the original source"
+    return None
+
+
+def route_proposal(vault: Path, proposal: dict, plan: dict) -> tuple[list[dict], list[dict], list[str]]:
+    auto, queued, notes = [], [], []
+    today = date.fromisoformat(plan["cycle_id"])
+    for sweep in proposal["sweeps"]:
+        for row in sweep["findings"]:
+            subject = row.get("contradicting_peer", "") if row["category"] == "contradicted" else row["candidate"]
+            if not subject.startswith(sweep["scope"] + "/") or _protected(row["candidate"], plan["protected_paths"]):
+                notes.append(f"out-of-scope or protected finding skipped: {row['candidate']}")
+                continue
+            bucket, band, reason = route_row(vault, row, today)
+            if row["category"] == "redundant" and bucket == "auto_apply" and plan["retrieval_mode"] != "real":
+                bucket, band, reason = "pending", "redundant", "trusted retrieval mode is not calibrated; model scores cannot authorize a merge"
+            if bucket == "invalid":
+                notes.append(f"route_invalid: {row['candidate']}: {reason}")
+                continue
+            if bucket == "probe":
+                probe = row.get("probe", {})
+                if probe.get("completion_status") == "complete" and not probe.get("remaining_work") and not probe.get("gaps") and probe.get("verdict") == "rhetorical":
+                    notes.append(f"rhetorical contradiction: {probe.get('rationale', '')}")
+                    continue
+            if bucket == "auto_apply":
+                problem = _curator_problem(row, plan, vault, band)
+                if not problem:
+                    auto.append({"row": row, "band": band})
+                    continue
+                reason = problem
+            peers = sorted(set([row["candidate"], *row.get("peers", [])]))
+            entry_id = f"{plan['run_id']}-{evidence.digest([row['category'], peers])[:12]}"
+            queued.append({"id": entry_id, "category": row["category"], "peers": peers,
+                           "proposed_action": row["proposed_action"], "evidence_summary": f"{row['evidence']}; {reason}",
+                           "proposed_at": plan["cycle_id"], "last_surfaced": plan["cycle_id"], "surface_count": 0, "status": "pending"})
+    return sorted(auto, key=lambda op: op["band"] != "redundant-high"), queued, notes
+
+
+def _shadow(vault: Path, directory: Path, state: dict[str, str | None]) -> tuple[Path, Path]:
+    _assert_hashes(vault, state)
+    for rel in state:
+        source = _file(vault, rel)
+        destination = directory / rel
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if source.is_file():
+            destination.write_bytes(source.read_bytes())
+    meta = _segment("meta")
+    return directory / meta / "autoevo_pending.toml", directory / meta / "decisions.jsonl"
+
+
+def _append(queue: Path, ledger: Path, entries: list[dict], directory: Path, cycle: str) -> dict:
+    path = directory / "entries.json"
+    path.write_text(json.dumps(entries, ensure_ascii=False), encoding="utf-8")
+    return _pending(queue, ledger, "append", "--entries", str(path), "--today", cycle)
+
+
+def _bundles(queue: Path, ledger: Path, today: date) -> dict:
+    args = precedent.build_parser().parse_args(["autoevo"])
+    return {str(row["id"]): precedent.build_bundle(cls=f"autoevo/{row['category']}", subject=str(row["id"]),
+                features=decisions.autoevo_features(row), ledger=ledger, today=today, k=args.k)
+            for row in pending.load(queue)["pending"] if row.get("status") == "pending" and not row.get("default_action")}
+
+
+def preview(vault: Path, proposal: dict, plan: dict, directory: Path) -> dict:
+    evidence.validate_proposal(proposal, plan)
+    auto, entries, notes = route_proposal(vault, proposal, plan)
+    directory.mkdir(parents=True, exist_ok=True)
+    queue, ledger = _shadow(vault, directory, plan["state_files"])
+    appended = _append(queue, ledger, entries, directory, plan["cycle_id"])
+    bundles = _bundles(queue, ledger, date.fromisoformat(plan["cycle_id"]))
+    return {"auto_apply": [{"candidate": op["row"]["candidate"], "band": op["band"]} for op in auto],
+            "pending": appended["appended"], "notes": notes,
+            "bundles": {key: {"bundle_sha256": evidence.digest(bundle), "prompt": precedent.JUDGE_SYSTEM + "\n\n" + bundle["prompt"]}
+                        for key, bundle in bundles.items()}}
+
+
+def _lint(vault: Path) -> dict:
+    result = subprocess.run([sys.executable, str(ROOT / "scripts/lint.py"), "--json"], cwd=ROOT,
+                            env={**os.environ, "OV": str(vault)}, capture_output=True, text=True, timeout=600)
+    try:
+        value = json.loads(result.stdout)
+    except ValueError as exc:
+        raise evidence.VerificationError("lint did not produce JSON") from exc
+    if result.returncode not in {0, 1} or any(type(value.get("counts", {}).get(key)) is not int for key in ("error", "warn", "info")):
+        raise evidence.VerificationError("lint did not complete")
+    return value
+
+
+def _error_set(lint: dict) -> set[str]:
+    return {evidence.digest(row) for row in lint.get("findings", []) if row.get("severity") == "ERROR"}
+
+
+def _changes(vault: Path, after: dict[str, str | None], expected: dict[str, str | None] | None = None) -> dict:
+    result = {}
+    for rel, body in after.items():
+        path = _file(vault, rel)
+        before = _hash(path) if expected is None else expected[rel]
+        after_hash = hashlib.sha256(body.encode()).hexdigest() if body is not None else None
+        if before != after_hash:
+            result[rel] = {"before_sha256": before, "after": body, "mode": path.stat().st_mode & 0o777 if path.exists() else 0o644}
+    return result
+
+
+def _state_changes(vault: Path, shadow: Path, expected: dict) -> dict:
+    changes = _changes(vault, {rel: (shadow / rel).read_text(encoding="utf-8") if (shadow / rel).is_file() else None for rel in expected}, expected)
+    for change in changes.values():
+        if change["before_sha256"] is None:
+            change["mode"] = 0o600
+    return changes
+
+
+def _publish(vault: Path, record: dict, path: Path, kind: str, changes: dict, message: str, *, recheck=None) -> None:
+    if not changes:
+        return
+    expected_head = record["operations"][-1]["commit"]["sha"] if record["operations"] else record["plan"]["base_head"]
+    intent = {"kind": kind, "changes": changes, "expected_head": expected_head}
+    intent["candidate_id"] = evidence.digest([record["run_id"], len(record["operations"]), intent])
+    metadata = set(record["plan"]["state_files"])
+    sources = tuple(record["plan"]["source_files"])
+    allowed = {"redundant-high": sources,
+               "low-signal-high": (*sources, f"{_segment('archive')}/decayed/"),
+               "stale-banner": (*sources, *metadata), "queue": tuple(metadata),
+               "audit": (record["output_file"], *record["reports"].values())}[kind]
+    intent["force_add"] = [rel for rel in changes if rel in metadata and _git(vault, "check-ignore", "--no-index", "-q", "--", rel).returncode == 0]
+    record["operations"].append(intent)
+    record["status"] = "publishing"
+    evidence.write_record(path, record)
+    try:
+        intent["commit"] = commits.publish_changes(vault, changes=changes, message=message, candidate_id=intent["candidate_id"],
+            expected_head=intent["expected_head"], allowed_prefixes=allowed, protected_paths=set(record["plan"]["protected_paths"]),
+            force_add=set(intent["force_add"]), recheck=recheck)
+    except commits.PublicationError as exc:
+        intent["publication_started"] = exc.publication_started
+        record["status"] = "needs_review" if exc.publication_started else "failed"
+        record["errors"].append(str(exc))
+        evidence.write_record(path, record)
+        raise
+    evidence.write_record(path, record)
+
+
+def _source_check(vault: Path, plan: dict, sources: list[str]) -> None:
     for rel in sources:
-        problem = snapshot_mismatch(vault, cache, args.run_ts, rel)
-        if problem:
-            return _fail(problem)
-    try:
-        body = Path(args.body).read_text(encoding="utf-8")
-    except OSError as exc:
-        return _fail(f"cannot read merged body: {exc}")
-    if not body.strip():
-        return _fail("merged body is empty")
-    atomic_write(vault / args.target, body)
-    paths = [args.target, *sources]
-    staged = stage_merge(vault, args.target, sources)
-    if "error" in staged:
-        rolled = _rollback(vault, cache, args.run_ts, paths, sources)
-        return _emit_error({"error": staged["error"], "rolled_back": rolled})
-    result = merge_commit(
-        vault, scope=args.scope, target_slug=args.target_slug, band=args.band or band_label("redundant-high"),
-        sources=sources, paths=paths, source_evidence=args.source_evidence,
-    )
-    if "sha" not in result:
-        rolled = _rollback(vault, cache, args.run_ts, paths, sources)
-        return _emit_error({"error": result.get("error", "commit failed"), "rolled_back": rolled})
-    return _emit({**result, "staged": staged["staged"], "target": args.target})
+        if rel not in plan["source_files"] or _protected(rel, plan["protected_paths"]):
+            raise evidence.VerificationError(f"source is not a clean authorized snapshot: {rel}")
+        source = _file(vault, rel)
+        saved = plan["source_files"][rel]
+        if _hash(source) != saved["before_sha256"] or source.stat().st_mtime_ns != saved["mtime_ns"]:
+            raise evidence.VerificationError(f"source changed since proposal: {rel}")
 
 
-def cmd_archive_op(args: argparse.Namespace) -> int:
-    """Low-signal auto-archive, end to end, after Curator returned auto_apply_safe."""
-    vault, cache = vault_root(), tier("cache")
-    problem = snapshot_mismatch(vault, cache, args.run_ts, args.source)
-    if problem:
-        return _fail(problem)
-    if (vault / args.target).exists():
-        return _fail(f"archive target exists: {args.target}")
-    (vault / args.target).parent.mkdir(parents=True, exist_ok=True)
-    moved = _git(vault, "mv", "--", args.source, args.target)
-    if moved.returncode != 0:
-        return _fail(f"git mv failed: {moved.stderr.strip()}")
-    result = archive_commit(
-        vault, slug=args.slug, days_inactive=args.days_inactive, evidence=args.evidence,
-        source=args.source, target=args.target, band=args.band or band_label("low-signal-high"),
-    )
-    if "sha" not in result:
-        rolled = _rollback(vault, cache, args.run_ts, [args.source, args.target], [args.source])
-        return _emit_error({"error": result.get("error", "commit failed"), "rolled_back": rolled})
-    return _emit({**result, "source": args.source, "target": args.target})
+def _ready(vault: Path) -> None:
+    status = preflight.inspect_preflight(vault=vault, publication_boundary=True)
+    if not status["ready"]:
+        raise evidence.VerificationError(f"publication deferred: {status['gate']}: {status['detail']}")
 
 
-def cmd_stale_op(args: argparse.Namespace) -> int:
-    """time-stale-A default after the veto window: banner, commit, resolve."""
-    import autoevo_pending
-    from autoevo_pending import load as load_queue
+def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str, lint_check=None) -> dict:
+    """Only the trusted Prefect process calls this; the model cannot publish."""
+    proposal = evidence.validate_proposal(proposal, plan)
+    _ready(vault)
+    _assert_hashes(vault, plan["state_files"])
+    if _text(vault, "rev-parse", "HEAD") != plan["base_head"]:
+        raise evidence.VerificationError("Git HEAD changed during proposal preparation")
+    check_lint = lint_check or _lint
+    before_lint = check_lint(vault)
+    cycle, today = plan["cycle_id"], date.fromisoformat(plan["cycle_id"])
+    path = evidence.record_path(vault, cycle)
+    if path.exists():
+        raise evidence.VerificationError("cycle already has a result; do not overwrite or replay it")
+    record = {"schema_version": evidence.VERSION, "cycle_id": cycle, "run_id": plan["run_id"], "prefect_flow_run_id": flow_run_id,
+              "status": "prepared", "plan": plan, "proposal": proposal, "operations": [], "notes": [],
+              "errors": evidence.coverage_errors(proposal, plan), "pending": [], "reports": {},
+              "output_file": f"{_segment('agent_findings')}/autoevo-applied-{cycle}.md"}
+    auto, entries, notes = route_proposal(vault, proposal, plan)
+    record["notes"] = notes
+    expected_state = dict(plan["state_files"])
+    with tempfile.TemporaryDirectory(prefix="atelier-autoevo-publish-") as temporary:
+        shadow = Path(temporary)
+        queue, ledger = _shadow(vault, shadow, expected_state)
+        evidence.write_record(path, record)
+        try:
+            if not record["errors"]:
+                for op in auto:
+                    row, band = op["row"], op["band"]
+                    sources = sorted(set([row["candidate"], *row.get("peers", [])])) if band == "redundant-high" else [row["candidate"]]
+                    def recheck(row=row, band=band, sources=sources):
+                        _ready(vault)
+                        _source_check(vault, plan, sources)
+                        if route_row(vault, row, today)[:2] != ("auto_apply", band) or _curator_problem(row, plan, vault, band):
+                            raise evidence.VerificationError("operation no longer satisfies its authorized band")
+                    recheck()
+                    if band == "redundant-high":
+                        target = row["curator"]["target_path"]
+                        after = {rel: row["curator"]["proposed_content"] if rel == target else None for rel in sources}
+                        message = f"[autoevo:redundant] merge {len(sources)} notes into {Path(target).stem}"
+                    else:
+                        source = sources[0]
+                        target = f"{_segment('archive')}/decayed/{cycle}-{source[:-3].replace('/', '-')}.md"
+                        if _file(vault, target).exists():
+                            raise evidence.VerificationError(f"archive target exists: {target}")
+                        after = {source: None, target: _file(vault, source).read_bytes().decode("utf-8")}
+                        message = f"[autoevo:low-signal] archive: {Path(source).stem}"
+                    message += f"\n\nAuto-band: {band_label(band)}\ncluster_hash: {commits.cluster_hash(sources)}\n{row['evidence']}"
+                    expected = {rel: plan["source_files"][rel]["before_sha256"] if rel in sources else None for rel in after}
+                    changes = _changes(vault, after, expected)
+                    if band == "low-signal-high":
+                        changes[target]["mode"] = plan["source_files"][sources[0]]["mode"]
+                    _publish(vault, record, path, band, changes, message, recheck=recheck)
+                for entry in plan["defaults"]:
+                    if entry.get("default_action") != "stale-banner":
+                        continue
+                    sources = list(entry.get("peers", []))
+                    if pending.default_for(entry) != "stale-banner":
+                        record["notes"].append(f"default has no eligible sources: {entry['id']}")
+                        continue
+                    def recheck_default():
+                        _ready(vault)
+                        _assert_hashes(vault, expected_state)
+                        _source_check(vault, plan, sources)
+                        live = next((item for item in pending.load(vault / _segment("meta") / "autoevo_pending.toml")["pending"] if item.get("id") == entry["id"]), None)
+                        if live != entry or tombstone_reason(vault, sources, today):
+                            raise evidence.VerificationError("default was changed, vetoed, deferred, or tombstoned")
+                    recheck_default()
+                    after = {}
+                    for source in sources:
+                        original = _file(vault, source).read_text(encoding="utf-8")
+                        after[source] = original if f"(autoevo {entry['id']})" in original else insert_stale_banner(original, stale_banner_text(cycle, entry["id"], entry["evidence_summary"]))
+                    _pending(queue, ledger, "resolve", "--id", entry["id"], "--status", "applied", "--reason", "default after veto window",
+                             "--today", cycle, "--source", "nightly", "--by", "rule")
+                    changes = {**_state_changes(vault, shadow, expected_state), **_changes(vault, after, {source: plan["source_files"][source]["before_sha256"] for source in sources})}
+                    message = f"[autoevo:time-stale-A] stale-banner: {len(sources)} notes\n\nQueue entry: {entry['id']}\ncluster_hash: {commits.cluster_hash(sources)}\nDefault fired: {entry['default_at']}"
+                    _publish(vault, record, path, "stale-banner", changes, message, recheck=recheck_default)
+                    expected_state.update({rel: record["operations"][-1]["commit"]["after_sha256"][rel] for rel in expected_state if rel in changes})
+            else:
+                for op in auto:
+                    row = op["row"]
+                    peers = sorted(set([row["candidate"], *row.get("peers", [])]))
+                    entries.append({"id": f"{plan['run_id']}-{evidence.digest([row['category'], peers])[:12]}", "category": row["category"],
+                                    "peers": peers, "proposed_action": row["proposed_action"], "evidence_summary": row["evidence"] + "; incomplete sweep",
+                                    "proposed_at": cycle, "status": "pending"})
+            _assert_hashes(vault, expected_state)
+            record["pending"] = _append(queue, ledger, entries, shadow, cycle)["appended"]
+            _pending(queue, ledger, "veto-expired", "--today", cycle, "--apply-dismissals")
+            bundles = _bundles(queue, ledger, today)
+            gate_args = precedent._gate_kwargs(precedent.build_parser().parse_args(["autoevo"]))
+            for entry_id, supplied in proposal["judgments"].items():
+                bundle = bundles.get(entry_id)
+                if bundle is None or supplied["bundle_sha256"] != evidence.digest(bundle) or not isinstance(supplied["judgment"].get("cited", []), list):
+                    record["notes"].append(f"stale or unknown precedent judgment: {entry_id}")
+                    continue
+                judgment = precedent.gate(bundle, supplied["judgment"], **gate_args)
+                if judgment["default"]:
+                    entry = next(row for row in pending.load(queue)["pending"] if row["id"] == entry_id)
+                    action = "dismiss" if judgment["verdict"] == "dismiss" else pending.default_for(entry)
+                    if action:
+                        _pending(queue, ledger, "set-default", "--id", entry_id, "--action", action, "--today", cycle,
+                                 "--reason", f"precedent ({len(judgment['cited'])} cited): {judgment['reason']}", "--by", "precedent", "--source", "nightly")
+            record_undos(vault, ledger, today)
+            quarantine.update_state(outcomes={str(vault / row["scope"]): row["outcome"] for row in proposal["sweeps"]},
+                                    state_path=shadow / _segment("meta") / "autoevo_quarantine.toml", today=today)
+            changes = _state_changes(vault, shadow, expected_state)
+            _publish(vault, record, path, "queue", changes, f"[autoevo:queue] pending/default/quarantine updates for {cycle}",
+                     recheck=lambda: (_ready(vault), _assert_hashes(vault, expected_state)))
+            after_lint = check_lint(vault)
+            record["lint"] = {"counts": after_lint["counts"], "new_errors": sorted(_error_set(after_lint) - _error_set(before_lint))}
+            if record["lint"]["new_errors"]:
+                record["errors"].append("publication introduced lint errors; review the per-operation commits")
+            record["reports"] = {row["scope"]: f"{_segment('agent_findings')}/decay-{plan['run_id']}-{evidence.digest(row['scope'])[:12]}.md"
+                                 for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
+            reports = {record["reports"][row["scope"]]: evidence.sweep_report(row) for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
+            reports[record["output_file"]] = evidence.render_report(record)
+            _publish(vault, record, path, "audit", _changes(vault, reports),
+                     f"[autoevo:audit] structured nightly result {cycle}", recheck=lambda: _ready(vault))
+            record["status"] = "failed" if record["errors"] else "complete"
+            evidence.write_record(path, record)
+        except BaseException as exc:
+            if record["status"] not in {"needs_review", "failed"}:
+                record["status"] = "needs_review" if record["operations"] and "commit" not in record["operations"][-1] else "failed"
+                record["errors"].append(f"{type(exc).__name__}: {exc}")
+                evidence.write_record(path, record)
+            raise
+    if record["status"] == "complete":
+        evidence.verify_cycle(vault=vault, cycle=cycle)
+    return record
 
-    vault, cache = vault_root(), tier("cache")
-    rel = _norm_rel(args.source)
-    if not rel.startswith(_stale_banner_prefixes(vault)):
-        return _fail(f"stale-op refused outside {'/'.join(STALE_BANNER_TIERS)}: {rel}")
-    problem = snapshot_mismatch(vault, cache, args.run_ts, rel)
-    if problem:
-        return _fail(problem)
-    queue = Path(args.queue) if args.queue else autoevo_pending.queue_path()
-    # The window can close between `veto-expired` listing this entry and this op
-    # running: a user who applied, skipped, or deferred it in /autoevo-review in
-    # between has already decided. Checking after the write meant acting on a
-    # vetoed entry, committing the banner, and still reporting success with the
-    # refusal nested inside.
-    entry = next((e for e in load_queue(queue)["pending"] if e.get("id") == args.entry_id), None)
-    if entry is None:
-        return _fail(f"stale-op refused: no queue entry {args.entry_id}")
-    if entry.get("status") != "pending":
-        return _fail(f"stale-op refused: {args.entry_id} is {entry.get('status')}, not pending")
-    path = vault / rel
-    text = path.read_text(encoding="utf-8")
-    changed = f"(autoevo {args.entry_id})" not in text
-    sha = None
-    if changed:
-        atomic_write(path, insert_stale_banner(text, stale_banner_text(args.run_date, args.entry_id, args.phrase)))
-        result = stale_commit(
-            vault, slug=args.slug or _path_slug(rel), source=rel, phrase=args.phrase, entry_id=args.entry_id,
-            proposed_at=args.proposed_at, default_at=args.default_at,
-        )
-        if "sha" not in result:
-            rolled = _rollback(vault, cache, args.run_ts, [rel], [rel])
-            return _emit_error({"error": result.get("error", "commit failed"), "rolled_back": rolled})
-        sha = result["sha"]
-    resolved = autoevo_pending.resolve_entry(
-        queue, args.entry_id, "applied", "default after veto window",
-        today=date.fromisoformat(args.run_date), source="nightly", by="rule",
-        ledger=Path(args.ledger) if args.ledger else None, explicit_today=True,
-    )
-    if "error" in resolved:
-        # The banner is committed at this point. A nested error under a success
-        # envelope is how this stayed invisible; surface it as the failure it is.
-        return _emit_error({"error": resolved["error"], "changed": changed, "sha": sha, "source": rel})
-    return _emit({"changed": changed, "sha": sha, "source": rel, "resolved": resolved})
 
-
-def cmd_finalize(args: argparse.Namespace) -> int:
-    """Step 7 mechanics: quarantine counters, skipped lines, path-limited audit commit."""
-    vault, cache = vault_root(), tier("cache")
-    audit_path = vault / args.audit_rel
-    if not audit_path.is_file():
-        return _fail(f"audit log missing: {args.audit_rel}")
-    state = vault / "_meta" / "autoevo_quarantine.toml"
-    count_file = autoevo_sidecar(cache, args.run_ts, "quarantine-count")
-    helper = ROOT / "scripts" / "autoevo_quarantine.py"
-    steps = [
-        ["update", "--outcomes", args.outcomes, "--state", str(state), "--count-file", str(count_file), "--today", args.run_date],
-        ["insert-skipped", "--audit", str(audit_path), "--skipped-lines", args.quarantine_skipped],
-    ]
-    for step in steps:
-        proc = subprocess.run([sys.executable, str(helper), *step], cwd=ROOT, capture_output=True, text=True, timeout=120)
-        if proc.returncode != 0:
-            return _fail(f"autoevo_quarantine.py {step[0]} failed: {(proc.stderr or proc.stdout).strip()[:300]}")
-    try:
-        quarantined = int(count_file.read_text(encoding="utf-8").strip() or "0")
-    except (OSError, ValueError):
-        quarantined = 0
-    try:
-        reports = json.loads(Path(args.reports).read_text(encoding="utf-8")) if args.reports else []
-    except (OSError, json.JSONDecodeError) as exc:
-        return _fail(f"cannot read reports list: {exc}")
-    missing = [rel for rel in reports if not (vault / rel).is_file()]
-    if missing:
-        return _fail(f"registered decay reports missing on disk: {missing}")
-    paths = [args.audit_rel, *reports]
-    result = audit_commit(
-        vault, run_date=args.run_date, auto=args.auto, pending=args.pending, errors=args.errors,
-        quarantined=str(quarantined), paths=paths,
-        force_add=["_meta/autoevo_quarantine.toml"] if state.is_file() else [],
-    )
-    if "sha" not in result:
-        return _emit_error({"error": result.get("error", "audit commit failed"), "quarantined": quarantined, "paths": paths})
-    return _emit({**result, "quarantined": quarantined, "paths": paths})
-
-
-# --- rollback ---------------------------------------------------------------
-
-
-def cmd_rollback(args: argparse.Namespace) -> int:
-    return _emit(_rollback(vault_root(), tier("cache"), args.run_ts, list(args.paths), list(args.source)))
-
-
-# --- main -------------------------------------------------------------------
+def prior_result(vault: Path, cycle: str) -> dict | None:
+    path = evidence.record_path(vault, cycle)
+    for legacy in sorted(path.parent.glob("*.toml")):
+        try:
+            receipt = tomllib.loads(_file(vault, legacy.relative_to(vault).as_posix()).read_text())
+        except (OSError, ValueError) as exc:
+            raise evidence.VerificationError(f"legacy receipt requires effects review: {legacy.name}") from exc
+        if (legacy.stem == cycle or receipt.get("contract_version") != 3
+                or receipt.get("routine") != "autoevo-nightly" or receipt.get("cycle_id") != legacy.stem
+                or receipt.get("verification") not in {"passed", "blocked"}):
+            raise evidence.VerificationError(f"legacy receipt requires effects review: {legacy.name}")
+    for previous in sorted(path.parent.glob("*.json")):
+        record = evidence.read_record(previous)
+        if (record.get("cycle_id") != previous.stem
+                or record.get("status") not in ("complete", "failed", "publishing", "needs_review")
+                or not isinstance(record.get("operations"), list) or not isinstance(record.get("errors"), list)
+                or (record["status"] == "failed" and not record["errors"])
+                or any(not isinstance(op, dict) or not {"kind", "candidate_id", "expected_head", "changes"} <= op.keys()
+                       or ("commit" in op and not isinstance(op["commit"], dict)) for op in record["operations"])):
+            raise evidence.VerificationError(f"unrecognized Autoevo result needs review: {previous.name}")
+        unresolved = any("commit" not in op and op.get("publication_started") is not False for op in record.get("operations", []))
+        if record.get("status") in {"publishing", "needs_review"} or unresolved:
+            for operation in record.get("operations", []):
+                if "commit" not in operation and operation.get("publication_started") is not False:
+                    operation["commit"] = commits.reconcile_commit(vault, candidate_id=operation["candidate_id"],
+                        expected_head=operation["expected_head"], changes=operation["changes"], force_add=set(operation.get("force_add", [])))
+            if record.get("operations") and record["operations"][-1]["kind"] == "audit" and not record.get("errors"):
+                record["status"] = "complete"
+                evidence.write_record(previous, record)
+            else:
+                raise evidence.VerificationError(f"unfinished Autoevo publication needs review: {previous.name}")
+        if record["status"] == "complete":
+            evidence.verify_cycle(vault=vault, cycle=record["cycle_id"])
+            if previous == path:
+                return record
+        else:
+            evidence.verify_operations(vault, record, allow_refused=True)
+            if previous == path:
+                raise evidence.VerificationError(f"this cycle already has a {record.get('status')} result; no automatic replay")
+    return None
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-
-    identity = sub.add_parser("identity")
-    identity.set_defaults(func=cmd_identity)
-
-    route = sub.add_parser("route-bands")
-    route.add_argument("--findings", required=True, help="JSON list of Forgetter rows")
-    route.add_argument("--today", required=True)
-    route.set_defaults(func=cmd_route_bands)
-
-    verify = sub.add_parser("verify-snapshot")
-    verify.add_argument("--run-ts", required=True)
-    verify.add_argument("--source", action="append", required=True)
-    verify.set_defaults(func=cmd_verify_snapshot)
-
-    mop = sub.add_parser("merge-op")
-    mop.add_argument("--run-ts", required=True)
-    mop.add_argument("--target", required=True, help="surviving relative path (one of --source)")
-    mop.add_argument("--source", action="append", required=True)
-    mop.add_argument("--body", required=True, help="file holding Curator's merged body")
-    mop.add_argument("--scope", required=True)
-    mop.add_argument("--target-slug", required=True)
-    mop.add_argument("--band", default=None)
-    mop.add_argument("--source-evidence", action="append", default=None)
-    mop.set_defaults(func=cmd_merge_op)
-
-    aop = sub.add_parser("archive-op")
-    aop.add_argument("--run-ts", required=True)
-    aop.add_argument("--source", required=True)
-    aop.add_argument("--target", required=True)
-    aop.add_argument("--slug", required=True)
-    aop.add_argument("--days-inactive", required=True)
-    aop.add_argument("--evidence", required=True)
-    aop.add_argument("--band", default=None)
-    aop.set_defaults(func=cmd_archive_op)
-
-    sop = sub.add_parser("stale-op")
-    sop.add_argument("--run-ts", required=True)
-    sop.add_argument("--run-date", required=True)
-    sop.add_argument("--entry-id", required=True)
-    sop.add_argument("--source", required=True)
-    sop.add_argument("--phrase", required=True)
-    sop.add_argument("--proposed-at", required=True)
-    sop.add_argument("--default-at", required=True)
-    sop.add_argument("--slug", default=None)
-    sop.add_argument("--queue", default=None)
-    sop.add_argument("--ledger", default=None)
-    sop.set_defaults(func=cmd_stale_op)
-
-    fin = sub.add_parser("finalize")
-    fin.add_argument("--run-ts", required=True)
-    fin.add_argument("--run-date", required=True)
-    fin.add_argument("--audit-rel", required=True)
-    fin.add_argument("--outcomes", required=True)
-    fin.add_argument("--quarantine-skipped", required=True)
-    fin.add_argument("--reports", default=None, help="JSON list of decay report relative paths")
-    fin.add_argument("--auto", required=True)
-    fin.add_argument("--pending", required=True)
-    fin.add_argument("--errors", required=True)
-    fin.set_defaults(func=cmd_finalize)
-
-    plan = sub.add_parser("plan")
-    plan.add_argument("--run-ts", required=True)
-    plan.add_argument("--run-date", required=True)
-    plan.set_defaults(func=cmd_plan)
-
-    outcome = sub.add_parser("outcome")
-    outcome.add_argument("--file", required=True)
-    outcome.add_argument("--scope", required=True)
-    outcome.add_argument(
-        "--result", required=True, help="envelope_returned | forgetter_no_envelope"
-    )
-    outcome.set_defaults(func=cmd_outcome)
-
-    tomb = sub.add_parser("tombstone-check")
-    tomb.add_argument("--source", action="append", required=True)
-    tomb.add_argument("--today", required=True)
-    tomb.set_defaults(func=cmd_tombstone_check)
-
-    undos = sub.add_parser("record-undos")
-    undos.add_argument("--since", default=TOMBSTONE_WINDOW)
-    undos.add_argument("--today", default=None)
-    undos.add_argument("--ledger", default=None, help="Override the decision ledger path (tests).")
-    undos.set_defaults(func=cmd_record_undos)
-
-    snap = sub.add_parser("snapshot")
-    snap.add_argument("--run-ts", required=True)
-    snap.add_argument("--source", action="append", required=True)
-    snap.set_defaults(func=cmd_snapshot)
-
-    stage = sub.add_parser("stage-merge")
-    stage.add_argument("--target", required=True)
-    stage.add_argument("--source", action="append", required=True)
-    stage.set_defaults(func=cmd_stage_merge)
-
-    arch = sub.add_parser("archive-target")
-    arch.add_argument("--source", required=True)
-    arch.add_argument("--run-date", required=True)
-    arch.set_defaults(func=cmd_archive_target)
-
-    stale = sub.add_parser("stale-banner")
-    stale.add_argument("--source", required=True, help="relative path under $OV")
-    stale.add_argument("--phrase", required=True, help="the dated phrase Forgetter flagged")
-    stale.add_argument("--entry-id", required=True)
-    stale.add_argument("--run-date", required=True)
-    stale.set_defaults(func=cmd_stale_banner)
-
-    roll = sub.add_parser("rollback")
-    roll.add_argument("--run-ts", required=True)
-    roll.add_argument("--paths", nargs="+", required=True)
-    roll.add_argument("--source", action="append", default=[])
-    roll.set_defaults(func=cmd_rollback)
-
+    preview_parser = sub.add_parser("preview", help="Read-only policy/bundle preview; writes only its explicit scratch directory")
+    preview_parser.add_argument("--proposal", type=Path, required=True)
+    preview_parser.add_argument("--plan", type=Path, required=True)
+    preview_parser.add_argument("--directory", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        return args.func(args)
-    except SystemExit:
-        raise
-    except Exception as exc:  # surface, never swallow (headless caller)
-        return _fail(f"{type(exc).__name__}: {exc}")
+        from _paths import vault_root
+
+        result = preview(vault_root(), json.loads(args.proposal.read_text()), json.loads(args.plan.read_text()), args.directory)
+    except (OSError, ValueError, evidence.VerificationError) as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 2
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    return 0
 
 
 if __name__ == "__main__":

@@ -469,10 +469,10 @@ def refresh(
     cache_path = _tier_for(ov, "cache") / CACHE_NAME
     try:
         cache = json.loads(cache_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except FileNotFoundError:
         cache = {}
     if not isinstance(cache, dict):
-        cache = {}
+        raise ValueError(f"{cache_path.name} must contain a JSON object; existing cache was not changed")
 
     local_now = now or datetime.now().astimezone()
     errors: list[str] = []

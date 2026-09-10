@@ -3,18 +3,14 @@
 from __future__ import annotations
 
 import json
-import sys
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 from urllib.error import URLError
 from zoneinfo import ZoneInfo
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO_ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 import refresh_tracking as rt  # noqa: E402
 
@@ -184,6 +180,26 @@ class TrackingTests(unittest.TestCase):
         self.assertEqual(saved["acg"], {"owned_elsewhere": True})
         self.assertEqual(result["successes"], ["concerts"])
         self.assertEqual(len(result["errors"]), 2)
+
+    def test_invalid_or_unreadable_existing_cache_is_never_replaced(self):
+        cache = self.vault / "cache" / rt.CACHE_NAME
+        query = Mock(side_effect=AssertionError("must validate existing cache before querying"))
+        for body in (b'{"unrelated": "unfinished"', b'[]', b'null'):
+            with self.subTest(body=body):
+                cache.write_bytes(body)
+                with self.assertRaises(ValueError):
+                    rt.refresh(self.vault, NOW, query_fn=query)
+                self.assertEqual(cache.read_bytes(), body)
+        body = b'{"unrelated": "preserve me"}'
+        cache.write_bytes(body)
+        cache.chmod(0)
+        try:
+            with self.assertRaises(OSError):
+                rt.refresh(self.vault, NOW, query_fn=query)
+        finally:
+            cache.chmod(0o600)
+        self.assertEqual(cache.read_bytes(), body)
+        query.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -1,484 +1,245 @@
-# launchd — macOS scheduled jobs
+# launchd — Prefect services on macOS
 
-Atelier-managed `launchd` plists for local scheduled work. Model-driven
-autoevo behavior is governed by `protocols/autoevo.md`; deterministic semantic
-cache maintenance is governed by `sources/semantic.md`.
+Atelier uses launchd only to keep two long-lived local services alive. Prefect
+owns every routine schedule, timezone, run state, log, concurrency decision,
+and eligible retry. Model behavior remains governed by
+`protocols/remote-routines.md`; autoevo adds the domain contract in
+`protocols/autoevo.md`; semantic indexing is documented in
+`sources/semantic.md`.
 
-These are user-installable artifacts: copy to `~/Library/LaunchAgents/` and load with `launchctl`. Public, vault-agnostic plists live here. Private routine-specific plists may live under `$OV/_meta/launchd/`; what gets loaded into launchd is always a machine-local copy.
+These files are installation templates. Replacing `__ATELIER_ROOT__`, copying
+a plist, and loading or unloading it are explicit operator actions. Repository
+updates never change installed LaunchAgents.
 
-## Plists
+## Services
 
-| File | Schedule | Contract |
+| Template | Process | Schedule behavior |
 |---|---|---|
-| `com.atelier.autoevo-nightly.plist` | 05:00 primary, hourly deferred recovery, wake/login catch-up | `protocols/autoevo.md` + `.claude/commands/autoevo-nightly.md` |
-| `com.atelier.semantic-index.plist` | 07:30 and 19:30 local, plus load/login catch-up | Owner-gated, offline, timeout-bounded `scripts/semantic.py index --if-stale` |
-| `com.atelier.tracking-refresh.plist` | 05:30 and 17:30 local, plus load/login catch-up | Owner-gated, networked, deterministic refresh of the reminder cache consumed read-only by `daily_brief.py` |
-| `$OV/_meta/launchd/com.atelier.vault-job.<name>.plist` (private) | per job | Owner-gated, networked, timeout-bounded `scripts/vault_job_runner.sh <label> <vault-relative script> [args]` for a deterministic collector that lives in the vault; no model runs |
+| `com.atelier.prefect-server.plist` | Local Prefect API/UI on `127.0.0.1:4200` | No routine schedule; persists Prefect state under `~/Library/Application Support/Atelier/Prefect` |
+| `com.atelier.prefect-routines.plist` | `scripts/routine_prefect.py serve` | Registers and serves all validated deployments; globally limited to one active run |
 
-## Install
+Both use `RunAtLoad` and `KeepAlive`. The server must be available before
+the deployment runner can remain healthy; launchd will restart the runner if it
+starts too early.
 
-### Step 1 — declare your vault path (one-time, per machine)
+## Inputs and boundaries
 
-The wrapper script (`scripts/routine_runner.sh`) sources `~/atelier/harness/env.local.sh`. Create the file if it does not exist:
+Public deterministic declarations live in `harness/routine_jobs.toml`.
+Private model routines and vault scripts stay in
+`$OV/_meta/routine_watch.toml`. Public capability profiles live in
+`harness/routine_profiles.toml`.
+
+The service wrapper sources `~/.zprofile`, `~/.profile`, and then the
+gitignored `harness/env.local.sh`. Put only the vault location and optional
+Prefect location or port there:
 
 ```bash
-cat > ~/atelier/harness/env.local.sh <<'EOF'
-# Atelier per-user environment overrides. Gitignored. Sourced by:
-#   - scripts/routine_runner.sh (invoked by launchd plists)
-# Mirror whatever your shell config (~/.zshrc / ~/.zprofile) sets so
-# launchd's non-interactive shell has the same view.
 export OV="/path/to/your/vault"
-EOF
+# export ATELIER_PREFECT_PORT="4200"
+# export ATELIER_PREFECT_HOME="$HOME/Library/Application Support/Atelier/Prefect"
+# Server analytics default to disabled; set the explicit override only if wanted.
+# export ATELIER_PREFECT_SERVER_ANALYTICS_ENABLED="true"
 ```
 
-If `OV` is exported from `~/.zprofile` or `~/.profile` already (login-shell
-scopes), the wrappers pick it up from there. `env.local.sh` is the fallback for
-users whose `OV` lives only in `.zshrc` (interactive-only). A wrapper aborts
-loudly (`ERROR: OV not set ...`) if none of those sources work; the error
-surfaces in that job's `/tmp/com.atelier.*.err` log.
+Do not put service credentials in routine declarations or archived prompts.
+The model adapter admits only declared environment keys and validates archived
+prompts for literal credentials before starting Codex. The service binds to
+loopback, and its bootstrap disables Prefect server analytics by default.
 
-### Step 2: claim this machine as the local-routine owner
+## Prepare and validate
 
-The recommended setup has one eligible machine at a time. Claiming creates a
-gitignored random identity under `harness/`, publishes it to the shared vault,
-and changes `routine_watch.toml` to `coordination.backend = "owner"`:
+Run these from the intended Atelier checkout. They do not load services or run
+a routine:
 
 ```bash
-uv run scripts/routine_owner.py claim
-uv run scripts/routine_owner.py status
-```
+uv sync --frozen
+uv run --frozen python scripts/routine_prefect.py validate --json
 
-Other machines may keep their plist copies loaded. Their runners exit before
-starting a model or writing a claim file. `ATELIER_COORDINATION=none` cannot
-downgrade this shared fence.
-
-To migrate all local routines later, first unload their plists on the source
-machine and wait for any active cycle to finish. Then run this on the destination:
-
-```bash
-uv run scripts/routine_owner.py claim --force --source-stopped
-```
-
-`--source-stopped` explicitly asserts that the source scheduler is quiescent;
-Drive sync cannot prove this atomically. The transfer also fails if any locally
-synchronized shared claim is still `status = "running"`. Wait for
-the active cycle to finish or resolve the stale claim before retrying. A
-successful transfer advances the shared owner generation. Then install and
-load the plists there. The old machine becomes ineligible as soon as its
-synchronized vault sees the new owner record.
-
-### Step 2b: optional active-active DynamoDB coordination
-
-Use this only when several machines are intentionally eligible and exactly one
-should win each cycle. Credentials must be **non-interactive**: the job runs
-with the screen locked, so `boto3` reads a dedicated static-key profile from
-`~/.aws/credentials`, with no Keychain prompt.
-
-```bash
-# 1. Create a scoped IAM user (one-time, from a machine with admin creds).
-#    Policy: DynamoDB GetItem/PutItem/UpdateItem on atelier-routine-locks only.
-cat > /tmp/atelier-lock-policy.json <<'JSON'
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Action": ["dynamodb:GetItem","dynamodb:PutItem","dynamodb:UpdateItem"],
-    "Resource": "arn:aws:dynamodb:us-west-2:*:table/atelier-routine-locks"
-  }]
-}
-JSON
-aws iam create-user --user-name atelier-routine-lock
-aws iam put-user-policy --user-name atelier-routine-lock \
-  --policy-name atelier-lock --policy-document file:///tmp/atelier-lock-policy.json
-aws iam create-access-key --user-name atelier-routine-lock   # note the keys
-
-# 2. Write the keys to a non-interactive profile, then lock the file down.
-cat >> ~/.aws/credentials <<'INI'
-
-[atelier-lock]
-aws_access_key_id = AKIA...
-aws_secret_access_key = ...
-region = us-west-2
-INI
-chmod 600 ~/.aws/credentials
-
-# 3. Create the DynamoDB table (one-time, from any machine).
-#    Use `uv run` — boto3 lives in the project venv, not system python3.
-AWS_PROFILE=atelier-lock uv run scripts/routine_lock.py setup-table
-
-# 4. Tell routine_watch.toml to use DynamoDB:
-#   [coordination]
-#   backend = "dynamodb"
-```
-
-The runner reads `AWS_PROFILE` (default `atelier-lock`; override via `ATELIER_LOCK_AWS_PROFILE`). The table uses provisioned mode (1 WCU / 1 RCU, always-free tier). Running locks are never taken over automatically because prior external effects may be uncertain. A diagnostic `lease_expires_at` is recorded for operators. Only a successfully completed marker receives the table's seven-day TTL.
-
-Skip this step for the recommended single-owner setup.
-
-### Step 3: prepare headless Codex
-
-The shipped default uses `codex exec`. Authenticate once interactively and
-review the repo's project hooks before relying on the unattended schedule:
-
-```bash
-codex login status
-codex -C .
-# In the TUI, open /hooks and trust the reviewed project hooks.
-```
-
-The scheduled invocation is ephemeral, starts from a narrow sanitized
-environment, and runs without interactive approvals. Before claiming a cycle,
-the runner resolves the routine's generic profile from
-`harness/routine_profiles.toml` and verifies local readiness with
-`scripts/routine_audit.py`. Ordinary routines use `workspace-write`, start in
-a fresh disposable neutral directory, and add `$OV` as a writable root while
-keeping the Atelier checkout read-only. This avoids persistent vault project
-instructions crossing into later profiles. Only the maintenance profile grants
-Atelier writes. The profile's `allowed_commands` binding is checked before the
-cycle is claimed, and its permissions are passed as a strict model-level
-allowlist rather than claimed as a shell or connector ACL. Research profiles enable live web only when
-declared. Native web search and shell networking are distinct: ordinary
-research, synthesis, and live-web digest profiles keep shell networking
-disabled. Native web search does not grant arbitrary networked CLI access.
-Connector profiles retain user-level Codex configuration; other
-profiles ignore it. Only bounded maintenance workflows that must write git
-metadata use `danger-full-access`; its shell network is explicitly recorded as
-unrestricted because that sandbox does not isolate it. Every preflight probe
-and model run has a hard epoch-based wall-clock timeout, so macOS sleep, a
-permission prompt, or a hung provider cannot extend a one-hour budget into an
-all-day process. The model-facing shell
-also sets `ZDOTDIR` to `harness/routine-shell`, so it cannot load interactive
-aliases, override `$OV`, or import credentials exported by `~/.zshrc`.
-Once preflight succeeds, the wrapper starts `caffeinate -i -w <runner-pid>`.
-This keeps the Mac awake while the stagger, model run, artifact validation,
-and cleanup are active. It does not wake a Mac that was already asleep when
-the schedule became due.
-The runner passes both `-a never` and the explicit
-`approval_policy="never"` config override. The second guard is necessary for
-connector profiles that retain user configuration; otherwise a personal
-approval reviewer can restore `on-request` and stall an unattended run.
-
-Audit all registered model-driven jobs, fixed Codex availability, machine
-ownership, dependencies, plugins, plist mappings, and loaded launchd state:
-
-```bash
-python3 scripts/routine_audit.py audit --check-system --json
-```
-
-The deterministic semantic job is outside `routine_watch.toml` because it
-produces a machine-local derived cache, not a canonical vault artifact. Its
-plist and owner/offline runner contract are covered by
-`scripts/harness_smoke.py`; inspect live state with
-`launchctl print gui/$(id -u)/com.atelier.semantic-index`.
-
-The tracking refresh follows the same deterministic-job boundary even though
-its derived cache lives under `$OV`: it performs fixed API and cache transforms,
-never invokes a model, and has no reviewable report artifact. `daily_brief.py`
-is the integration layer and never refreshes the cache itself. Stale or failed
-source sections remain visible as brief warnings. Inspect live state with
-`launchctl print gui/$(id -u)/com.atelier.tracking-refresh`.
-
-Unattended model-driven routines run through Codex. Profiles that declare
-`fallback_runtime = "claude"` in `harness/routine_profiles.toml` re-execute a
-cycle through headless Claude Code when Codex fails without delivering; a
-timeout never falls back. The claim then carries `runtime = "claude"`,
-`fallback_from`, `fallback_reason`, and `primary_exit_code`, and both
-transcripts are kept under `_meta/routine_logs/<routine>/` (`<cycle>.codex.log`
-and `<cycle>.log`). `ATELIER_FALLBACK_CLAUDE_MODEL` pins the fallback model.
-Deterministic derived-cache jobs such as semantic maintenance run their
-reviewed script directly. `atelier_runtime.py use claude` and
-`ATELIER_RUNTIME=claude` affect interactive launchers only.
-
-### Step 4: install and load the plist
-
-```bash
-PLIST=com.atelier.autoevo-nightly.plist
-cp "scripts/launchd/${PLIST}" "$HOME/Library/LaunchAgents/${PLIST}"
-launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
-
-PLIST=com.atelier.semantic-index.plist
-cp "scripts/launchd/${PLIST}" "$HOME/Library/LaunchAgents/${PLIST}"
-launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
-
-PLIST=com.atelier.tracking-refresh.plist
-cp "scripts/launchd/${PLIST}" "$HOME/Library/LaunchAgents/${PLIST}"
-launchctl load "$HOME/Library/LaunchAgents/${PLIST}"
-```
-
-Deterministic vault jobs follow the same private-plist path. The plist calls
-`scripts/vault_job_runner.sh <label> <vault-relative script> [args]`; the
-wrapper sources the login profiles, refuses absolute or `..` script paths,
-runs the ownership gate, holds a wake assertion, and kills the job after
-`ATELIER_VAULT_JOB_TIMEOUT_SECONDS` (default 900). It logs to whatever
-`StandardOutPath` the plist names, normally
-`$OV/_meta/routine_logs/launchd/<label>.out`. Use it for collectors whose
-output a model-driven routine then reads, so the model judges rows instead of
-opening pages under a token budget.
-
-Install private local-routine plists from the shared vault on the owner machine:
-
-```bash
-for SOURCE in "$OV"/_meta/launchd/com.atelier.routine-*.plist "$OV"/_meta/launchd/com.atelier.vault-job.*.plist; do
-  PLIST=$(basename "$SOURCE")
-  cp "$SOURCE" "$HOME/Library/LaunchAgents/$PLIST"
-  launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$PLIST"
+mkdir -p "$HOME/Library/LaunchAgents"
+ATELIER_ROOT="$(pwd -P)"
+for NAME in prefect-server prefect-routines; do
+  SOURCE="scripts/launchd/com.atelier.$NAME.plist"
+  TARGET="$HOME/Library/LaunchAgents/com.atelier.$NAME.plist"
+  sed "s|__ATELIER_ROOT__|$ATELIER_ROOT|g" "$SOURCE" > "$TARGET.candidate"
+  plutil -lint "$TARGET.candidate"
 done
 ```
 
-Confirm it loaded:
+Review the validation output before continuing. It must list only intended
+model and deterministic deployments, each with an explicit cron and IANA
+timezone. Also inspect the candidate plists and confirm their absolute checkout
+path.
+
+The validation command checks declarations and schedules, without contacting
+the Prefect API or running a routine. Model preparation separately checks
+archived prompts, required CLIs, and installed plugins. Neither check proves
+OAuth readiness; complete authentication before cutover. The digest command
+owns the optional CodexBar installation and quota-only permission smoke.
+
+## Cut over from the legacy scheduler
+
+Never load the Prefect routine service while an old routine plist or cloud
+schedule for the same routine is active. Duplicate schedulers can cause
+duplicate external effects, and Prefect cannot fence a scheduler it does not
+own.
+
+1. Inventory the exact loaded legacy labels and keep their installed plist
+   copies for rollback. Include public labels plus every private
+   `com.atelier.routine-*` and `com.atelier.vault-job.*` label.
+2. Persistently disable every inventoried label, then unload it. `bootout`
+   alone is temporary: an installed plist can load again at the next login.
+3. Confirm those labels are both disabled and absent.
+4. Move the two validated candidate plists into place.
+5. Explicitly enable and bootstrap the Prefect server, confirm its API is
+   healthy, then enable and bootstrap the deployment runner.
+6. Confirm both services and inspect the registered schedules before leaving
+   them enabled.
+
+Example commands for steps 2 through 6, run only after adapting the legacy
+label list to the machine:
 
 ```bash
-launchctl list | grep atelier
+DOMAIN="gui/$(id -u)"
+
+# This public list is only a template. Repeat both commands for every exact
+# com.atelier.routine-* and com.atelier.vault-job.* label found in inventory.
+for LABEL in \
+  com.atelier.autoevo-nightly \
+  com.atelier.semantic-index \
+  com.atelier.tracking-refresh
+do
+  launchctl disable "$DOMAIN/$LABEL"
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+done
+
+launchctl print "$DOMAIN" | rg 'com\.atelier\.(autoevo-nightly|semantic-index|tracking-refresh|routine-|vault-job\.)'
+launchctl print-disabled "$DOMAIN" | rg 'com\.atelier\.(autoevo-nightly|semantic-index|tracking-refresh|routine-|vault-job\.)'
+
+for NAME in prefect-server prefect-routines; do
+  mv "$HOME/Library/LaunchAgents/com.atelier.$NAME.plist.candidate"      "$HOME/Library/LaunchAgents/com.atelier.$NAME.plist"
+done
+
+launchctl enable "$DOMAIN/com.atelier.prefect-server"
+launchctl bootstrap "$DOMAIN"   "$HOME/Library/LaunchAgents/com.atelier.prefect-server.plist"
+curl --fail --silent --show-error http://127.0.0.1:4200/api/health
+launchctl enable "$DOMAIN/com.atelier.prefect-routines"
+launchctl bootstrap "$DOMAIN"   "$HOME/Library/LaunchAgents/com.atelier.prefect-routines.plist"
+
+launchctl print "$DOMAIN/com.atelier.prefect-server"
+launchctl print "$DOMAIN/com.atelier.prefect-routines"
+PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen prefect deployment ls
 ```
 
-The expected output: one line per loaded plist, with PID `-` (no current run) and exit code `0` (last run, or just-loaded).
+A `bootout` may report that a label is absent; investigate unexpected loaded
+labels or missing disabled entries instead of treating a partial list as a
+complete fence. Cloud schedules must be disabled in their own UI before
+enabling an equivalent local deployment.
 
-## Every plist needs a way to recover a missed cycle
+This migration does not backfill missed cycles. After cutover, use routine
+freshness cues to identify absent artifacts and manually rerun a model cycle
+only after reviewing possible prior effects.
 
-A plist that fires once, at one hour, on one weekday has no second chance. When
-that firing lands on a sleeping machine, or the runner defers the cycle for
-readiness or contention, the cycle waits for "the next trigger" -- which for a
-weekly routine is a week away.
+## Observe
 
-Be careful not to over-attribute to this. Measured on 2026-08-31, it explained
-none of the observed loss: every scheduled cycle had a claim, so launchd was
-firing on time, and the degraded hit rates came from 95 of 279 claims being
-`failed`. A failed claim is refused by `schedule_decision` by design, so extra
-triggers would not have retried any of them. Recovery here is worth having for
-deferrals and for a machine that is genuinely off, and it is not a fix for
-routines that run and fail. For those, read the transcript (below).
-
-So a routine plist must carry at least one of:
-
-- **`StartCalendarInterval` with no `Hour` key** -- a launchd wildcard that fires
-  at minute 0 of every hour.
-- **`RunAtLoad`** -- covers login and LaunchAgent reload after a missed event.
-
-Both are cheap. The runner's schedule gate exits immediately for completed,
-fenced, and not-yet-due claims, so an hourly check on an already-finished cycle
-costs a process spawn and a TOML read. `com.atelier.autoevo-nightly.plist` is
-the reference shape: hourly wildcard plus `RunAtLoad`, with the intended time
-enforced by the runner rather than by the calendar entry.
-
-Check the fleet:
+The UI is local-only at `http://127.0.0.1:4200`. Bounded command-line checks:
 
 ```bash
-uv run scripts/routine_audit.py health
+curl --fail --silent --show-error http://127.0.0.1:4200/api/health
+PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen prefect flow-run ls --limit 20
+PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen python scripts/routine_status.py
 ```
 
-The `recovery` column reads `none` for any job that cannot recover a missed
-cycle. `routine_audit.py audit --check-system` reports the same set as a
-warning. It is a warning and not an error because nothing is wrong until a
-cycle is actually missed.
+Aggregate service logs are machine-local:
 
-## Diagnosing a routine that runs and fails
+```text
+/tmp/com.atelier.prefect-server.out
+/tmp/com.atelier.prefect-server.err
+/tmp/com.atelier.prefect-routines.out
+/tmp/com.atelier.prefect-routines.err
+```
 
-`StandardOutPath` in every routine plist points into `/tmp`, which macOS purges.
-For three months that meant a run could fail, record `error = "model-execution-
-failed"` on its claim, and have its actual reason deleted within the week. The
-string on its own carries no information: it is the default assigned before the
-model is invoked, and it means only that the runtime exited non-zero.
+Execution status and logs belong to Prefect. A compact receipt under
+`$OV/_meta/routine_receipts/<routine>/<cycle>.toml` attests only domain
+delivery and output verification; it is not a second run-state ledger.
 
-The runner now keeps what matters without depending on the plist:
+The current M3/16 GB envelope is deliberately serial: every deployment queues
+collisions at one and the runner allows one active run across all deployments.
+Do not raise that limit merely because a future machine has more memory;
+validate model, index, and database pressure first.
 
-- **`error_detail` on the claim** -- a credential-screened tail of the
-  transcript, so `routine_audit.py health` and the session cue can say what
-  happened rather than that something did.
-- **`$OV/_meta/routine_logs/<routine>/<cycle>.log`** -- the full screened
-  transcript, written for every finished model run, success or failure, and
-  pruned to the newest ten per routine. A fallback cycle keeps both: the
-  failed primary as `<cycle>.codex.log` and the fallback as `<cycle>.log`.
-  It sits beside `routine_runs/` rather than in `~/Library/Logs` because claims
-  show several machines running these, and a transcript on the wrong machine is
-  worth as little as no transcript.
+## Recovery and manual runs
 
-Lines the credential guard flags are replaced with a marker rather than stored,
-and if the guard cannot run, nothing is kept.
-
-Start here:
+A failed model attempt is not retried automatically. Review its Prefect logs,
+the declared output location, and any ambiguous connector effects before
+proposing a manual run. Submission does not clear receipts: `pending` or
+`failed` still blocks the same cycle after review, so stop and escalate the
+recovery decision explicitly. Preserve that evidence; do not relabel a started
+attempt `blocked` or choose another cycle to bypass the guard.
 
 ```bash
-uv run scripts/routine_audit.py health
+PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen python scripts/routine_prefect.py run <routine>   --cycle <YYYY-MM-DD>
 ```
 
-## Wake the Mac at the scheduled time
+Only deterministic jobs explicitly declared `retry_safe = true` may retry.
+The safe preparation phase can retry because it performs no routine-domain
+effects.
 
-`launchd` will not wake a sleeping Mac on its own. A missed
-`StartCalendarInterval` is delivered when the machine next wakes. The
-autoevo plist also uses `RunAtLoad` so login or LaunchAgent reload catches a
-missed cycle. Before 05:00, the runner targets yesterday only when yesterday
-did not complete; otherwise it waits for today's primary attempt. The claim
-reservation prevents duplicate same-cycle work if wake, RunAtLoad, and a
-calendar event arrive close together.
-
-The calendar interval checks at minute 0 every hour. Missing `Hour` in a
-`StartCalendarInterval` dictionary is a launchd wildcard. Completed, failed,
-running, and uncertain claims exit before capability or model work. A
-`deferred` deterministic preflight records `retry_after_epoch`; checks before
-that time also exit cheaply, and the first due check can reacquire the cycle.
-Session activity retries at the exact six-hour lock expiry. Other deterministic
-blockers retry after one hour, so newly committed user work or repaired local
-dependencies are recognized at the next calendar check. An unchanged blocker
-for the same cycle reuses its committed audit, so hourly checks do not create
-duplicate audit commits.
-
-Use `pmset` to schedule a proactive wake just before the primary time:
+To restart a service without changing its installation:
 
 ```bash
-# Wake the Mac at 04:55 every day so the 05:00 job lands on a running system.
-sudo pmset repeat wakeorpoweron MTWRFSU 04:55:00
+DOMAIN="gui/$(id -u)"
+launchctl kickstart -k "$DOMAIN/com.atelier.prefect-server"
+launchctl kickstart -k "$DOMAIN/com.atelier.prefect-routines"
 ```
 
-Verify:
+If the API is healthy but deployments are absent, inspect the routines service
+error log and rerun the read-only validation command. Do not delete Prefect's
+state directory as a routine repair step.
+
+## Roll back
+
+Rollback is also a scheduler transfer: stop Prefect's deployment runner before
+reactivating any old scheduler.
 
 ```bash
-pmset -g sched
+DOMAIN="gui/$(id -u)"
+for NAME in prefect-routines prefect-server; do
+  launchctl disable "$DOMAIN/com.atelier.$NAME"
+  launchctl bootout "$DOMAIN/com.atelier.$NAME" 2>/dev/null || true
+done
+
+launchctl print "$DOMAIN" | rg 'com\.atelier\.prefect-(server|routines)'
+launchctl print-disabled "$DOMAIN" | rg 'com\.atelier\.prefect-(server|routines)'
 ```
 
-Cancel with:
+Confirm the two Prefect labels are both disabled and absent before re-enabling
+any legacy label. A saved plist is not a complete rollback:
+before bootstrapping it, either restore the compatible legacy source snapshot
+at every path in its `ProgramArguments` or repoint the plist to a preserved
+compatible checkout. Restore that snapshot's locked Python environment as
+well; the trimmed Prefect environment is not a compatible legacy runtime.
+Inspect each plist and verify that every referenced executable and script
+exists (and that scripts still pass their syntax checks). Only then bootstrap
+the intended legacy plists, explicitly re-enabling each exact label first:
 
 ```bash
-sudo pmset repeat cancel
+launchctl enable "$DOMAIN/<exact-legacy-label>"
+launchctl bootstrap "$DOMAIN" "/path/to/compatible/<exact-legacy-label>.plist"
 ```
 
-## Uninstall
+Re-enable an equivalent cloud schedule only after all local copies are
+stopped. Preserve the Prefect state directory for diagnosis and history.
+
+## Template maintenance
+
+After editing either plist or the service wrapper:
 
 ```bash
-launchctl unload "$HOME/Library/LaunchAgents/com.atelier.autoevo-nightly.plist"
-rm "$HOME/Library/LaunchAgents/com.atelier.autoevo-nightly.plist"
-launchctl unload "$HOME/Library/LaunchAgents/com.atelier.semantic-index.plist"
-rm "$HOME/Library/LaunchAgents/com.atelier.semantic-index.plist"
-sudo pmset repeat cancel
+plutil -lint scripts/launchd/com.atelier.prefect-server.plist
+plutil -lint scripts/launchd/com.atelier.prefect-routines.plist
+bash -n scripts/routine_prefect_service.sh
+uv run --frozen python scripts/routine_prefect.py validate --json
 ```
 
-## Manual test (without waiting for 5am)
-
-```bash
-# Note: an env-var prefix does NOT propagate through `launchctl start` (the
-# job runs in launchd's environment, not your shell's), so this runs WITH the
-# 0-120s hostname stagger:
-launchctl start com.atelier.autoevo-nightly
-tail -f /tmp/com.atelier.autoevo-nightly.out /tmp/com.atelier.autoevo-nightly.err
-```
-
-Or run the Codex wrapper directly, skipping the stagger:
-
-```bash
-ATELIER_SKIP_STAGGER=1 \
-  scripts/routine_runner.sh autoevo-nightly /autoevo-nightly
-```
-
-Test semantic maintenance separately. It is deterministic, owner-gated, and
-offline; it skips model loading when the index is current:
-
-```bash
-scripts/semantic_index_runner.sh
-uv run scripts/semantic.py status --format json
-tail -f /tmp/com.atelier.semantic-index.out /tmp/com.atelier.semantic-index.err
-```
-
-An actual index update writes one `search_efficiency` JSON report to the
-`.out` log. It includes scope reduction, raw coverage, chunk count,
-representative query latency, deduplication, and capsule size. A fresh no-op
-does not rerun the probes or emit a report.
-
-Test reminder tracking separately. It is deterministic, owner-gated, and
-networked; the cache write is atomic and source failures preserve the last
-successful section:
-
-```bash
-scripts/tracking_refresh_runner.sh
-uv run scripts/daily_brief.py
-tail -f /tmp/com.atelier.tracking-refresh.out /tmp/com.atelier.tracking-refresh.err
-```
-
-The audit log for the run itself (what the bot did to the vault) lives at `$OV/agent-findings/autoevo-applied-<YYYY-MM-DD>.md`; the `/tmp/` files capture aggregate wrapper and Codex CLI output. Each acquired attempt also records a private event journal under `$OV/cache/` in its claim. The claim file at `$OV/_meta/routine_runs/autoevo-nightly/<date>.toml` records status, timing, journal path, and verification evidence.
-
-Verify that a cycle performed real Forgetter work rather than only completing
-a preflight `noop`:
-
-```bash
-python3 scripts/autoevo_verify.py --cycle "$(date +%Y-%m-%d)" --json
-```
-
-For autoevo, `status = "completed"` additionally requires
-`verification = "passed"`. The wrapper has then proved a real Forgetter sweep,
-one committed decay report per returned sweep envelope, matching audit
-sidecars, a committed audit with no bot-owned dirt left behind, ordered
-claim-owned event markers, and
-final Git evidence. Verification runs while the claim is
-`completion-uncertain` with `verification = "pending"` so interruption cannot
-leave a false success. A failed verification remains
-`completion-uncertain`. Other routines use the general artifact attestation:
-a fresh, nonempty file matching the routine's declared `output_dir` and
-`file_pattern`.
-
-`status = "deferred"` means the deterministic autoevo preflight wrote and
-validated its audit artifact before Codex or the mutation phase started. The
-claim's `retry_after_epoch` is the earliest automatic retry. The first hourly
-calendar or RunAtLoad check at or after that time may reacquire the cycle.
-`failed` and `completion-uncertain` still require explicit effects review.
-
-The first manual run is also the auth smoke test. If `codex exec` cannot use the cached ChatGPT login, it logs the failure to `/tmp/com.atelier.autoevo-nightly.err`. Resolve it with `codex login`, then rerun `codex login status` and the direct wrapper test.
-
-## Debugging coordination
-
-```bash
-# Confirm this machine owns local routines:
-uv run scripts/routine_owner.py status
-
-# Check lock status for today's cycle (uv run: boto3 lives in the venv):
-uv run scripts/routine_lock.py status autoevo-nightly
-
-# Check the canonical cycle claim. status=failed means the model or runner
-# failed after acquisition; status absent means no cycle was acquired:
-cat "$OV/_meta/routine_runs/autoevo-nightly/$(date +%Y-%m-%d).toml"
-
-# Preflight and lock-acquire failures are machine-specific diagnostics:
-ls -lt "$OV/_meta/routine_failures/autoevo-nightly/"
-
-# After stopping the original process and reviewing its external effects,
-# preserve a cycle whose effects completed:
-uv run scripts/routine_lock.py recover <routine> --cycle <id> \
-  --outcome completed --confirm-effects-reviewed
-
-# Approve one same-cycle retry only when review confirms repeating is safe:
-uv run scripts/routine_lock.py recover <routine> --cycle <id> \
-  --outcome safe-to-retry --confirm-effects-reviewed
-
-# Test lock acquire/release without running the routine:
-AWS_PROFILE=atelier-lock uv run scripts/routine_lock.py acquire autoevo-nightly --cycle test
-AWS_PROFILE=atelier-lock uv run scripts/routine_lock.py release autoevo-nightly --cycle test
-```
-
-Owner acquire atomically reserves the claim as `running`; a normal `failed`,
-`completed`, or `completion-uncertain` claim cannot be acquired again. A
-deterministic `deferred` claim can be consumed automatically because no model
-or mutation phase began.
-`safe-to-retry` changes the synchronized claim to `retry-approved`, which is
-the manual recovery state owner acquire may consume. DynamoDB recovery updates
-the same local claim and keeps a central `retry-approved` fence. Dynamo acquire
-atomically consumes that state, so another machine may safely execute the
-approved retry even before its local Drive copy converges.
-
-## Path assumptions
-
-The plists delegate to `scripts/routine_runner.sh`,
-`scripts/semantic_index_runner.sh`, or `scripts/tracking_refresh_runner.sh`.
-They assume:
-
-- Atelier checked out at `~/atelier/`. Edit the plist's `ProgramArguments` path if elsewhere.
-- `codex` on `PATH` via `/opt/homebrew/bin`, `/usr/local/bin`, or `~/.local/bin`. The plist and wrapper populate these locations because `launchd` does not inherit an interactive shell's `PATH`.
-- `uv` on `PATH` (the runner invokes `routine_lock.py` via `uv run` so boto3 resolves from the project venv).
-- `caffeinate` on `PATH` on macOS. The system audit checks it before local routines are considered ready.
-- `$OV` is exported from one of: `~/.zprofile`, `~/.profile`, or `~/atelier/harness/env.local.sh` (see Install step 1). The wrapper tries all three in order and aborts loudly if none work.
-- If `$OV` is inside macOS `~/Library/CloudStorage`, grant Full Disk Access to the background helper executable reported by the TCC log. Homebrew Python is the first helper that reads ownership policy. The model runtime may require its own grant on first use. Use the canonical `~/Library/CloudStorage/...` path in `env.local.sh`, not a legacy `~/Google Drive` alias. A denied prompt now times out and fails before claim creation.
-- `$OV/cache/` and `$OV/_meta/routine_runs/` are created on every run via `mkdir -p`, so a fresh install does not silently fail on missing directories.
-- For recommended single-owner coordination: a gitignored `harness/routine_owner.local.toml` identity matching `$OV/_meta/routine_owner.toml`.
-- For optional active-active coordination: an `atelier-lock` profile in `~/.aws/credentials` (see Step 2b). Without it, DynamoDB mode fails loud rather than silently skipping.
-
-## What the schedule does NOT do
-
-- Does not push commits to `origin`. Per `protocols/repo-conventions.md`, push remains user-driven.
-- Does not touch `<paths.wiki>/`, `<paths.daily_notes>/`, or anything outside the four working tiers.
-- Does not start a new session if an existing session was active within the last 6h (see `protocols/autoevo.md` § Pre-flight gates).
+No test or repository command in this guide installs, loads, unloads, starts,
+or stops a real LaunchAgent.
