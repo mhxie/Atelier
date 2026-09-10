@@ -53,12 +53,11 @@ helper process. From an external shell, quote the skill mention, for example
 another registered project command, Codex renders the `$command` form. Native
 Codex built-ins such as `/hooks` keep their slash form.
 
-Codex lifecycle hooks live in `.codex/hooks.json`. `SessionStart` reuses
-`scripts/cues.py --hook --runtime codex`; `UserPromptSubmit` refreshes the
-session lock; `Stop` ages out legacy full-payload direct-API logs. Claude Code
-keeps the corresponding cue and lock behavior in `.claude/settings.json` and
-runs the same legacy-log cleanup at `SessionEnd`. Direct API calls no longer
-write invocation logs, so cleanup only drains existing machine-local files.
+Lifecycle hooks live in `.codex/hooks.json` and `.claude/settings.json`.
+Session cues and locks use `scripts/cues.py`; `invocation_log_gc.py` ages out
+existing direct-API payload logs. Opt-in hooks send advisory identifiers only;
+native usage, privacy filtering, and coverage rules live in the
+[observability reference](../sources/runtimes/observability.md).
 
 Claude Code also loads the `hooks:` block of an agent's frontmatter and runs
 those hooks for that agent's own tool calls, so a boundary can be scoped to
@@ -69,6 +68,10 @@ payload or shell shape it cannot read. Agent-scoped hooks have no Codex equivale
 there the role source's prose rule is the only boundary.
 
 ## Runtime Selection
+
+Runtime references and local CLI discovery follow the
+[evidence contract](../sources/runtimes/README.md). The registry owns bindings;
+private review owns adoption and retirement, not the discovery module.
 
 `harness/runtimes.toml` declares both native CLI surfaces and ships with Codex
 as the default. `scripts/atelier_runtime.py` is an optional selector around

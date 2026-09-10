@@ -14,6 +14,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -24,6 +33,15 @@
             "type": "command",
             "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/cues.py\" --touch-lock 2>/dev/null || true",
             "timeout": 3
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
           }
         ]
       }
@@ -48,6 +66,70 @@
             "type": "command",
             "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/invocation_log_gc.py\" 2>/dev/null || true",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",
+            "timeout": 1
           }
         ]
       }

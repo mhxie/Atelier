@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+from contextlib import suppress
 import math
 import os
 import signal
@@ -33,17 +35,20 @@ def wait_until_deadline(
         sleep(min(POLL_INTERVAL_SECONDS, remaining))
 
 
-def stop_process_group(process: subprocess.Popen[bytes]) -> None:
-    """Terminate one process group, escalating to SIGKILL after five seconds."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        process.wait()
-        return
-    try:
-        wait_until_deadline(process, time.time() + 5)
-    except subprocess.TimeoutExpired:
-        pass
+def stop_process_group(process: subprocess.Popen[bytes], *, grace_seconds: float = 5) -> None:
+    """Terminate one group; callers with an exhausted deadline can skip grace."""
+    if not math.isfinite(grace_seconds) or grace_seconds < 0:
+        raise ValueError("grace_seconds must be finite and nonnegative")
+    if grace_seconds:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            process.wait()
+            return
+        try:
+            wait_until_deadline(process, time.time() + grace_seconds)
+        except subprocess.TimeoutExpired:
+            pass
     # The leader may exit while a descendant ignores SIGTERM. Kill any
     # remaining group members before a caller releases its execution mutex.
     try:
@@ -51,6 +56,28 @@ def stop_process_group(process: subprocess.Popen[bytes]) -> None:
     except ProcessLookupError:
         pass
     process.wait()
+
+
+_LIVE_CHILDREN: dict[subprocess.Popen, float] = {}
+
+
+def track_process(process: subprocess.Popen, *, grace_seconds: float = 5) -> None:
+    _LIVE_CHILDREN[process] = grace_seconds
+
+
+def release_process(process: subprocess.Popen) -> None:
+    _LIVE_CHILDREN.pop(process, None)
+
+
+def terminate_live_children() -> None:
+    """Carry detached-child teardown through a host-owned sys.exit handler."""
+    while _LIVE_CHILDREN:
+        with suppress(KeyError, OSError, ValueError):
+            process, grace = _LIVE_CHILDREN.popitem()
+            stop_process_group(process, grace_seconds=grace)
+
+
+atexit.register(terminate_live_children)
 
 
 def main(argv: list[str] | None = None) -> int:

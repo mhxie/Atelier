@@ -9,8 +9,7 @@ receipt proving that the declared domain artifact exists.
 
 from __future__ import annotations
 
-import atexit
-from contextlib import ExitStack, contextmanager, suppress
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 import hashlib
@@ -22,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import tomllib
 from typing import Any, Iterator
@@ -33,7 +33,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _models  # noqa: E402
 import _node  # noqa: E402
 from _paths import atomic_write, tier_segments  # noqa: E402
-from command_timeout import stop_process_group, wait_until_deadline  # noqa: E402
+from command_timeout import release_process, stop_process_group, track_process, wait_until_deadline  # noqa: E402
+from runtime import capabilities as runtime_capabilities  # noqa: E402
+from observability import usage as observations  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,6 +164,7 @@ class ModelSpec:
     wrapper: str | None = None
     model: str | None = None
     rss_sources: str | None = None
+    runtime_snapshot: bool = False
 
     def payload(self) -> dict[str, Any]:
         value = asdict(self)
@@ -356,6 +359,11 @@ def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str
     if schedule.name == "autoevo-nightly":
         wrapper = "autoevo"
     rss_sources = row.get("rss_sources")
+    runtime_snapshot = row.get("runtime_snapshot", False)
+    if not isinstance(runtime_snapshot, bool):
+        raise ConfigurationError("runtime_snapshot must be boolean")
+    if runtime_snapshot and (verb != "/run-routine" or wrapper is not None):
+        raise ConfigurationError("runtime_snapshot requires an ordinary /run-routine")
     if rss_sources is not None:
         rss_sources = _safe_relative(rss_sources, "rss_sources")
         if Path(rss_sources).suffix != ".toml":
@@ -381,6 +389,7 @@ def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str
         wrapper=wrapper,
         model=model,
         rss_sources=rss_sources,
+        runtime_snapshot=runtime_snapshot,
     )
 
 
@@ -711,6 +720,7 @@ def codex_argv(spec: ModelSpec, *, root: Path, vault: Path, cwd: Path, output: P
         "--sandbox",
         profile["sandbox"],
         "--ephemeral",
+        "--json",
         "--color",
         "never",
         "--output-schema",
@@ -733,6 +743,7 @@ def execute_process(
     cwd: Path | None = None,
     seconds: float | None = None,
     input_text: str | None = None,
+    usage: observations.Usage | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a process group with file-backed I/O and kill it at the boundary."""
     if seconds is not None and seconds <= 0:
@@ -744,44 +755,64 @@ def execute_process(
             stdin = stack.enter_context(tempfile.TemporaryFile())
             stdin.write(input_text.encode())
             stdin.seek(0)
+        process = None
+        reader = None
+        ready, stopping = threading.Event(), threading.Event()
+        if usage is not None:
+            def read_model():
+                ready.wait()
+                if process is not None:
+                    usage.drain(process.stdout, stopping)
+            try:
+                reader = threading.Thread(target=read_model, daemon=True)
+                reader.start()
+            except RuntimeError:
+                reader = None
+                usage.gaps += 1
         try:
-            process = subprocess.Popen(argv, env=env, cwd=cwd, stdin=stdin, stdout=output, stderr=output, start_new_session=True)
+            process = subprocess.Popen(
+                argv, env=env, cwd=cwd, stdin=stdin, start_new_session=True,
+                stdout=subprocess.PIPE if reader else subprocess.DEVNULL if usage is not None else output,
+                stderr=subprocess.DEVNULL if usage is not None else output,
+            )
         except OSError as exc:
-            output.write(f"ERROR: cannot start {argv[0]}: {exc}\n".encode())
+            ready.set()
+            if usage is None:
+                output.write(f"ERROR: cannot start {argv[0]}: {exc}\n".encode())
             returncode = 127
         else:
-            _LIVE_CHILDREN.add(process)
+            ready.set()
+            track_process(process)
             try:
                 returncode = process.wait() if seconds is None else wait_until_deadline(process, time.time() + seconds)
             except subprocess.TimeoutExpired:
                 stop_process_group(process)
-                output.write(f"ERROR: command timed out after {seconds:g}s: {argv[0]}\n".encode())
+                if usage is None:
+                    output.write(f"ERROR: command timed out after {seconds:g}s: {argv[0]}\n".encode())
                 returncode = 124
             except BaseException:
                 stop_process_group(process)
                 raise
             finally:
-                _LIVE_CHILDREN.discard(process)
+                if reader is not None:
+                    stopping.set()
+                    reader.join(timeout=1)
+                    if reader.is_alive():
+                        usage.gaps += 1
+                release_process(process)
         output.seek(0)
         return subprocess.CompletedProcess(list(argv), returncode, output.read().decode(errors="replace"))
 
 
-_LIVE_CHILDREN: set[subprocess.Popen] = set()
-
-
-def terminate_live_children() -> None:
-    """Stop every child process group this process started.
-
-    Children get their own session, so signals to this process miss them, and
-    Prefect's runner re-registers SIGTERM (`runner.py` -> `sys.exit(0)`): hook
-    interpreter shutdown rather than lose that race silently.
-    """
-    while _LIVE_CHILDREN:  # pop first: a child that will not die must not be retried
-        with suppress(KeyError, OSError, ValueError):
-            stop_process_group(_LIVE_CHILDREN.pop())
-
-
-atexit.register(terminate_live_children)
+def execute_observed_model(argv, *, flow_run_id: str, **kwargs):
+    usage = observations.Usage()
+    returncode = None
+    try:
+        result = execute_process(argv, usage=usage, **kwargs)
+        returncode = result.returncode
+        return result
+    finally:
+        observations.emit(usage, returncode, flow_run_id)
 
 
 def screened_log(text: str) -> str:
@@ -1010,10 +1041,10 @@ def execute_autoevo(spec: ModelSpec, *, vault: Path, root: Path, cycle: str, flo
         env.update(semantic.prepare_query_copy(vault, workspace / "qmd"))
         env.update(AUTOEVO_WORKSPACE=str(workspace), TMPDIR=str(workspace / "tmp"), PYTHONDONTWRITEBYTECODE="1")
         argv = codex_argv(spec, root=root, vault=vault, cwd=workspace, output=workspace / "result.json")
-        result = execute_process([*argv, adapter_prompt(spec, root=root)], env=env, cwd=workspace,
-                                 seconds=spec.profile_values["timeout_seconds"])
-        if result.stdout.strip():
-            print(screened_log(result.stdout), flush=True)
+        result = execute_observed_model(
+            [*argv, adapter_prompt(spec, root=root)], flow_run_id=flow_run_id,
+            env=env, cwd=workspace, seconds=spec.profile_values["timeout_seconds"],
+        )
         if result.returncode:
             raise ExecutionError(f"Autoevo candidate process exited {result.returncode}; no publication attempted")
         candidate = workspace / "proposal.json"
@@ -1058,6 +1089,13 @@ def execute_model(
             inputs = temporary / "inputs.json"
             stage_rss_inputs(spec, root=root, vault=vault, destination=inputs)
             env["ATELIER_ROUTINE_INPUTS"] = str(inputs)
+        if spec.runtime_snapshot:
+            snapshot = runtime_capabilities.snapshot(
+                root=root, registry=_load_toml(root / "harness/runtimes.toml"), environ=env_source,
+            )
+            snapshot_file = temporary / "runtime-snapshot.json"
+            snapshot_file.write_text(json.dumps({**snapshot, "cycle_id": cycle}), encoding="utf-8")
+            env["ATELIER_RUNTIME_SNAPSHOT"] = str(snapshot_file)
         argv = codex_argv(spec, root=root, vault=vault, cwd=cwd, output=result_file)
         prefix = []
         if env_source.get("ATELIER_SKIP_CAFFEINATE") != "1" and shutil.which("caffeinate", path=env_source.get("PATH")):
@@ -1077,17 +1115,15 @@ def execute_model(
             "verification": "pending",
         }
         write_receipt(path, pending_receipt)
-        result = execute_process(
+        result = execute_observed_model(
             [*prefix, *argv, prompt],
+            flow_run_id=flow_run_id,
             env=env,
             cwd=cwd,
             seconds=spec.profile_values["timeout_seconds"],
         )
-        clean_log = screened_log(result.stdout)
-        if clean_log:
-            print(clean_log, flush=True)
         if result.returncode:
-            raise ExecutionError(f"Codex exited {result.returncode}; inspect the screened Prefect log")
+            raise ExecutionError(f"Codex exited {result.returncode}; inspect Prefect state and observation coverage")
         outcome = _model_result(result_file, spec, vault=vault, started_at=started_at)
     receipt = {
         "contract_version": 3,
@@ -1104,10 +1140,10 @@ def execute_model(
         "output_file": outcome["output_file"],
         "result_summary": outcome["summary"][:500],
         "skipped_inputs": outcome["skipped_inputs"],
-        "verification": "passed",
+        "verification": "blocked" if outcome["outcome"] == "noop" and outcome["skipped_inputs"] else "passed",
     }
     write_receipt(path, receipt)
-    print(f"routine artifact verified: {receipt['output_file']}", flush=True)
+    print(f"routine artifact {receipt['verification']}: {receipt['output_file']}", flush=True)
     return receipt
 
 

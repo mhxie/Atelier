@@ -80,7 +80,7 @@ permissions = [
   "gmail:read",
 ]
 required_clis = []
-required_plugins = ["gmail@openai-curated"]
+required_plugins = ["gmail@openai-curated-remote"]
 optional_plugins = []
 allowed_commands = ["/run-routine"]
 

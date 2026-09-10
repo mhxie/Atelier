@@ -67,7 +67,10 @@ points at the canonical sources and adds only what is Codex-native.
   Reader owns the shared reading behavior; Scholar keeps only its role settings
   and the shared-contract pointer.
 - Direct chat-completion calls are unlogged. Runtime hooks only age out legacy
-  full-payload invocation logs through `scripts/invocation_log_gc.py`.
+  full-payload invocation logs through `scripts/invocation_log_gc.py`; opt-in
+  native usage/lifecycle observation is documented in `sources/runtimes/observability.md`.
+- For runtime capability maintenance, read `sources/runtimes/README.md` and
+  the registry's references; CLI discovery does not prove activation.
 
 - Local scheduled routines: validate declarations with
   `uv run --frozen python scripts/routine_prefect.py validate --json` and read

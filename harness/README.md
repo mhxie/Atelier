@@ -1,6 +1,7 @@
 # Harness
 
-Provider-neutral registry files for the Atelier runtime layer.
+Provider-neutral registries and maintainer reference for the Atelier runtime
+layer.
 
 | File | Purpose |
 |---|---|
@@ -39,11 +40,16 @@ committed edge matches the registries byte-for-byte (the smoke suite runs it);
 use `--apply` after editing a registry. `.agents/skills/atelier/` and
 `.codex/hooks.json` remain hand-maintained.
 
-Before finishing harness changes:
+## Validation
+
+Install the locked dependencies using the root [getting-started guide](../README.md#get-started).
+After a registry edit, render the Codex edges as described above. Before
+finishing harness changes, run:
 
 ```bash
 python3 scripts/harness_lint.py
-python3 scripts/harness_smoke.py
+.venv/bin/python scripts/harness_smoke.py
+python3 scripts/harness_lint.py --footprint
 ```
 
 The lint first validates one public-config snapshot with pinned
@@ -58,5 +64,37 @@ The JSON report and exit codes are unchanged. Structural errors use
 malformed config uses `registry-read`; validator/setup failures use
 `registry-validator`. Fix these before cross-file checks can run.
 
-The smoke test exercises runtime selection, native skill and agent mappings,
-and hook behavior without reading the private vault.
+Smoke runs harness lint, unittest discovery (including runtime mappings and
+hooks), and offline Ruff when available, without reading the private vault.
+Inspect skipped checks: missing Node dependencies or Ruff reduce coverage.
+It does not verify live model calls, connectors, scheduled deployment, or
+publication privacy. Those require the selected workflow's own checks; see the
+[publication gate](../scripts/README.md#public-repo-privacy-gate) for that boundary.
+
+## Roadmap
+
+Planned, in this order. These are not implemented capabilities or release
+commitments; each stage needs an approved implementation plan and verification.
+
+1. **Confirmed action handoff.** Extend the [meeting procedure](../protocols/intent-meeting.md)
+   and existing [Planner/Executor contract](../protocols/local-first-architecture.md#planner-vs-executor-orthogonal-to-l1-l5)
+   so selected, approved actions reach an identified task record with source
+   links and result backfill. Saving a meeting note must not accept every
+   proposed task. Verify subset approval, duplicate prevention, unchanged
+   raw-capture authority, and evidence-backed closure.
+2. **Verified external follow-through.** Extend the selected workflow or private
+   feature to check actual mail/calendar results and track approved follow-ups
+   in existing task records. Verify external authority separately from record
+   writes, preserve real deadlines alongside follow-up dates, and leave
+   uncertain outcomes open without blind retries. A sent request is not a reply.
+3. **Decision and research revisits.** Connect existing [decision review triggers](../.claude/commands/decision.md)
+   to the [weekly review](../.claude/commands/weekly.md); connect configured research
+   verification and challenge outputs back to the original question or decision.
+   Add routine reminders through existing cues and brief aggregation only when
+   needed. Verify due reviews, evidence-backed event triggers, and retirement
+   of superseded reminders; a saved report is not a verified conclusion.
+
+Keep one owner per fact and extend existing workflows first. This roadmap does
+not propose another task database or scheduler. Directory reorganization is
+separate work, justified by real module boundaries. Implementation must fit
+the [whole-feature budget and approval rules](../protocols/repo-conventions.md#editing-discipline).

@@ -155,6 +155,7 @@ kind = "model"                         # optional; this is the default
 command = "/run-routine <routine-name>"
 local_profile = "local-research"       # from harness/routine_profiles.toml
 rss_sources = "<private-vault-relative>.toml"  # optional
+runtime_snapshot = true               # optional, default false; bounded CLI evidence
 cron = "0 6 * * *"                     # a string or non-empty array
 timezone = "local"                     # or an IANA name
 output_dir = "<relative path under $OV>"
@@ -173,6 +174,11 @@ before the unchanged model sandbox. URLs stay out of Prefect parameters.
 `ATELIER_ROUTINE_INPUTS` names temporary JSON: untrusted feed excerpts, not
 article full text. Prompts must report counters/gaps and never refetch feeds;
 collector failure means unknown coverage. The helper owns network/size limits.
+
+`runtime_snapshot` opts ordinary `/run-routine` rows into temporary
+`ATELIER_RUNTIME_SNAPSHOT` evidence, not scheduler state or a new ledger.
+The [runtime evidence contract](../sources/runtimes/README.md) owns discovery,
+failure and cleanup semantics.
 
 `digest.context = "<safe-key>"` provides metadata-only latest background in
 `context_sources`, independent of fresh windows, caps, carry, and acks. Missing
@@ -266,15 +272,14 @@ or failed artifact attestation leaves that conservative ambiguity evidence in
 place, so the same cycle cannot launch again without review. On a validated
 result the adapter fills the delivery fields; autoevo's domain verifier then
 promotes the pending receipt to `passed` only after sweep, sidecar, Git, and
-journal evidence agree. A
-deterministic preflight block writes `verification = "blocked"` and returns a
-Prefect `Deferred` failed state so it is visible without pretending delivery
-succeeded.
+journal evidence agree. A preflight block records `blocked` and Prefect
+`Deferred`. A validated ordinary `noop` with skipped inputs also records
+`blocked`: its audit artifact is valid, but required work is incomplete.
 
-A later occurrence of the same cycle reads that receipt first: `passed` with a
-still-valid declared artifact short-circuits the run, `blocked` may proceed
-because no model started, and any other value refuses the automatic rerun
-(`scripts/routine_adapter.py`).
+On a later invocation of the same cycle, `passed` short-circuits only while its
+artifact is valid; `blocked` may proceed; other values refuse
+(`scripts/routine_adapter.py`). This does not enable automatic model retries.
+Review effects before manual reruns.
 
 ### Recovery
 

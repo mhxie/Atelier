@@ -18,6 +18,15 @@ import command_timeout as ct  # noqa: E402
 
 
 class CommandTimeoutTest(unittest.TestCase):
+    def test_zero_grace_sends_only_sigkill(self) -> None:
+        process = mock.Mock(pid=123, args=["fixture"])
+        with mock.patch.object(ct.os, "killpg") as killpg, \
+                mock.patch.object(ct, "wait_until_deadline") as wait:
+            ct.stop_process_group(process, grace_seconds=0)
+        killpg.assert_called_once_with(process.pid, signal.SIGKILL)
+        wait.assert_not_called()
+        process.wait.assert_called_once_with()
+
     def test_deadline_uses_the_injected_clock_not_elapsed_sleep(self) -> None:
         process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
         try:

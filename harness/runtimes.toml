@@ -13,9 +13,11 @@
 default = "codex"
 local_override = "harness/runtime.local.toml"
 environment_override = "ATELIER_RUNTIME"
+observability_reference = "sources/runtimes/observability.md"
 
 [runtimes.codex]
 label = "Codex"
+capability_reference = "sources/runtimes/codex.md"
 executable = "codex"
 command_prefix = "$"
 # Surface declaration (consumed by scripts/render_runtime_edges.py and, later,
@@ -35,6 +37,7 @@ fork_interactive_args = ["fork", "--last"]
 
 [runtimes.claude]
 label = "Claude Code"
+capability_reference = "sources/runtimes/claude.md"
 executable = "claude"
 command_prefix = "/"
 instruction_file = "CLAUDE.md"

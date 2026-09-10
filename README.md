@@ -1,53 +1,158 @@
 # Atelier
 
-> **A personal workshop, published.** A reflective-thinking system for [Codex CLI](https://github.com/openai/codex), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and a local-first Zettelkasten: daily reflection, decision journals, deep reading, goal tracking, knowledge crystallization. Not a product. The patterns are reusable; the configuration is bespoke.
+**A workshop for your thinking, built on a local-first Zettelkasten.**
 
-The system surrounds an **œuvre**: notes, decisions, and reflections kept as local Markdown under `$OV/`, outside this repository. Task-specific agents run the sessions, a deterministic trust engine scores the wiki layer, and shared registries drive both runtimes. This page is the map, not a workflow specification.
+Atelier is a personal agent harness for [Codex CLI](https://github.com/openai/codex)
+and [Claude Code](https://docs.anthropic.com/en/docs/claude-code), built around a
+local-first **Zettelkasten**. It connects daily reflection, deep reading,
+decision journals, and goal reviews to your **œuvre**: the notes, sources,
+decisions, and reflections you accumulate over time. A session can reconnect
+a question to its sources, revisit a decision with its original assumptions,
+or crystallize working notes into source-backed wiki claims. The lasting
+artifact is your knowledge, kept in plain Markdown and independent of any
+one model or chat history.
 
-## Install
+Underneath is an opinionated knowledge architecture. Provider-neutral registries
+let both runtimes share the same workflows; bounded retrieval loads task-relevant
+context; **le cercle** adds specialist perspectives. Certification tiers keep
+provisional working notes separate from locally certified wiki knowledge.
+At the wiki layer, `[C1]` claim identifiers, bi-temporal evidence anchors, and a
+deterministic PageRank trust engine make support inspectable at claim level.
+External evidence seeds the trust graph; repeated agent agreement does not.
+The result is a knowledge base designed to be revisited, challenged, and revised.
+
+[What you can do](#what-you-can-do) · [Get started](#get-started) ·
+[Design](#design) · [Forking](#forking)
+
+## What you can do
+
+| Practice | What it helps you do | Start with |
+|---|---|---|
+| Daily reflection | Find patterns and open questions in your recent notes. | `$hi` |
+| Decision journals | Make assumptions, trade-offs, and review triggers explicit. | `$decision` |
+| Deep reading | Read a paper or article in the context of your questions. | `$read` |
+| Goal tracking | Review progress, commitments, and direction. | `$weekly`, `$review` |
+| Knowledge crystallization | Develop working notes into evidence-anchored wiki claims. | `$promote` |
+
+Start with a question in your agent's chat:
+
+```text
+$hi I've been busy all week. What actually moved forward?
+$read <paper URL or local path>
+$decision Help me think this through before I say yes.
+$hi Turn this meeting transcript into decisions and action items.
+```
+
+`$hi` accepts a free-form request or opens the menu when you're not sure where
+to begin. In Claude Code, use `/hi`, `/read`, and so on instead of `$`.
+The [workflow menu](protocols/hi-menu.md) covers the rest.
+
+## Get started
+
+You need an authenticated Codex CLI or Claude Code, Git, Python 3.11+, `uv`,
+`rg`, `jq`, and Node 22+ with npm. Use a system or Homebrew Node installation
+for the local adapters.
+
+**1. Install the harness.**
 
 ```bash
 git clone https://github.com/mhxie/atelier.git ~/atelier
 cd ~/atelier
-uv sync
-echo 'export OV="$HOME/path/to/your/vault"' >> ~/.zshrc
-source ~/.zshrc
+uv sync --locked
+npm ci
 ```
 
-Personal content under `$OV/` is gitignored; only system configuration is committed.
+**2. Connect your vault.**
 
-## Run
+Point `OV` at an existing Markdown vault outside the repository. Your personal
+notes are not part of the clone.
 
 ```bash
-codex -C . --add-dir "$OV" '$hi'   # Codex, the shipped default
-claude                              # Claude Code: /introspect once, then /hi
+export OV="/absolute/path/to/your/existing-vault"
 ```
 
-Command names are stable across runtimes (`$hi` in Codex is `/hi` in Claude Code). `$hi` opens the session menu; `$introspect` builds `profile/` from your notes and comes first on a fresh vault. A fresh clone has no vault and no profile: an onboarding cliff, working as intended; this is the maintainer's daily-use configuration, not a turnkey second brain.
+Follow [local search setup](sources/semantic.md#setup-and-hardware) to initialize
+models and index your notes. The [path registry](harness/paths.toml) maps the
+expected vault layout; [local overrides](harness/paths.local.toml.example)
+adapt it to yours.
 
-## Map
+**3. Build a profile and open a session.**
 
-| Want | Read |
-|---|---|
-| The load-bearing idea: directory = certification tier (L1–L5) | `protocols/local-first-architecture.md` |
-| Claim-level trust: `[C1]` markers, bi-temporal anchors, PageRank seeded by external evidence | `protocols/wiki-schema.md`, `scripts/trust.py` |
-| Provider-neutral registries: commands, agents, models, capabilities, paths | `harness/README.md` |
-| How two runtimes share one spec; plugins, sandbox, permissions | `protocols/runtime-adapters.md` |
-| Session workflows and the menu | `protocols/hi-menu.md`, `.claude/commands/` |
-| Agent roles and their archetypes | `.claude/agents/`, `protocols/atelier.md` |
-| On-demand contract index | `protocols/README.md` |
-| Retrieval and quality gates | `scripts/semantic.py`, `scripts/lint.py`, `scripts/privacy_check.py` |
+Profile setup draws on your authored daily notes. From the repository, run:
 
-The file boundaries are:
+```bash
+codex -C . --add-dir "$OV" '$introspect'
+```
 
-- `CLAUDE.md` holds shared runtime invariants; `AGENTS.md` adapts them for Codex.
-- `harness/` owns registration and runtime/model metadata, not workflow bodies.
-- `.claude/commands/` and `.claude/agents/` are the current shared workflow and role sources. Their Claude-shaped location is a compatibility boundary, not a second source for Codex.
-- `protocols/` holds shared contracts; `frameworks/` and `sources/` are on-demand references, not required startup context.
-- `scripts/` owns executable behavior; [its map](scripts/README.md) separates shared infrastructure, applications, and verification. `tests/` owns the checks.
+Review the proposed profile before saving it, then continue with `$hi`.
+For Claude Code, launch `claude` from the repository and use `/introspect`,
+then `/hi`. The generated personal context stays in gitignored `profile/`.
 
-Generated runtime edges (`.codex/agents/`, `.agents/skills/`, except the hand-written `atelier` skill) are rendered by `scripts/render_runtime_edges.py`. Edit their registry inputs, never generated files. Runtime hooks remain hand-maintained. Private knowledge and preferences remain outside this public tree.
+## Design
+
+Shared workflows and agent briefs define the work. Provider-neutral registries
+and thin adapters make those same specifications available in either runtime.
+Each session selects the context it needs and draws on [**le cercle**](protocols/atelier.md),
+the circle of specialist agents. You, **the Painter**, set the direction;
+substantive note changes are proposed for your approval.
+
+```text
++----------------------------------+
+|     Atelier: shared harness      |
+|                                  |
+| +------------------------------+ |                  +----------------------------+
+| |   Workflows + agent briefs   | | specs / results  |                            |
+| +------------------------------+ |----------------->|                            |
+|                                  |                  |                            |
+| +------------------------------+ |                  |       Agent session        |
+| |    Registries + adapters     | |                  |  Codex CLI or Claude Code  |
+| +------------------------------+ |                  |                            |
+|                                  |   tool calls     |                            |
+| +------------------------------+ |<-----------------|                            |
+| |   Protocols + local tools    | |                  |                            |
+| +------------------------------+ |                  +----------------------------+
++----------------------------------+                       ^                |
+                                                           | notes          | writes
+                                                           |                |
+                                                           |                v
+                                                      +----------------------------+
+                                                      |        Your oeuvre         |
+                                                      |       Markdown vault       |
+                                                      |           ($OV)            |
+                                                      +----------------------------+
+```
+
+Logical boundaries for an interactive session, not separate services. Arrows
+carry specifications, tool calls, and note data; writes follow the selected
+workflow's authorization rules. The vault lives outside this repository.
+Storage and retrieval are local-first; model calls may use remote providers.
+
+The architecture rests on four principles:
+
+- **Files are the source of truth.** Notes remain ordinary Markdown; search
+  indexes and summaries are views, not a replacement for the source.
+- **Context follows the task.** A session loads selected sources and agent
+  instructions, keeping the working context bounded.
+- **Directory = certification tier (L1–L5).** L1 is raw capture, L2 working
+  notes, L3 external receipts, and L4 locally certified wiki knowledge. L5 is
+  reserved for foundations. Tiers describe validation depth, not authorship;
+  most thinking stays provisional.
+- **Claim-level trust.** The wiki uses `[C1]` claim markers, bi-temporal anchors,
+  and evidence-seeded PageRank in a deterministic [trust engine](scripts/trust.py).
+  The [claim schema](protocols/wiki-schema.md) makes support and validity periods
+  explicit; trust scores are not a substitute for checking the evidence.
+
+[Knowledge architecture](protocols/local-first-architecture.md) ·
+[Registries](harness/README.md) · [Runtime setup](protocols/runtime-adapters.md) ·
+[Local search](sources/semantic.md) · [Workflow contracts](protocols/README.md)
 
 ## Forking
 
-MIT, for the code. Expect rip-and-replace, not clone-and-run: `profile/`, vault content, the impressionist vocabulary (*le cercle*, *the Painter*, *the œuvre*), the bilingual English/Chinese behavior, and the `civ` / `dine` / `prm` life-area workflows are bespoke and deliberately non-portable. The value of a system like this lives in writing your own taxonomy. Take the patterns; build your own atelier.
+MIT, for the code. Expect some rip-and-replace, not a turnkey second brain.
+`profile/`, vault content, bilingual English/Chinese defaults, and the
+`civ` / `dine` / `prm` life-area workflows are bespoke. The impressionist
+vocabulary (*le cercle*, *the Painter*, *the œuvre*) is optional.
+
+The value is in building your own taxonomy, not inheriting someone else's.
+Take the patterns, replace what doesn't fit, and build your own atelier.
+Beret optional.

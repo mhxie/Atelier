@@ -206,13 +206,21 @@ def build_workflow_argv(
     return [entry["executable"], *expand_args(args), prompt]
 
 
-def execute(argv: list[str], *, dry_run: bool, active_runtime: str | None = None) -> int:
+def execute(argv: list[str], *, dry_run: bool, active_runtime: str | None = None, observe: bool = False) -> int:
+    env = os.environ.copy()
+    if observe:
+        from observability.native import launch_options
+
+        try:
+            extra, env = launch_options(active_runtime, env)
+        except ValueError as exc:
+            raise RuntimeConfigError(str(exc)) from exc
+        argv = [argv[0], *extra, *argv[1:]]
     if dry_run:
         print(shlex.join(argv))
         return 0
     if shutil.which(argv[0]) is None:
         raise RuntimeConfigError(f"runtime executable not found on PATH: {argv[0]}")
-    env = os.environ.copy()
     if active_runtime is not None:
         env["ATELIER_ACTIVE_RUNTIME"] = active_runtime
     return subprocess.run(argv, cwd=ROOT, env=env).returncode
@@ -230,6 +238,16 @@ def cmd_resolve(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     registry = load_registry()
+    if args.observations:
+        from observability.native import summary
+
+        print(json.dumps(summary(), indent=2, sort_keys=True))
+        return 0
+    if args.capabilities:
+        from runtime.capabilities import snapshot
+
+        print(json.dumps(snapshot(root=ROOT, registry=registry), indent=2, sort_keys=True))
+        return 0
     name, source = resolve_runtime(registry)
     local_path = local_config_path(registry)
     runtimes = registry["runtimes"]
@@ -304,7 +322,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
     registry = load_registry()
     name, _, entry = runtime_entry(registry, args.runtime)
     argv = [entry["executable"], *expand_args(entry["shell_args"])]
-    return execute(argv, dry_run=args.dry_run, active_runtime=name)
+    return execute(argv, dry_run=args.dry_run, active_runtime=name, observe=args.observe)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -330,7 +348,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         resume=args.resume,
         fork=args.fork,
     )
-    return execute(argv, dry_run=args.dry_run, active_runtime=runtime_name)
+    return execute(argv, dry_run=args.dry_run, active_runtime=runtime_name, observe=args.observe)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -345,6 +363,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     status = subparsers.add_parser("status", help="Show runtime preference and installation status.")
     status.add_argument("--json", action="store_true")
+    status_view = status.add_mutually_exclusive_group()
+    status_view.add_argument("--capabilities", action="store_true", help="Probe fixed version/help surfaces and emit JSON; no model launch.")
+    status_view.add_argument("--observations", action="store_true", help="Read local opt-in session measurements; JSON output.")
     status.set_defaults(func=cmd_status)
 
     use = subparsers.add_parser("use", help="Persist the local default runtime.")
@@ -354,6 +375,7 @@ def build_parser() -> argparse.ArgumentParser:
     shell = subparsers.add_parser("shell", help="Open the selected runtime without a workflow.")
     shell.add_argument("--runtime", choices=_registered_runtime_names())
     shell.add_argument("--dry-run", action="store_true")
+    shell.add_argument("--observe", action="store_true", help="Opt this process into local native telemetry.")
     shell.set_defaults(func=cmd_shell)
 
     run = subparsers.add_parser(
@@ -367,6 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--runtime", choices=_registered_runtime_names())
     run.add_argument("--non-interactive", action="store_true")
     run.add_argument("--dry-run", action="store_true")
+    run.add_argument("--observe", action="store_true", help="Opt this process into local native telemetry.")
     session = run.add_mutually_exclusive_group()
     session.add_argument("--resume", action="store_true")
     session.add_argument("--fork", action="store_true")

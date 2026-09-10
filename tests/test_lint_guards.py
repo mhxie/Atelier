@@ -248,6 +248,24 @@ class HarnessLintCliContractTest(unittest.TestCase):
 
 
 class FlatTierGlobGuardTest(unittest.TestCase):
+    def test_top_level_exemptions_do_not_skip_same_named_nested_modules(self) -> None:
+        with _lint_root() as root:
+            for prefix in ("scripts", "scripts/runtime"):
+                _write(root, f"{prefix}/_paths.py", 'p = Path("zk/inbox")\n')
+                _write(root, f"{prefix}/fission.py", 'x = tier("reflections").glob("*.md")\n')
+            paths = [f.where for f in h.check_scripts_zk_paths() + h._flat_tier_glob_findings()]
+        self.assertEqual(paths, ["scripts/runtime/_paths.py:1", "scripts/runtime/fission.py:1"])
+
+    def test_nested_packages_are_checked_without_reading_private_oneoffs(self) -> None:
+        with _lint_root() as root:
+            body = 'p = Path("zk/inbox")\nx = tier("reflections").glob("*.md")\n'
+            _write(root, "scripts/runtime/nested.py", body)
+            _write(root, "scripts/oneoff/private.py", body)
+            alias = root / "scripts/runtime/link.py"
+            alias.symlink_to(root / "scripts/oneoff/private.py")
+            paths = [f.where for f in h.check_scripts_zk_paths() + h._flat_tier_glob_findings()]
+        self.assertEqual(paths, ["scripts/runtime/nested.py:1", "scripts/runtime/nested.py:2"])
+
     def test_python_alias_and_shell_shapes_are_rejected(self) -> None:
         with _lint_root() as root:
             _write(root, "scripts/victim.py",

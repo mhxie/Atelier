@@ -124,7 +124,8 @@
           "properties": {
             "default": {"const": "codex"},
             "local_override": {"const": "harness/runtime.local.toml"},
-            "environment_override": {"const": "ATELIER_RUNTIME"}
+            "environment_override": {"const": "ATELIER_RUNTIME"},
+            "observability_reference": {"const": "sources/runtimes/observability.md"}
           }
         },
         "runtimes": {
@@ -187,7 +188,8 @@
       "properties": {
         "label": {"$ref": "#/$defs/text"},
         "executable": {"$ref": "#/$defs/text"},
-        "command_prefix": {"$ref": "#/$defs/text"}
+        "command_prefix": {"$ref": "#/$defs/text"},
+        "capability_reference": {"type": "string", "pattern": "^sources/runtimes/[a-z][a-z0-9-]*\\.md$"}
       },
       "patternProperties": {"_args$": {"$ref": "#/$defs/strings"}}
     },

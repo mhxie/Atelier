@@ -11,6 +11,15 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -22,6 +31,15 @@
             "timeout": 3
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
       }
     ],
     "Stop": [
@@ -31,6 +49,70 @@
             "type": "command",
             "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/invocation_log_gc.py\" 2>/dev/null || true",
             "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
+            "timeout": 1
           }
         ]
       }

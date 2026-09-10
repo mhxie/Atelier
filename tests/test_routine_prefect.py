@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import routine_adapter as adapter  # noqa: E402
+import command_timeout as child_processes  # noqa: E402
 import routine_prefect as orchestration  # noqa: E402
 import routine_status as status  # noqa: E402
 import semantic  # noqa: E402
@@ -115,6 +116,9 @@ file_pattern = "*.md"
             body = "import sys\nprint('failed safely')\nsys.exit(7)\n"
         else:
             output_expr = "None" if mode == "no-output" else "str(output)"
+            # A noop still writes its audit artifact; only the envelope differs.
+            envelope_outcome = "noop" if mode.startswith("noop") else "delivered"
+            skipped = "['Gmail inbox scan']" if mode == "noop-skipped" else "[]"
             body = f"""
 import json, os
 from pathlib import Path
@@ -122,11 +126,13 @@ import sys
 args = sys.argv
 result = Path(args[args.index('--output-last-message') + 1])
 output = Path(os.environ['OV']) / 'outputs' / (os.environ['ATELIER_ROUTINE_CYCLE'] + '.md')
-if {mode!r} == 'success':
+if {mode!r} != 'no-output':
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text('verified artifact\\n', encoding='utf-8')
-result.write_text(json.dumps({{'routine':'sample','outcome':'delivered','output_file':{output_expr},'summary':'ok','skipped_inputs':[]}}), encoding='utf-8')
-print('fake codex completed')
+result.write_text(json.dumps({{'routine':'sample','outcome':{envelope_outcome!r},'output_file':{output_expr},'summary':'ok','skipped_inputs':{skipped}}}), encoding='utf-8')
+print(json.dumps({{'type': 'thread.started', 'thread_id': 'fixture-session'}}))
+print(json.dumps({{'type': 'turn.started'}}))
+print(json.dumps({{'type': 'turn.completed', 'usage': {{'input_tokens': 20, 'cached_input_tokens': 5, 'output_tokens': 8}}}}))
 """.lstrip()
         codex.write_text("#!/usr/bin/env python3\n" + body, encoding="utf-8")
         codex.chmod(codex.stat().st_mode | stat.S_IXUSR)
@@ -347,6 +353,33 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((result["verification"], stored["output_file"]), ("passed", f"outputs/{CYCLE}.md"))
         self.assertEqual(stored["prefect_flow_run_id"], "flow-1")
         self.assertNotIn("status", stored)
+
+    def test_noop_that_skipped_inputs_leaves_the_cycle_retryable(self) -> None:
+        """A transient input outage must not consume the cycle.
+
+        prior_delivery() short-circuits on verification == "passed" without looking
+        at outcome, so a noop recorded as passed would block every later attempt,
+        including the next scheduled one. `blocked` is that function's existing
+        signal for "not delivered", and it is the only thing that lets the routine
+        recover on its own.
+        """
+        fixture = Fixture("noop-skipped")
+        self.addCleanup(fixture.close)
+        payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
+        receipt = fixture.execute(payload, flow_run_id="flow-noop")
+        self.assertEqual((receipt["outcome"], receipt["verification"]), ("noop", "blocked"))
+        spec = adapter.ModelSpec.from_payload(payload)
+        self.assertIsNone(adapter.prior_delivery(spec, cycle=CYCLE, vault=fixture.vault))
+
+    def test_intentional_noop_without_skipped_inputs_still_completes_the_cycle(self) -> None:
+        """A noop that skipped nothing is a real result and must not re-run forever."""
+        fixture = Fixture("noop-clean")
+        self.addCleanup(fixture.close)
+        payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
+        receipt = fixture.execute(payload, flow_run_id="flow-noop-clean")
+        self.assertEqual((receipt["outcome"], receipt["verification"]), ("noop", "passed"))
+        spec = adapter.ModelSpec.from_payload(payload)
+        self.assertIsNotNone(adapter.prior_delivery(spec, cycle=CYCLE, vault=fixture.vault))
 
     def test_failure_and_no_output_leave_ambiguous_receipt(self) -> None:
         for mode in ("failure", "no-output"):
@@ -725,11 +758,11 @@ class ShutdownHandoffTests(unittest.TestCase):
     def test_terminate_live_children_stops_a_detached_group(self):
         child = subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
         self.addCleanup(lambda: child.poll() is None and child.kill())
-        adapter._LIVE_CHILDREN.add(child)
-        self.addCleanup(adapter._LIVE_CHILDREN.discard, child)
-        adapter.terminate_live_children()
+        child_processes.track_process(child)
+        self.addCleanup(child_processes.release_process, child)
+        child_processes.terminate_live_children()
         self.assertIsNotNone(child.poll(), "a registered child survived terminate_live_children")
-        self.assertNotIn(child, adapter._LIVE_CHILDREN)
+        self.assertNotIn(child, child_processes._LIVE_CHILDREN)
 
     def test_prefects_own_sigterm_handler_still_reaps_the_grandchild(self):
         """Runner.start() re-registers SIGTERM and calls sys.exit(0); atexit must carry the teardown.
@@ -741,13 +774,14 @@ class ShutdownHandoffTests(unittest.TestCase):
             "import signal, sys, threading, time\n"
             f"sys.path.insert(0, {str(adapter.ROOT / 'scripts')!r})\n"
             "import routine_adapter as adapter\n"
+            "import command_timeout as child_processes\n"
             # stand in for prefect.runner.Runner.start()'s registration
             "signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
             "threading.Thread(target=lambda: adapter.execute_process(\n"
             "    ['/bin/sh', '-c', 'echo $$ >&2; sleep 60'], seconds=60), daemon=True).start()\n"
-            "while not adapter._LIVE_CHILDREN:\n"
+            "while not child_processes._LIVE_CHILDREN:\n"
             "    time.sleep(0.05)\n"
-            "print(next(iter(adapter._LIVE_CHILDREN)).pid, flush=True)\n"
+            "print(next(iter(child_processes._LIVE_CHILDREN)).pid, flush=True)\n"
             "time.sleep(60)\n"
         )
         runner = subprocess.Popen([sys.executable, "-c", program], stdout=subprocess.PIPE, text=True)
@@ -843,7 +877,7 @@ class AutoevoAdapterTests(unittest.TestCase):
             "judgments": {}, "notes": [], "errors": [],
         }
 
-    def _candidate(self, argv, *, env, cwd, seconds):
+    def _candidate(self, argv, *, env, cwd, seconds, usage=None):
         self.assertEqual(seconds, self.spec.profile_values["timeout_seconds"])
         self.assertTrue((cwd / "schema.json").is_file())
         self.assertTrue((cwd / "sources/wip/note.md").is_file())
