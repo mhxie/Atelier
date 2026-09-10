@@ -1,69 +1,10 @@
 #!/usr/bin/env python3
-"""deadlines.py: View over the dated-obligation index, plus one write: `done`.
+"""Read the dated-obligation index and close approved rows.
 
-Why this exists: the things that must not be missed -- an expiring card credit,
-an open equity selling window, a document expiry, a tax deadline -- are recorded
-in prose inside the `finance/` and `travel/` trackers, mid-sentence and in mixed
-languages, e.g. a bullet that ends "...expires <date>, deadline = 12/31".
-
-A daily briefing that wants those dates would otherwise re-read several prose
-trackers every morning and re-derive the same handful of dates, slowly and
-non-deterministically. That is the exact re-derivation this harness avoids
-elsewhere with aggregates plus a freshness gate.
-
-So: judgment weekly, mechanics daily. A weekly pass extracts candidate rows
-from the prose trackers, the user approves them, and the orchestrator writes
-`$OV/_meta/deadlines.toml`. This script never adds a row: every row is a
-factual claim about the user's money or documents and passes through the
-normal $OV approval gate. Its one write, `done`, is user-invoked and only
-closes a row, recording when and on what evidence, so a perk redeemed
-mid-week leaves the morning screen the same day instead of at the next
-weekly refresh.
-
-Every row carries `source = "<vault-relative path>:<line>"`. A row without a
-resolvable source is a lint error, not a warning: an invented deadline on the
-morning screen is worse than a missing one.
-
-Freshness: `[meta] refreshed` plus `max_age_days` gate the whole index. When the
-index is stale every output says so and `daily_brief.py` surfaces it as a
-warning, rather than presenting month-old extraction as current.
-
-Schema:
-
-    [meta]
-    refreshed = 2026-08-31
-    max_age_days = 10
-
-    [[deadline]]
-    slug = "hotel-credit-unused"
-    label = "Annual hotel credit, one use unspent"
-    due = 2099-12-31
-    kind = "perk"              # perk|window|ticket|tax|obligation|event|milestone
-    reversible = false         # false = missing it forfeits the value
-    source = "finance/example-tracker.md:107"
-    action = "book one standalone night; do not stack"   # optional
-    lead_days = 60             # optional; how early it needs to surface
-    status = "open"            # open|done|dropped   (default open)
-
-`lead_days` exists because a uniform horizon is wrong for this data. A credit
-that only needs a card swipe is actionable with a week's notice; an award night
-that needs a hotel booked is not, and surfacing it seven days out is the same as
-not surfacing it. Each row declares its own lead time, defaulting to
-DEFAULT_LEAD_DAYS.
-
-Subcommands:
-    list    every open row with computed state, newest deadline first
-    due     rows closing within N days (default 14)
-    lint    schema and provenance validation; non-zero exit on any error
-    done    close one open row in place: `status = "done"`, `resolved`, and a
-            required `--resolved-by <path>:<line>` that must resolve inside
-            the vault. Refuses an index that fails lint, a row that is not
-            open, and an edit that would not parse; writes atomically and
-            keeps the file's permission bits.
-
-Exit codes: 0 for list/due even when the index is missing (an absent index is a
-warning the caller surfaces, not a crash). lint exits 1 on any error. done
-exits 1 on any refusal and 2 when --resolved-by is missing (argparse).
+Rows are human-approved facts with resolvable ``<path>:<line>`` provenance and
+individual lead times. Stale or missing indexes remain reportable for reads.
+The only write, ``done``, requires new provenance, validates the whole index,
+and preserves its layout and permissions through an atomic replacement.
 """
 
 from __future__ import annotations
@@ -177,7 +118,7 @@ def load_index(ov: Path, today: date | None = None) -> Index:
     errors: list[str] = []
     try:
         raw = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError) as exc:
+    except (tomllib.TOMLDecodeError, OSError, UnicodeError) as exc:
         return Index(
             path=INDEX_RELPATH,
             exists=True,
@@ -189,10 +130,13 @@ def load_index(ov: Path, today: date | None = None) -> Index:
             errors=[f"index unreadable: {exc!r}"],
         )
 
-    meta = raw.get("meta") or {}
+    meta = raw.get("meta", {})
+    if not isinstance(meta, dict):
+        errors.append("[meta] must be a table")
+        meta = {}
     refreshed = _coerce_date(meta.get("refreshed"))
     max_age = meta.get("max_age_days", DEFAULT_MAX_AGE_DAYS)
-    if not isinstance(max_age, int) or max_age < 1:
+    if type(max_age) is not int or max_age < 1:
         errors.append(f"[meta] max_age_days must be a positive int, got {max_age!r}")
         max_age = DEFAULT_MAX_AGE_DAYS
     age_days = (today - refreshed).days if refreshed else None
@@ -200,7 +144,11 @@ def load_index(ov: Path, today: date | None = None) -> Index:
 
     deadlines: list[Deadline] = []
     seen: set[str] = set()
-    for position, row in enumerate(raw.get("deadline") or [], start=1):
+    rows = raw.get("deadline", [])
+    if not isinstance(rows, list):
+        errors.append("deadline must be an array of tables")
+        rows = []
+    for position, row in enumerate(rows, start=1):
         item, row_errors = _build(row, position, today)
         errors.extend(row_errors)
         if item is None:
@@ -317,17 +265,9 @@ def open_deadlines(index: Index) -> list[Deadline]:
     return [d for d in index.deadlines if d.status == "open"]
 
 
-def closing_within(index: Index, days: int) -> list[Deadline]:
-    """Open rows already expired or closing within `days`, soonest first."""
-    return [d for d in open_deadlines(index) if d.days_left <= days]
-
-
 def in_lead_window(index: Index) -> list[Deadline]:
     """Open rows inside their own declared lead time, soonest first."""
     return [d for d in open_deadlines(index) if d.in_lead_window()]
-
-
-# ---------------------------------------------------------------- cli
 
 
 def _print_rows(rows: list[Deadline]) -> None:
@@ -449,9 +389,20 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-_SLUG_LINE = re.compile(r'^\s*slug\s*=\s*"(?P<slug>[^"]+)"\s*$')
-_STATUS_LINE = re.compile(r"^\s*status\s*=")
-_RESOLVED_LINE = re.compile(r"^\s*resolved(?:_by)?\s*=")
+def _toml_statements(text: str) -> list[tuple[str, dict]]:
+    """Keep each complete TOML statement intact, including multiline strings."""
+    parts, pending = [], ""
+    for line in text.splitlines(keepends=True):
+        pending += line
+        try:
+            value = tomllib.loads(pending)
+        except tomllib.TOMLDecodeError:
+            continue
+        parts.append((pending, value))
+        pending = ""
+    if pending:
+        raise ValueError("incomplete TOML statement")
+    return parts
 
 
 def _source_resolves(ov: Path, source: str) -> str | None:
@@ -521,49 +472,38 @@ def mark_done(
         return 1
 
     path = index_path(ov)
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    slug_at = next(
-        (i for i, line in enumerate(lines) if (m := _SLUG_LINE.match(line)) and m.group("slug") == slug),
-        None,
-    )
-    if slug_at is None:
-        print(f"slug {slug!r} not found in {fmt(path)} text", file=sys.stderr)
-        return 1
-    # The block is the enclosing [[deadline]] table, not the slug line down:
-    # a `status` written above `slug` would otherwise survive and collide
-    # with the one appended below.
-    start = slug_at
-    while start > 0 and not lines[start].lstrip().startswith("[[deadline]]"):
-        start -= 1
-    if not lines[start].lstrip().startswith("[[deadline]]"):
+    text = path.read_bytes().decode("utf-8")
+    parts = _toml_statements(text)
+    headers = [i for i, (part, _) in enumerate(parts) if part.lstrip().startswith("[")]
+    for start, end in zip(headers, headers[1:] + [len(parts)]):
+        if parts[start][1] == {"deadline": [{}]} and any(
+            value.get("slug") == slug for _, value in parts[start + 1:end]
+        ):
+            break
+    else:
         print(f"slug {slug!r} is not inside a [[deadline]] table", file=sys.stderr)
         return 1
-    end = slug_at + 1
-    while end < len(lines) and not lines[end].lstrip().startswith("["):
-        end += 1
-    # Trim trailing blank lines so the new keys sit inside the block.
-    while end > slug_at and not lines[end - 1].strip():
+    while end > start and not parts[end - 1][0].strip():
         end -= 1
-    block = [ln for ln in lines[start:end] if not _STATUS_LINE.match(ln) and not _RESOLVED_LINE.match(ln)]
-    block.append('status = "done"\n')
-    block.append(f"resolved = {today.isoformat()}\n")
-    block.append(f'resolved_by = "{resolved_by}"\n')
-    new_text = "".join(lines[:start] + block + lines[end:])
-    # Prove the result parses before anything touches the file: the index
-    # is the morning screen's input, and a half-written one costs a morning.
+    newline = "\r\n" if "\r\n" in text else "\n"
+    fields = {"status": "done", "resolved": today, "resolved_by": resolved_by}
+    block = "".join(part for part, value in parts[start:end] if not fields.keys() & value.keys())
+    edit = f'status = "done"{newline}resolved = {today.isoformat()}{newline}resolved_by = {json.dumps(resolved_by)}{newline}'
+    new_text = "".join(part for part, _ in parts[:start]) + block.rstrip("\r\n") + newline + edit
+    new_text += "".join(part for part, _ in parts[end:])
+    expected = tomllib.loads(text)
+    next(item for item in expected["deadline"] if item["slug"] == slug).update(fields)
     try:
-        tomllib.loads(new_text)
-    except tomllib.TOMLDecodeError as exc:
-        print(f"refusing to write: edited index would not parse ({exc})", file=sys.stderr)
+        if tomllib.loads(new_text) != expected:
+            raise ValueError("edited index changed more than the selected completion fields")
+    except ValueError as exc:
+        print(f"refusing to write: {exc}", file=sys.stderr)
         return 1
-    edit = "".join(block[-3:]).rstrip()
-    print(f"{slug}: {row.label}\n{edit}")
+    print(f"{slug}: {row.label}\n{edit.rstrip()}")
     if dry_run:
         print("(dry run; no write)")
         return 0
-    # The shared helper keeps the file's permission bits: a 0600 index stays
-    # private, and concurrent writers cannot cross-clobber.
-    atomic_write(path, new_text)
+    atomic_write(path, new_text, newline="")
     check = load_index(ov, today)
     if check.errors:
         for error in check.errors:

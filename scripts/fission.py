@@ -1,21 +1,9 @@
 #!/usr/bin/env python3
-"""Generic directory fission per protocols/repo-conventions.md (32-entry rule).
+"""Bucket a directory by first letter, year-month, or split year/month.
 
-Splits the immediate .md children of a directory into bucket subdirs along a
-configured axis. Subdirs already inside the target are left in place.
-
-Workflow: this script only moves files. After fission, run scripts/relink.py
-to fix any broken markdown refs.
-
-Axes:
-  first-letter      Bucket A, B, …, Z, 0-9, CJK by stem[0]
-  year-month        YYYY-MM/ from filename prefix YYYY-MM-DD-…
-  year-month-split  YYYY/MM/ two-level (used by daily-notes)
-
-Usage:
-  uv run scripts/fission.py --dir zk/wiki --axis first-letter --dry-run
-  uv run scripts/fission.py --dir zk/agent-findings --axis first-letter --apply
-  uv run scripts/fission.py --dir zk/reflections --axis year-month --apply
+Only immediate Markdown children move unless ``--include-dirs`` is set.
+Existing bucket contents stay in place; link repair remains ``relink.py``'s
+responsibility.
 """
 
 from __future__ import annotations
@@ -80,10 +68,17 @@ def plan_moves(
     <dir>/<entry>/ → <dir>/<bucket>/<entry>/ under the chosen axis)."""
     moves: list[tuple[Path, Path]] = []
     unmoved: list[Path] = []
+    bucket_pattern = {
+        axis_first_letter: r"[A-Z]|0-9|CJK",
+        axis_year_month: r"\d{4}-\d{2}",
+        axis_year_month_split: r"\d{4}",
+    }.get(axis_fn)
     for f in sorted(target_dir.iterdir()):
         is_md = f.is_file() and f.suffix == ".md"
         is_dir_entry = include_dirs and f.is_dir() and not f.name.startswith(".")
         if not (is_md or is_dir_entry):
+            continue
+        if is_dir_entry and bucket_pattern and re.fullmatch(bucket_pattern, f.name):
             continue
         bucket = axis_fn(f)
         if bucket is None:
@@ -93,6 +88,13 @@ def plan_moves(
             dst = target_dir.joinpath(*bucket, f.name)
         else:
             dst = target_dir / bucket / f.name
+        if dst.exists() or dst.is_symlink():
+            raise ValueError(f"destination collision: {dst}")
+        for parent in dst.parents:
+            if parent == target_dir:
+                break
+            if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+                raise ValueError(f"invalid bucket path: {parent}")
         moves.append((f, dst))
     return moves, unmoved
 
@@ -114,10 +116,12 @@ def main() -> None:
         sys.exit(1)
 
     axis_fn = AXES[args.axis]
-    moves, unmoved = plan_moves(target, axis_fn, include_dirs=args.include_dirs)
+    try:
+        moves, unmoved = plan_moves(target, axis_fn, include_dirs=args.include_dirs)
+    except (OSError, ValueError) as exc:
+        sys.exit(f"[error] {exc}")
     print(f"[plan] {len(moves)} files to move, {len(unmoved)} unmovable", file=sys.stderr)
 
-    # Bucket count summary
     buckets: dict[str, int] = {}
     for _, dst in moves:
         bucket_name = "/".join(dst.relative_to(target).parts[:-1])
@@ -135,6 +139,8 @@ def main() -> None:
     if args.apply:
         for src, dst in moves:
             dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() or dst.is_symlink():
+                sys.exit(f"[error] destination collision: {dst}")
             shutil.move(str(src), str(dst))
         print(f"[apply] moved {len(moves)} files", file=sys.stderr)
         print("[next] run: uv run scripts/relink.py --apply", file=sys.stderr)

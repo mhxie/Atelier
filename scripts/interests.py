@@ -1,29 +1,11 @@
 #!/usr/bin/env python3
 """interests.py: the consumption-driven interest ledger. Stdlib-only.
 
-An interest is anything the user actually consumes: a series, an act, a team,
-a book, a game. The ledger records events on it (watched, attended, read,
-played, completed, declared) and derives a strength from them, decayed by
-time, so a fresh event reinforces the interest and silence lets it fade.
-Collection routines read the active set; nobody maintains a list by hand.
-
+Events reinforce interests; silence decays them. Collection reads `active`.
+Structured AniList/live-event/Readwise sources produce deterministic events or
+`evidence`; interpreting consumption remains orchestrator judgment, recorded
+with `add` before `resolve` clears the candidate. See `<command> --help`.
 Protocol: protocols/interest-discovery.md. Ledger: $OV/_meta/interests.toml.
-
-The script curates; it does not decide. Structured sources (AniList status
-changes, the live-events table, Readwise book highlights) become events or
-evidence deterministically. Anything that needs a reading, such as which side a
-game was about or what a diary sentence meant, is surfaced by `evidence` for
-the orchestrator to judge in conversation and record with `add`.
-
-Subcommands:
-    list [--json] [--all]           ledger with strength and status
-    active [--json] [--kind K]      names routines should search (active + watch)
-    evidence [--days N] [--json]    pending rows plus recent diary lines that may describe consumption
-    add --name N --kind K [--event E] [--date D] [--source S] [--ref R] [--declared]
-    resolve <pending-id>            clear a pending row once it has been judged (recorded or not)
-    decline <slug> | undecline <slug>
-    ingest [--source anilist|experience-log|readwise|all] [--days N] [--dry-run]
-    recompute                       rewrite statuses from strength (ingest does this too)
 """
 
 from __future__ import annotations
@@ -41,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import PathsError, atomic_write, fmt, vault_root  # noqa: E402
+from _paths import PathsError, atomic_write, date_in_text, fmt, vault_root  # noqa: E402
 
 LEDGER = "_meta/interests.toml"
 STATE = "_meta/interests_state.json"
@@ -92,7 +74,6 @@ _NOTE_CUES = (
     "演唱会", "live", "concert", "比赛", "球赛", "季后赛", "电影", "动漫", "番", "游戏", "书", "小说",
     "watched", "played", "finished", "went to", "listened", "reading",
 )
-_NOTE_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
 # ---------------------------------------------------------------- model
@@ -128,6 +109,7 @@ class Pending:
     category: str = ""
     source: str = "experience-log"
     ref: str = ""
+    resolved: bool = False
 
 
 @dataclass
@@ -196,6 +178,8 @@ def dump_ledger(interests: list[Interest], pending: list[Pending] | None = None)
         out.append(f"source = {_toml_str(pd.source)}")
         if pd.ref:
             out.append(f"ref = {_toml_str(pd.ref)}")
+        if pd.resolved:
+            out.append("resolved = true")
         out.append("")
     for it in sorted(interests, key=lambda i: i.slug):
         out.append("[[interest]]")
@@ -234,6 +218,7 @@ def load_pending(path: Path) -> list[Pending]:
             str(row.get("category", "")),
             str(row.get("source", "experience-log")),
             str(row.get("ref", "")),
+            row.get("resolved") is True,
         )
         for row in data.get("pending") or []
         if row.get("id")
@@ -361,10 +346,18 @@ def ingest_anilist(ov: Path, interests: list[Interest], today: date, state: dict
         return [f"anilist: cache missing at {fmt(cache_file)}"]
     try:
         cache = json.loads(cache_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+    except (ValueError, OSError) as exc:
         return [f"anilist: cache unreadable: {exc!r}"]
-    library = ((cache.get("anime") or {}).get("library")) or []
-    stamp = str((cache.get("anime") or {}).get("last_success_at") or cache.get("refreshed_at") or today.isoformat())[:10]
+    if not isinstance(cache, dict) or not isinstance(cache.get("anime"), dict):
+        return ["anilist: invalid cache or anime section"]
+    anime = cache["anime"]
+    library = anime.get("library")
+    if not isinstance(library, list) or any(
+        not isinstance(item, dict) or (item.get("progress") is not None and
+        (type(item["progress"]) is not int or item["progress"] < 0)) for item in library
+    ):
+        return ["anilist: invalid library entries"]
+    stamp = str(anime.get("last_success_at") or cache.get("refreshed_at") or today.isoformat())[:10]
     if state is None:
         state = {}
     previous: dict[str, Any] = state.get("anilist") or {}
@@ -499,6 +492,8 @@ def ingest_experience_log(
             continue
         ref = f"experience-log:{when}:{slugify(title)}"
         if category in PENDING_CATEGORIES:
+            if any(pd.ref == ref and pd.resolved for pd in pending):
+                continue
             known = mentioned_in(interests, title)
             if known:
                 for it in known:
@@ -539,12 +534,8 @@ def note_candidates(ov: Path, today: date, days: int) -> list[dict[str, str]]:
     since = today - timedelta(days=days)
     out: list[dict[str, str]] = []
     for path in sorted(root.rglob("*.md")):
-        m = _NOTE_DATE.search(path.name)
-        if not m:
-            continue
-        try:
-            when = date.fromisoformat(m.group(1))
-        except ValueError:
+        when = date_in_text(path.name)
+        if when is None:
             continue
         if when < since or when > today:
             continue
@@ -692,8 +683,6 @@ def main(argv: list[str] | None = None) -> int:
     p_ingest.add_argument("--days", type=int, default=45)
     p_ingest.add_argument("--dry-run", action="store_true")
 
-    sub.add_parser("recompute", help="Rewrite statuses from strength.")
-
     args = parser.parse_args(argv)
     today = date.fromisoformat(args.today) if args.today else date.today()
     try:
@@ -749,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "evidence":
-        rows = sorted(pending, key=lambda x: x.date)
+        rows = sorted((pd for pd in pending if not pd.resolved), key=lambda x: x.date)
         candidates = note_candidates(ov, today, args.days)
         if args.json:
             print(json.dumps({
@@ -768,11 +757,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.cmd == "resolve":
-        pd = next((x for x in pending if x.id == args.pending_id), None)
+        pd = next((x for x in pending if x.id == args.pending_id and not x.resolved), None)
         if pd is None:
             print(f"error: no pending row {args.pending_id!r}", file=sys.stderr)
             return 1
-        pending.remove(pd)
+        pd.resolved = True
         save()
         print(f"resolved {pd.title}")
         return 0
@@ -793,13 +782,9 @@ def main(argv: list[str] | None = None) -> int:
         else:
             save()
             _save_state(ov, state)
-            print(f"wrote {fmt(ledger)} ({len(interests)} interests, {len(pending)} pending)")
+            print(f"wrote {fmt(ledger)} ({len(interests)} interests, {sum(not pd.resolved for pd in pending)} pending)")
         return 0
 
-    if args.cmd == "recompute":
-        save()
-        print(text_table(summary_rows(interests, today, include_all=True)))
-        return 0
     return 0
 
 

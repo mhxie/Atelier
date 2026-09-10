@@ -23,16 +23,14 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-INTENTS_PATH = ROOT / "harness" / "intents.toml"
 
 ROUTE_LOG_FALLBACK_DIR = Path.home() / ".cache" / "atelier" / "intent_routes"
 ROUTE_KINDS = ("routed", "general", "clarified", "corrected")
 PRIVATE_ROW_DEFAULTS = {
     "mode": "private-feature",
-    "context_budget_bytes": 8192,
+    "context_budget_tokens": 2048,
     "agents": [],
     "profile_reads": [],
-    "pattern": "solo",
     "expected_subagent_count": 0,
     "parallel": False,
 }
@@ -93,9 +91,14 @@ def validate_private_row(name: str, row: Any) -> list[str]:
         problems.append(f"{name}: needs a one-line description")
     if resolve_private_procedure(row.get("procedure")) is None:
         problems.append(f"{name}: procedure must be an existing file (absolute, $OV-relative, or under the private features tier)")
-    examples = row.get("examples", [])
-    if not isinstance(examples, list) or any(not isinstance(e, str) for e in examples):
-        problems.append(f"{name}: examples must be a list of strings")
+    for key, default in {**PRIVATE_ROW_DEFAULTS, "examples": []}.items():
+        value = row.get(key, default)
+        if type(value) is not type(default):
+            problems.append(f"{name}: {key} must be {type(default).__name__}")
+        elif isinstance(value, list) and any(not isinstance(item, str) for item in value):
+            problems.append(f"{name}: {key} must contain strings")
+        elif type(value) is int and value < (1 if key == "context_budget_tokens" else 0):
+            problems.append(f"{name}: {key} is out of range")
     return problems
 
 

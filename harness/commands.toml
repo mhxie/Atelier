@@ -39,21 +39,21 @@ codex_prompt = "Execute the $reflect skill in this Codex thread using `.claude/c
 source = ".claude/commands/daily-reflection.md"
 category = "session"
 status = "portable-adapted"
-description = "Daily reflection procedure — coaching flow grounded in profile, recent notes, and open TODOs. Routed via /hi or invoked directly."
+description = "Daily reflection with on-demand energy and open-exploration branches, grounded in notes and goals."
 codex_prompt = "Execute the $daily-reflection skill in this Codex thread using `.claude/commands/daily-reflection.md` as the authoritative spec."
 
 [commands.read]
 source = ".claude/commands/read.md"
 category = "session"
 status = "portable-adapted"
-description = "Read & Discuss procedure — owns the three Read flows (Read & Discuss, Focused Read, Multi-Lens Read) and the Reader/Scholar selection, Readwise prefetch, and source-backup sub-procedures."
+description = "Read and discuss a source with one reading worker; expand perspectives, evidence gathering, or review when the task needs it."
 codex_prompt = "Execute the $read skill in this Codex thread using `.claude/commands/read.md` as the authoritative spec."
 
 [commands.weekly]
 source = ".claude/commands/weekly.md"
 category = "session"
 status = "portable-adapted"
-description = "Structured weekly review over the past seven effective days."
+description = "Weekly review of patterns, commitments, health follow-ups, and next-week priorities; life check-ins are contextual."
 codex_prompt = "Execute the $weekly skill in this Codex thread using `.claude/commands/weekly.md` as the authoritative spec."
 
 [commands.review]
@@ -69,20 +69,6 @@ category = "session"
 status = "portable-adapted"
 description = "Lightweight decision journal with analysis proportional to the stakes."
 codex_prompt = "Execute the $decision skill in this Codex thread using `.claude/commands/decision.md` as the authoritative spec."
-
-[commands.energy-audit]
-source = ".claude/commands/energy-audit.md"
-category = "session"
-status = "portable-adapted"
-description = "Assessment of physical, mental, emotional, and social energy patterns."
-codex_prompt = "Execute the $energy-audit skill in this Codex thread using `.claude/commands/energy-audit.md` as the authoritative spec."
-
-[commands.explore]
-source = ".claude/commands/explore.md"
-category = "session"
-status = "portable-adapted"
-description = "Open-ended exploration for forgotten connections and emerging themes."
-codex_prompt = "Execute the $explore skill in this Codex thread using `.claude/commands/explore.md` as the authoritative spec."
 
 [commands.prm]
 source = ".claude/commands/prm.md"
@@ -104,21 +90,21 @@ codex_prompt = "Execute the $push skill in this Codex thread using `.claude/comm
 source = ".claude/commands/introspect.md"
 category = "profile"
 status = "portable-adapted"
-description = "Build or refresh profile files from local notes and reading patterns."
+description = "Build or refresh profile files from local notes and attributable reading feedback."
 codex_prompt = "Execute the $introspect skill in this Codex thread using `.claude/commands/introspect.md` as the authoritative spec."
 
 [commands.curate]
 source = ".claude/commands/curate.md"
 category = "knowledge"
 status = "portable-adapted"
-description = "Goal-aware content curation and inbox triage."
+description = "Goal-aware content curation and inbox triage with attributable reading episodes."
 codex_prompt = "Execute the $curate skill in this Codex thread using `.claude/commands/curate.md` as the authoritative spec."
 
 [commands.digest]
 source = ".claude/commands/digest.md"
 category = "knowledge"
 status = "portable-adapted"
-description = "Daily and weekly digest: action surface, mandatory configured status updates, and routine intel, written to $OV and mailed."
+description = "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
 codex_prompt = "Execute the $digest skill in this Codex thread using `.claude/commands/digest.md` as the authoritative spec."
 
 [commands.sync]
@@ -139,6 +125,8 @@ codex_prompt = "Execute the $promote skill in this Codex thread using `.claude/c
 resume_friendly = true
 
 [commands.lint]
+# Public field validation is owned by harness/registry.schema.json;
+# scripts/harness_lint.py retains cross-file and workflow checks.
 source = ".claude/commands/lint.md"
 category = "ops"
 status = "portable-adapted"
@@ -153,20 +141,12 @@ direct_only = true
 description = "Unified operational review center with a read-only overview and bounded review batches."
 codex_prompt = "Execute the $triage skill in this Codex thread using `.claude/commands/triage.md` as the authoritative spec."
 
-[commands.system-review]
-source = ".claude/commands/system-review.md"
-category = "ops"
-status = "portable-adapted"
-direct_only = true
-description = "Review system-evolution changes with internal and external reviewers."
-codex_prompt = "Execute the $system-review skill in this Codex thread using `.claude/commands/system-review.md` as the authoritative spec."
-
 [commands.civ]
 source = ".claude/commands/civ.md"
 category = "dashboard"
 status = "portable-adapted"
 direct_only = true
-description = "Read-only life dashboard over resources, civilizations, and terminal values."
+description = "Read-only life dashboard over privately configured resources, civilizations, and terminal values."
 codex_prompt = "Execute the $civ skill in this Codex thread using `.claude/commands/civ.md` as the authoritative spec."
 
 [commands.dine]
@@ -183,7 +163,7 @@ category = "ops"
 status = "portable-adapted"
 direct_only = true
 user_facing = false
-description = "Autonomous nightly decay sweep with auto-commit; primary macOS launchd attempt at 05:00 local with hourly deferred recovery and wake catch-up."
+description = "Prefect-only nightly decay proposal; trusted parent owns live publication and verification."
 codex_prompt = "Execute the bot-only autoevo-nightly workflow under headless Codex; `.claude/commands/autoevo-nightly.md` is authoritative and no user-facing Codex skill is exposed."
 
 [commands.run-routine]

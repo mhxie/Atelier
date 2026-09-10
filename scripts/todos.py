@@ -1,37 +1,9 @@
 #!/usr/bin/env python3
-"""
-todos.py: Aggregate open TODOs from GTD files and reflection Next Actions.
+"""Aggregate open GTD checkboxes and reflection Next Actions.
 
-Sources scanned:
-- zk/gtd/*.md            checkbox lines (+ [ ] / - [ ])
-- zk/reflections/*.md    bullets under "## Next Action" / "## Next Actions"
-                         (skipping "不做" / "Parked" sub-sections)
-
-States (markdown markers, GTD only):
-  [ ]  open      [x]  done       [~]  killed       [/]  wip
-
-Reflection-bullet closure marker (no checkbox in reflection bullets):
-  Items prefixed with "DONE <date>: " or "DONE: " are excluded from open scans.
-  /hi's wrap-up writes this prefix when the user confirms closure mid-session.
-
-Inline metadata (optional, anywhere on the item line):
-  due:YYYY-MM-DD   priority:Pn (P0-P3)   area:#tag
-
-Computed priority (when no explicit priority:):
-  P0  overdue (due < today)
-  P1  due within 7 days
-  P3  stale (>=30 days no movement, by git blame)
-  P2  default
-
-Subcommands:
-  list                              all open TODOs grouped by computed priority
-  list --area #capacity             filter by area tag
-  list --json                       structured output
-  stale [--days 30]                 items >=N days no movement
-  closure-candidates [--days 14]    flag items with closure language nearby
-  digest [--days 7]                 concise output for /hi Step 0
-
-Paths are project-relative. Run from repo root.
+GTD markers carry explicit state; DONE/KILLED prefixes close unboxed reflection
+actions. Optional due date, priority, and area metadata drive list, stale, and
+digest views. Missing explicit priority is derived from due date and git age.
 """
 
 from __future__ import annotations
@@ -253,11 +225,7 @@ def scan_reflection_next_actions(path: Path) -> list[Todo]:
         text_part = content.strip()
         if not text_part:
             continue
-        # DONE-/KILLED- prefix marks reflection items the user (or orchestrator
-        # at session wrap-up) has confirmed closed. Reflection bullets are not
-        # checkboxes, so these prefixes are the closure markers for that source.
-        # KILLED is the kill-path counterpart to GTD `[~]`; DONE is the done-
-        # path counterpart to GTD `[x]`. Both exclude the line from open scans.
+        # Reflection bullets have no checkbox; DONE/KILLED are their closure markers.
         if (
             text_part.startswith("DONE ")
             or text_part.startswith("DONE:")
@@ -269,7 +237,7 @@ def scan_reflection_next_actions(path: Path) -> list[Todo]:
             text=text_part,
             source=str(path),
             line=i,
-            state="open",  # reflection Next Actions are implicitly open
+            state="open",
             section=current_sub,
         )
         extract_metadata(todo, text_part)
@@ -306,7 +274,6 @@ def detect_closure_candidates(
     cutoff = date.today() - timedelta(days=since_days)
     sources: list[Path] = []
     if DAILY_NOTES_DIR.exists():
-        # Daily notes nest as daily-notes/YYYY/MM/YYYY-MM-DD.md.
         for f in DAILY_NOTES_DIR.rglob("*.md"):
             d = filename_date(f)
             if d is not None and d >= cutoff:
@@ -436,27 +403,6 @@ def cmd_stale(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_closure_candidates(args: argparse.Namespace) -> int:
-    todos = collect_open_todos(load_age=False)
-    cands = detect_closure_candidates(todos, since_days=args.days)
-    if not cands:
-        print(f"No closure candidates in last {args.days} days.")
-        return 0
-    print(f"Closure candidates (closure language matched in last {args.days} days)")
-    print("─" * 56)
-    last_key: tuple[str, int] | None = None
-    for todo, phrase, src in cands:
-        key = (todo.source, todo.line)
-        if key != last_key:
-            print(f"\n  TODO  {todo.short_source()}:{todo.line}")
-            text = todo.text if len(todo.text) <= 100 else todo.text[:97] + "..."
-            print(f"        {text}")
-            last_key = key
-        print(f"    ↳ \"{phrase}\" in {Path(src).name}")
-    print()
-    return 0
-
-
 def cmd_digest(args: argparse.Namespace) -> int:
     """Concise output for /hi Step 0."""
     last_ref = find_last_reflection()
@@ -467,7 +413,6 @@ def cmd_digest(args: argparse.Namespace) -> int:
     if last_ref:
         last_actions = scan_reflection_next_actions(last_ref)
         last_actions = [t for t in last_actions if t.state == "open"]
-        # filter out skip subsections (already done by scan, but defensive)
         print(f"\nLast reflection: {last_ref.name}")
         if last_actions:
             print(f"Next Actions ({len(last_actions)}):")
@@ -492,7 +437,6 @@ def cmd_digest(args: argparse.Namespace) -> int:
             print(f"  - {text}")
             print(f"    ({todo.short_source()}:{todo.line}; phrase \"{phrase}\")")
 
-    # Stale tail (top 3 oldest)
     stale = sorted(
         [t for t in todos if t.age_days >= 30], key=lambda t: -t.age_days
     )[:3]
@@ -525,13 +469,6 @@ def main(argv: list[str] | None = None) -> int:
     p_stale = sub.add_parser("stale", help="List TODOs older than N days.")
     p_stale.add_argument("--days", type=int, default=30)
     p_stale.set_defaults(func=cmd_stale)
-
-    p_close = sub.add_parser(
-        "closure-candidates",
-        help="Flag TODOs mentioned with closure language in recent notes.",
-    )
-    p_close.add_argument("--days", type=int, default=14)
-    p_close.set_defaults(func=cmd_closure_candidates)
 
     p_digest = sub.add_parser(
         "digest", help="Concise digest for /hi Step 0."

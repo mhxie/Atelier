@@ -99,6 +99,22 @@ class IntentOverlayTest(unittest.TestCase):
         out = _load_with_overlay("[broken")
         self.assertGreater(out["count"], 10)
 
+    def test_malformed_private_optional_fields_cannot_break_the_catalog(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-overlay-fields-") as tmp:
+            procedure = Path(tmp) / "SKILL.md"
+            procedure.write_text("# Fixture\n")
+            for field, value in (("agents", "1"), ("agents", '"reader"'),
+                    ("profile_reads", '"identity.md"'), ("profile_reads", "[1]"),
+                    ("parallel", '"false"'), ("context_budget_tokens", "true"),
+                    ("context_budget_tokens", "0"), ("expected_subagent_count", "-1")):
+                with self.subTest(field=field, value=value):
+                    out = _load_with_overlay(
+                        f'[intents.broken]\ndescription = "Fixture"\nprocedure = {str(procedure)!r}\n{field} = {value}\n',
+                        extra_keys=("broken",),
+                    )
+                    self.assertIsNone(out["rows"]["broken"])
+                    self.assertGreater(out["count"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

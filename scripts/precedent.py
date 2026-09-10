@@ -1,37 +1,17 @@
 #!/usr/bin/env python3
 """Precedent judge: the default a person would have chosen, from their ledger.
 
-Reads `scripts/decisions.py`'s ledger, finds the past human decisions most
-like a new item (deterministic pre-filter), asks a cheap model to apply
-them, and gates the answer before anything becomes a default:
+JSON commands: `bundle` ranks precedents and emits a prompt; `judge` gates a
+verdict; `autoevo` sets defaults only for passing pending entries. Gate defaults:
+executable verdict, confidence >= 0.8, >= 3 distinct agreeing citations each
+scoring >= 2.0, accuracy >= 0.9 after 5 judgments, and < 10 unconfirmed defaults.
+See each subcommand's --help and protocols/decision-ledger.md for the contract.
+The silent budget tightens when engagement falls even as unchallenged defaults
+inflate accuracy; any human decision refills it. --max-unconfirmed 0 only ranks.
 
-  the verdict names an executable action, confidence >= --min-confidence
-  (0.8), at least --min-precedents (3) DISTINCT cited precedents that each
-  score >= --min-similarity (2.0) and all agree with the verdict, the class's
-  measured precedent accuracy >= --min-accuracy (0.9) once --min-judged (5)
-  defaults have been judged, and fewer than --max-unconfirmed (10) defaults
-  set in this class since the user last decided anything. Anything else stays
-  a human decision.
-
-The last condition is the silent budget, and it is the brake that a user who
-stops looking can still reach: accuracy scores an unchallenged default as
-correct, so it loosens as engagement falls, while the budget tightens. Any
-human decision in any class refills it. `--max-unconfirmed 0` makes the judge
-a sorter: it ranks and explains, it never decides alone.
-
-Subcommands (each prints one JSON object):
-  bundle   pre-filter: nearest precedents + the judge prompt for one item
-  judge    gate a model judgment (from --judgment FILE or a direct --model call)
-  autoevo  end to end over pending queue entries without a default:
-           bundle, judge, and `autoevo_pending.py set-default` on a pass
-
-Who judges is an explicit choice, never a fallback: `--judgment FILE` /
-`--judgment-dir DIR` take verdicts a native subagent (the `precedent-judge`
-role) wrote after reading the prompts `--bundle-dir` emits, and `--model` or
-`ATELIER_PRECEDENT_MODEL` names a direct-API identity for
-`scripts/chat_completion.py`. Without one of those nothing is judged: the
-bundle carries note paths, evidence, and past reasons, and they must not
-leave the machine by default.
+Judging requires native --judgment/--judgment-dir verdicts from emitted prompts,
+or explicit --model / ATELIER_PRECEDENT_MODEL direct-API selection. Neither is
+an automatic fallback: note paths, evidence, and reasons stay local by default.
 """
 
 from __future__ import annotations
@@ -248,7 +228,7 @@ def call_model(model: str, prompt: str, timeout: int = 180) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "chat_completion.py"), "--model", model, "--system", JUDGE_SYSTEM,
-             "--prompt-file", prompt_path, "--task-type", "precedent-judge", "--max-tokens", str(JUDGE_MAX_TOKENS)],
+             "--prompt-file", prompt_path, "--max-tokens", str(JUDGE_MAX_TOKENS)],
             cwd=ROOT, capture_output=True, text=True, timeout=timeout,
         )
     finally:

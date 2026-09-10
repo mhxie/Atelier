@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""Aggregate session-log telemetry so the meta-reflection has data.
+"""Aggregate session-log telemetry for on-demand inspection.
 
-38 session logs existed before anything read them back. This is a tolerant,
-schema-light reader: it does not depend on the exact section guidance in
-`protocols/session-log.md`, only on `## ` headings, so a schema tweak
-degrades a metric instead of crashing the report.
+This tolerant reader counts present sections without treating empty table
+headers or continuity labels as completed telemetry.
 
 Output (one JSON object):
   per_type      counts of session logs by type suffix (reflection, reading, ...)
@@ -36,8 +34,10 @@ def _sections(text: str) -> dict[str, bool]:
     matches = list(HEADING_RE.finditer(text))
     for i, m in enumerate(matches):
         body = text[m.end() : matches[i + 1].start() if i + 1 < len(matches) else len(text)]
+        body = re.sub(r"(?m)^[ \t]*\|[^\n]*\|\r?\n[ \t]*\|(?:[ \t]*:?-+:?[ \t]*\|)+[ \t]*$", "", body)
         lines = [ln.strip() for ln in body.splitlines()]
-        filled = any(ln and ln.lower() not in EMPTY_MARKERS for ln in lines)
+        filled = any(ln.lower() not in EMPTY_MARKERS and not re.fullmatch(
+            r"- [^:]+:\s*(?:none|\(none\)|n/a)?", ln, re.IGNORECASE) for ln in lines)
         out[m.group(1)] = out.get(m.group(1), False) or filled
     return out
 
@@ -52,7 +52,10 @@ def collect(window_days: int) -> dict:
         m = re.match(r"(\d{4}-\d{2}-\d{2})-([a-z-]+?)(?:-\d+)?\.md$", path.name)
         if not m:
             continue
-        day = date.fromisoformat(m.group(1))
+        try:
+            day = date.fromisoformat(m.group(1))
+        except ValueError:
+            continue
         if cutoff and day < cutoff:
             continue
         scanned += 1

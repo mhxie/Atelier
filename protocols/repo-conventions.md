@@ -1,8 +1,6 @@
 ## Purpose
 
-GitHub-canonical conventions for `$OV` — the user's markdown vault. The typical setup is a git repo with a private remote, but these rules apply equally when $OV is a plain folder synced via Google Drive / iCloud (the conventions still make GitHub-style rendering work when the user views via web). They optimize for: clean GitHub UI rendering, efficient agent navigation, sustainable folder browsing, and a plain-markdown vault that stays ecosystem-agnostic (no editor-specific carry-over).
-
-Companion: `protocols/semantic-vocabulary.md` (backlink and tag conventions).
+`$OV` uses plain-Markdown conventions for GitHub rendering and navigation, whether it is a private Git repo or a Drive/iCloud-synced folder. Nothing requires a specific editor.
 
 ## Image policy
 
@@ -115,24 +113,24 @@ Protocols, agent specs, and shared docs describe how the system works **now**. G
 - Genuinely-deferred work belongs in a single named roadmap subsection (the pattern: `wiki-schema.md` → Open v2 Items), not as scattered "v1 only" / "Phase B" parentheticals.
 - Operational pointers to runtime artifacts the system still encounters (e.g., "`#ai-reflection` may appear on historical notes; treat as alloy") are fine because they describe runtime conditions, not system biography.
 
-This rule is enforced by `protocols/antipatterns.md` → #10 Legacy framing in living docs, scanned by the Evolver self-check and Reviewer System modes on Tier 2+ changes.
+This rule is enforced by `check_legacy_framing` in `scripts/harness_lint.py`, which scans the routed prose surface.
 
 ## Editing discipline
 
-When making edits inside this repo (code, protocols, agents, commands, scripts, or markdown content):
+Agent edits mirror neighboring style and requested scope. Clean up your own orphans; surface unrelated bugs or cleanup for the user. Direct user edits remain their discretion.
 
-- **Match existing style and conventions.** Mirror surrounding indentation, naming, comment style, prose voice, and structure. Wiki entries are not daily-note voice; daily-note voice is not protocol voice. Reading the few neighboring lines is cheaper than imposing a foreign style.
-- **Surgical changes only.** Don't "improve" adjacent code, comments, or formatting that wasn't part of the request. Every changed line should trace to what was asked. If a line changed for any other reason, undo it or surface it in the response.
-- **Surface, don't silently fix.** If you notice unrelated dead code, pre-existing bugs, broken links, or style issues, mention them so the user can decide; don't bundle a silent fix with an unrelated edit.
-- **Clean up your own orphans, not others'.** When your changes orphan imports, variables, links, or sections, remove those. Don't remove pre-existing dead material unless explicitly asked.
+For harness changes:
 
-These rules apply to agent edits on the user's behalf. Direct user edits to their own working tree are user discretion; the rules shape what an agent does when delegated to edit.
-
-Reviewer-side detection of violations: `protocols/antipatterns.md` § 8 (Scope creep past the stated criterion).
+- Before edits, record owner, acceptance checklist and `python3 scripts/harness_lint.py --footprint` in the task plan. Use one whole-feature baseline across patches; exclude unrelated worktree changes.
+- Fix reproduced bugs in their owner; prefer configuration, reuse and verified redundancy removal. New services/dependencies/entrypoints/persistent state/retry/fallback paths need a separately approved rationale and plan.
+- Implementation growth above the report's `growth_review_lines` needs plan reapproval. Lint and `--footprint` enforce implementation/config total and per-file ceilings. Limits live in `scripts/harness_lint.py`: lower after verified cuts; increases need user approval. Budget is not scope authority.
+- Report tests, prose and private code/config/prompts separately: the public footprint excludes private content. Don't hide growth by dropping necessary tests, compressing code, or relocating logic; reuse test setup.
+- Finish smoke against the agreed checklist; do not narrow it for success. Escalate genuine blockers and report upstream gaps. New requirements or replacement systems need separate approval.
+- Deliver whole-feature deltas (`implementation | tests | prose | entrypoints/dependencies/persistent state`), verification and gaps. Include governance/private changes; label unmeasured scope.
 
 ## Lint enforcement
 
-Atelier-side lint runs via `uv run scripts/harness_lint.py` (registered names, path-literal templating, doc-indirection cycles, etc.) and `uv run scripts/privacy_check.py`. The privacy gate scans public-bound pathnames, content, and divergent staged blobs against the private-entity index that `scripts/privacy_index.py` derives from the vault (directory names and paths, note stems, wikilinks, routine and feature registries, frontmatter, profile proper nouns, each with provenance; rebuilt when a day old), plus a path rule that flags any real content-tier directory named in prose. Both fire in `/lint` and `/system-review`; `/push` runs the mechanical gate over the whole unpushed history (`--range`) and the semantic privacy-reviewer over the same range before anything leaves the machine, and `scripts/hooks/pre-push` repeats the mechanical range scan (`git config core.hooksPath scripts/hooks`). `profile/private_terms.txt` and `profile/private_slugs.txt` stay for what no vault source can derive; the committed allowlist is reserved for deliberately public literals and is honored by both gates. `privacy_check.py --why "<term>"` explains any hit.
+Atelier-side lint runs via `uv run scripts/harness_lint.py` (registered names, path-literal templating, doc-indirection cycles, etc.) and `uv run scripts/privacy_check.py`. The privacy gate scans public-bound pathnames, content, and divergent staged blobs against the private-entity index that `scripts/privacy_index.py` derives from the vault (directory names and paths, note stems, wikilinks, routine and feature registries, frontmatter, profile proper nouns, each with provenance; rebuilt when a day old), plus a path rule that flags any real content-tier directory named in prose. Both fire in `/lint`; `/push` runs the mechanical gate over the whole unpushed history (`--range`) and the semantic privacy-reviewer over the same range before anything leaves the machine, and `scripts/hooks/pre-push` repeats the mechanical range scan (`git config core.hooksPath scripts/hooks`). `profile/private_terms.txt` and `profile/private_slugs.txt` stay for what no vault source can derive; the committed allowlist is reserved for deliberately public literals and is honored by both gates. `privacy_check.py --why "<term>"` explains any hit.
 
 Vault-side lint for the conventions in this doc (folder fission, image placement, image naming, ISO date strings) is currently manual. A consolidated `scripts/vault_lint.py` is deferred until two distinct conventions need automated enforcement at once; until then, the fission rule is enforced by `scripts/aggregate_freshness.py` only for self-declaring aggregates, and image / date conventions are honored by hand.
 

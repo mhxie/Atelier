@@ -20,16 +20,12 @@
 #   mode                      string identifier of the /hi sub-mode
 #   procedure                 authoritative project-relative workflow file;
 #                             the router reads only this file after selection
-#   context_budget_bytes      whole-output ceiling for scripts/context_bundle.py;
-#                             32768 when profile files are preloaded (they land
-#                             whole), 8192 for continuity-only rows
+#   context_budget_tokens     hard Repomix output ceiling in o200k_base tokens;
+#                             overflow fails instead of truncating selected files
 #   agents                    agent keys from harness/agents.toml the
 #                             procedure typically dispatches (informational)
 #   profile_reads             filenames under profile/ to pre-read before
 #                             dispatch; empty means no context bundle
-#   pattern                   coordination pattern annotation; the closed
-#                             value set and the no-branching rule are defined
-#                             once in harness/agents.toml
 #   expected_subagent_count   typical dispatch count hint for review tooling
 #   parallel                  whether the initial agents dispatch in one batch
 #
@@ -51,17 +47,15 @@ examples = [
 ]
 mode = "capture-fast-path"
 procedure = "protocols/intent-capture.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["scribe"]
 profile_reads = []
-pattern = "solo"
 expected_subagent_count = 1
 parallel = false
 
-# Reading routes to `.claude/commands/read.md`. Initial dispatch is Reader +
-# Researcher; Reviewer + Challenger fire later as a write-back gate. A URL or
-# wikilink that is merely part of a larger request (a day's events, an inbox
-# triage, a question with a citation) is not reading.
+# Reading starts with one Reader; the procedure selects Scholar for hard
+# sources and adds specialists only for a concrete need. A URL or wikilink
+# inside a larger request (capture, triage, a cited question) is not reading.
 # Entry-hint skill: `.claude/skills/reading/SKILL.md` (forwards into `/hi`).
 [intents.reading]
 description = "Read and discuss a written article, paper, or note the user supplies as the main payload: a URL, a [[wikilink]], pasted text, or 'read this' / 'discuss this'."
@@ -73,12 +67,11 @@ examples = [
 ]
 mode = "read-and-discuss"
 procedure = ".claude/commands/read.md"
-context_budget_bytes = 32768
-agents = ["reader", "researcher"]
+context_budget_tokens = 8192
+agents = ["reader"]
 profile_reads = ["identity.md"]
-pattern = "agent-team"
-expected_subagent_count = 2
-parallel = true
+expected_subagent_count = 1
+parallel = false
 
 [intents.finance-analysis]
 description = "Analyze a company, earnings report, cash flow, or capital expenditure, or an investing signal tied to specific securities or sectors (财报, 自由现金流, hyperscaler capex); general AI-industry news, talent moves, or research trends are not this row."
@@ -92,11 +85,10 @@ examples = [
     "hyperscaler capex",
 ]
 mode = "finance-analysis"
-procedure = "protocols/analysis-signals.md"
-context_budget_bytes = 32768
+procedure = "protocols/finance-analysis.md"
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["expertise.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -110,15 +102,14 @@ examples = [
 ]
 mode = "meeting-process"
 procedure = "protocols/intent-meeting.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["meeting", "challenger", "curator"]
 profile_reads = []
-pattern = "orchestrator-subagent"
 expected_subagent_count = 3
 parallel = false
 
-# Talk / transcript routes to `.claude/commands/read.md`, which dispatches one
-# Reader (Critical lens, transcript preprocessing) + one Researcher in parallel.
+# Talk / transcript routes to `.claude/commands/read.md`: one Reader handles
+# transcript preprocessing; the procedure adds specialists only for a concrete need.
 [intents.talk]
 description = "Read and discuss a talk, seminar, lecture, podcast, or video (or its transcript) as learning material; not a work meeting, not a written article."
 examples = [
@@ -129,12 +120,11 @@ examples = [
 ]
 mode = "transcript-read"
 procedure = ".claude/commands/read.md"
-context_budget_bytes = 32768
-agents = ["reader", "researcher"]
+context_budget_tokens = 8192
+agents = ["reader"]
 profile_reads = ["identity.md"]
-pattern = "agent-team"
-expected_subagent_count = 2
-parallel = true
+expected_subagent_count = 1
+parallel = false
 
 # Sync digests the mobile-capture submodule $OV/zettelm/ into daily notes and
 # raw attachments, enriches with backlinks, then stages zettelm deletions for
@@ -151,10 +141,9 @@ examples = [
 ]
 mode = "sync"
 procedure = ".claude/commands/sync.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["researcher", "curator", "challenger", "scribe", "reviewer"]
 profile_reads = []
-pattern = "orchestrator-subagent"
 expected_subagent_count = 5
 parallel = false
 
@@ -172,17 +161,14 @@ examples = [
 ]
 mode = "decay-scan"
 procedure = "protocols/intent-forget.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["forgetter"]
 profile_reads = []
-pattern = "generator-verifier"
 expected_subagent_count = 1
 parallel = false
 
-# Sub-mode intents (/weekly, /review, /decision, /energy-audit, /explore,
-# /curate, /digest, /introspect, /lint, /promote) stay reachable as direct
-# slashes for muscle memory and via `/hi <natural language>`. Each row's
-# `procedure` points at the authoritative workflow file.
+# Intent rows may share a procedure while retaining distinct context and modes.
+# A registered command also provides a direct entry; `/hi` can reach every row.
 
 [intents.weekly]
 description = "Reflect on the past 7 days (this week, past week, 周复盘): patterns, energy, and follow-through. Multi-day scope; a single day is reflection."
@@ -195,10 +181,9 @@ examples = [
 ]
 mode = "weekly-review"
 procedure = ".claude/commands/weekly.md"
-context_budget_bytes = 32768
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -212,11 +197,10 @@ examples = [
     "energy check",
 ]
 mode = "energy-audit"
-procedure = ".claude/commands/energy-audit.md"
-context_budget_bytes = 32768
+procedure = ".claude/commands/daily-reflection.md"
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -231,10 +215,9 @@ examples = [
 ]
 mode = "goal-review"
 procedure = ".claude/commands/review.md"
-context_budget_bytes = 32768
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -251,10 +234,9 @@ examples = [
 ]
 mode = "decision-journal"
 procedure = ".claude/commands/decision.md"
-context_budget_bytes = 32768
+context_budget_tokens = 8192
 agents = ["thinker"]
 profile_reads = ["identity.md", "directions.md"]
-pattern = "orchestrator-subagent"
 expected_subagent_count = 1
 parallel = false
 
@@ -268,11 +250,10 @@ examples = [
     "open threads",
 ]
 mode = "open-exploration"
-procedure = ".claude/commands/explore.md"
-context_budget_bytes = 32768
+procedure = ".claude/commands/daily-reflection.md"
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -289,10 +270,9 @@ examples = [
 ]
 mode = "curate-inbox"
 procedure = ".claude/commands/curate.md"
-context_budget_bytes = 32768
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-pattern = "solo"
 expected_subagent_count = 1
 parallel = false
 
@@ -312,10 +292,9 @@ examples = [
 ]
 mode = "digest"
 procedure = ".claude/commands/digest.md"
-context_budget_bytes = 32768
+context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -330,10 +309,9 @@ examples = [
 ]
 mode = "promote"
 procedure = ".claude/commands/promote.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["researcher", "curator"]
 profile_reads = []
-pattern = "orchestrator-subagent"
 expected_subagent_count = 2
 parallel = false
 
@@ -348,10 +326,9 @@ examples = [
 ]
 mode = "lint"
 procedure = ".claude/commands/lint.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = []
 profile_reads = []
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false
 
@@ -367,10 +344,9 @@ examples = [
 ]
 mode = "introspect"
 procedure = ".claude/commands/introspect.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = ["reviewer", "challenger"]
 profile_reads = []
-pattern = "generator-verifier"
 expected_subagent_count = 2
 parallel = true
 
@@ -387,10 +363,9 @@ examples = [
 ]
 mode = "daily-reflection"
 procedure = ".claude/commands/daily-reflection.md"
-context_budget_bytes = 32768
+context_budget_tokens = 12288
 agents = ["thinker", "scribe"]
 profile_reads = ["identity.md", "directions.md"]
-pattern = "orchestrator-subagent"
 expected_subagent_count = 1
 parallel = false
 
@@ -401,9 +376,8 @@ description = "No Atelier workflow above fits: hand the request to the runtime's
 examples = []
 mode = "semantic-handoff"
 procedure = "protocols/intent-general.md"
-context_budget_bytes = 8192
+context_budget_tokens = 2048
 agents = []
 profile_reads = []
-pattern = "solo"
 expected_subagent_count = 0
 parallel = false

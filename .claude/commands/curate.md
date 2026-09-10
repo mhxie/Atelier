@@ -1,5 +1,5 @@
 ---
-description: Goal-aware content curation and inbox triage.
+description: Goal-aware content curation and inbox triage with attributable reading episodes.
 ---
 # Curate
 
@@ -13,16 +13,23 @@ Goal-aware content curation. Pulls from content sources, scores against your act
 
 ### 1. Load Context (orchestrator)
 
-Reuse the current `curate` context projection from `$hi`; for direct
+Reuse the current `curate` context artifact from `$hi`; for direct
 invocation, run:
 
 ```bash
-uv run scripts/context_bundle.py --intent curate --format json
+uv run scripts/context_bundle.py --intent curate
 ```
 
-Use only the projected profile excerpts as goal and identity context. Retrieve
-a named profile section deliberately if the projection marks it truncated and
-that section is load-bearing for a score.
+Use only the packed route-selected profile files as goal and identity context.
+
+Read `protocols/decision-ledger.md` → Reading feedback loop. Capture the
+selection policy and routed context with `decisions.py reading-policy`,
+using the actual model that will perform triage. The helper stores replay
+inputs privately once; retain its compact policy ID.
+Read bounded explicit preferences with `decisions.py reading-evidence`; use
+their reasons to refine selection, retaining uncertainty and context. Include
+that evidence projection in the policy snapshot. Keep one episode ID for this
+run and preserve each item's source ID through the reading handoff.
 
 ### 2. Dispatch Triage Agent (ad-hoc)
 
@@ -33,6 +40,11 @@ You are triaging a content inbox against the user's active goals and directions.
 
 ## Goals and Directions
 [paste relevant sections from profile/directions.md — current era, near-term goals, learning directions]
+
+## Attributable Preferences
+[paste the bounded reading-evidence projection, including reasons, uncertainty,
+and proposed_action; approvals of archive actions are not positive taste]
+Apply this feedback to selection when its context matches the present task.
 
 ## Task
 1. Run BOTH commands in parallel (two Bash calls in one response):
@@ -78,9 +90,20 @@ You are triaging a content inbox against the user's active goals and directions.
    ```
 
 5. Return ONLY: the stats line + the Deep Read section (titles and reasons). Do not return the full list.
+   Also return the complete structured candidate list as a local JSON artifact
+   for the orchestrator: source ID, title, category, bounded source summary,
+   canonical URL, author, reading_time, word_count, tags, proposed action, and
+   reason. Preserve available selection inputs, omitting unavailable fields
+   rather than fabricating them. This is proposal evidence.
 ```
 
 ### 3. Present Results (orchestrator)
+
+Batch candidates as `proposed` with the captured policy ID using the typed
+reading-event helper. Preserve stable event IDs for retries. After presentation,
+batch `shown` events for the
+items actually displayed. Internal archive candidates are not shown merely
+because the agent wrote them to a file.
 
 Show the user:
 - Stats (inbox size, tier breakdown)
@@ -90,6 +113,9 @@ Show the user:
 ### 4. Execute (orchestrator)
 
 On approval:
+- Record `approved` for the authorized operation on each identified item;
+  record any explicit per-item rejection/defer and its actual reason. Batch
+  approval does not establish that the user consumed or liked the content.
 - Tag deep-read items: `readwise reader-add-tags-to-document --document-id <id> --tag-names deep-read`
 - Tag digest items: `readwise reader-add-tags-to-document --document-id <id> --tag-names digest`
 - Archive skipped items: `readwise reader-move-documents --document-ids <id1>,<id2>,<id3> --location archive`
@@ -98,11 +124,11 @@ On approval:
 ### 5. Bridge to Reading (optional)
 
 If the user wants to read something now, transition to `/hi → Read` with the selected item.
+Carry its episode/item/policy IDs into Read; subsequent feedback keeps the
+policy identity from selection time.
 
 ## Integration Points
 
-- **`/weekly`** — (planned) pulls `#digest` tagged items from Readwise as a "Reading Digest" section
-- **`/hi → Read`** — (planned) surfaces `#deep-read` tagged items as reading suggestions
 - **`profile/reader_persona.md`** — if it exists, the triage agent can reference it for taste calibration alongside goals
 
 ## Adding New Sources

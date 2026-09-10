@@ -17,21 +17,10 @@
 #           `uv run scripts/chat_completion.py --model <identity>`.
 #   codex   Explicit external Codex CLI reviewer leg, dispatched via
 #           `codex exec -m <identity>` independently of the selected runtime.
-#           Reserved for the external-reviewer role today.
 #
-# `voices` declares each role's INTENDED leg set. Whether all declared
-# legs fire on a given dispatch is the call site's decision, not a
-# universal contract: only the few call sites enumerated in
-# `protocols/voice-dispatch.md` are multi-leg-enabled
-# today; every other site fires only the selected runtime's `native` leg. At an
-# enabled multi-leg site the orchestrator issues one tool call per leg in
-# the same assistant message.
-# Single-leg roles (Scribe) declare only `native`; this is the explicit
-# carve-out for write-capable / mechanical agents where a second external
-# leg would either duplicate writes or leak verbatim content.
-#
-# See `protocols/voice-dispatch.md` for the canonical
-# dispatch recipe.
+# Bindings are available voices, not permission grants or mandatory fanout.
+# The selected procedure chooses calls using `protocols/agent-handoff.md`;
+# `protocols/agent-handoff.md` owns dispatch inputs and completion reporting.
 #
 # Model identities are defined in `harness/models.toml`; provider bindings
 # live in gitignored `profile/models.toml`.
@@ -40,316 +29,108 @@
 # `harness/models.toml`. Codex inherits the user's selected model and maps the
 # native voice's tier to `model_reasoning_effort`. Lint enforces
 # registry-to-adapter parity.
-#
-# `dispatch_rationale` declares why this role is worth dispatching as a
-# subagent rather than running inline in the orchestrator. An agent is worth
-# dispatching only if (subagent input + run overhead + output) < orchestrator
-# inline cost, OR it runs in parallel to accelerate wall time. Allowed values
-# (a non-empty list; multiple may apply):
-#
-#   "context-isolation"  Agent reads large/specific files that would pollute
-#                        the orchestrator's context (vault scans, transcripts,
-#                        multi-file evolutions).
-#   "model-tier"         Agent runs on a different model — cheaper or stronger
-#                        than the orchestrator's default.
-#   "parallelization"    Multiple instances run in parallel for wall-time
-#                        savings (Reader hub, Scout multi-direction).
-#   "tool-isolation"     Agent uses a different tool subset (write-only,
-#                        scan-only) where keeping the boundary in the
-#                        orchestrator would risk overreach.
-#
-# Lint validates each agent declares at least one rationale. An agent with
-# no rationale fails lint, forcing the maintainer to either justify the
-# subagent or merge the role into the orchestrator inline.
-#
-# `kinds` declares the domain(s) a role operates on. Allowed values:
-#
-#   "system"  Operates on the codebase / protocols / harness itself.
-#   "app"     Operates on the user's content (notes, multimodal info,
-#             reading material).
-#
-# A role may declare both. `kinds` is a non-empty list of these tokens, and
-# lint validates the values.
-#
-# Coordination patterns (the `pattern` field). Allowed values:
-#
-#   "orchestrator-subagent"  Lead orchestrator dispatches bounded subtasks.
-#   "generator-verifier"     Generator drafts; verifier checks the output.
-#   "agent-team"             Multiple persistent autonomous workers.
-#   "shared-state"           Agents read/write a common store. Reserved.
-#   "solo"                   Single-agent dispatch with no coordination.
-#
-# `pattern` is annotation only. No code path may branch on its value.
-# Lint validates it is in the allowed set.
-#
-# `used_by` lists intents (`intents.<name>` from `harness/intents.toml`)
-# and commands (`commands.<name>` from `harness/commands.toml`) that
-# dispatch the agent. Empty `used_by` is an orphan signal (lint WARN).
-# `python3 scripts/harness_lint.py --fix-used-by` regenerates from the walk.
 
 [agents.precedent-judge]
 source = ".claude/agents/precedent-judge.md"
 voices = { native = "sonnet" }
-kinds = ["app"]
-dispatch_rationale = ["model-tier"]
 status = "portable-adapted"
 description = "Applies the user's own past decisions to a new pending item; one JSON verdict per prompt file, never invents policy. Le cercle archetype: The Clerk of the Court."
 codex_prompt = "Run the Precedent Judge role through native Codex agent `precedent-judge`; `.claude/agents/precedent-judge.md` remains authoritative."
-pattern = "solo"
-used_by = [
-    "commands.autoevo-nightly",
-]
 
 [agents.challenger]
 source = ".claude/agents/challenger.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["app"]
-dispatch_rationale = ["model-tier"]
 status = "portable-adapted"
 description = "Probes the painter's thoughts with sharp questions; affirms or counters in turn. Le cercle archetype: The Critic (Degas)."
 codex_prompt = "Run the Challenger role through native Codex agent `challenger`; `.claude/agents/challenger.md` remains authoritative."
-pattern = "generator-verifier"
-used_by = [
-    "commands.autoevo-nightly",
-    "commands.autoevo-review",
-    "commands.introspect",
-    "commands.prm",
-    "commands.read",
-    "commands.sync",
-    "intents.introspect",
-    "intents.meeting",
-    "intents.sync",
-]
 
 [agents.curator]
 source = ".claude/agents/curator.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["tool-isolation"]
 status = "portable-adapted"
 description = "Drafts note-content operations (compactions, merges, new notes, wiki entries) for the orchestrator to write under $OV/. Le cercle archetype: The Collector (Caillebotte)."
 codex_prompt = "Run the Curator role through native Codex agent `curator`; `.claude/agents/curator.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "commands.autoevo-nightly",
-    "commands.autoevo-review",
-    "commands.promote",
-    "commands.sync",
-    "intents.meeting",
-    "intents.promote",
-    "intents.sync",
-]
-
-[agents.evolver]
-source = ".claude/agents/evolver.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["system"]
-dispatch_rationale = ["context-isolation", "model-tier"]
-status = "portable-adapted"
-description = "Improves the atelier itself: agents, commands, frameworks, methodology. Le cercle archetype: The Master of the Atelier."
-codex_prompt = "Run the Evolver role through native Codex agent `evolver`; `.claude/agents/evolver.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "commands.system-review",
-]
 
 [agents.forgetter]
 source = ".claude/agents/forgetter.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation", "tool-isolation"]
 status = "portable-adapted"
-description = "Active decay scanner over $OV/: redundant / time-stale / contradicted / low-signal. Proposes; never deletes. Returns findings inline via envelope; the orchestrator persists them to $OV/agent-findings/. Le cercle archetype: The Conservator."
-codex_prompt = "Run the Forgetter role through native Codex agent `forgetter`; `.claude/agents/forgetter.md` remains authoritative. Hard contract: propose, never delete; return findings inline via the `---forgetter-result---` / `---end-result---` envelope. The orchestrator persists them; do not write the report yourself."
-pattern = "generator-verifier"
-used_by = [
-    "commands.autoevo-nightly",
-    "commands.autoevo-review",
-    "intents.forget",
-]
+description = "Active decay scanner over $OV/: redundant / time-stale / contradicted / low-signal. Proposes; never deletes. Returns findings inline via envelope for the trusted parent to validate. Le cercle archetype: The Conservator."
+codex_prompt = "Run the Forgetter role through native Codex agent `forgetter`; `.claude/agents/forgetter.md` remains authoritative. Hard contract: propose, never delete; return findings inline via the `---forgetter-result---` / `---end-result---` envelope. The parent validates them; do not write a report yourself."
 
 [agents.librarian]
 source = ".claude/agents/librarian.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["tool-isolation"]
 status = "portable-adapted"
 description = "Recommends readings, resources, and thinkers relevant to the painter's interests and goals. Le cercle archetype: The Cataloguer."
 codex_prompt = "Run the Librarian role through native Codex agent `librarian`; `.claude/agents/librarian.md` remains authoritative."
-pattern = "orchestrator-subagent"
-# Dispatched from `protocols/hi-menu.md` (Deep Dive + Recommend Resources
-# sub-flows); no direct intent route. `used_by` is computed from command-
-# file dispatch-context mentions by `harness_lint --fix-used-by`.
-used_by = [
-    "commands.hi",
-]
 
 [agents.meeting]
 source = ".claude/agents/meeting.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation"]
 status = "portable-adapted"
 description = "Processes work meeting transcripts into structured notes with action items and decisions. Le cercle archetype: The Stenographer."
 codex_prompt = "Run the Meeting role through native Codex agent `meeting`; `.claude/agents/meeting.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "intents.meeting",
-]
 
 [agents.reader]
 source = ".claude/agents/reader.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation", "parallelization"]
 status = "portable-adapted"
 description = "Reads articles and notes through critical, structural, practical, and dialectical lenses. For dense theory, foundational papers, or hard texts, dispatch the Scholar instead. Le cercle archetype: The Reader."
 codex_prompt = "Run the Reader role through native Codex agent `reader`; `.claude/agents/reader.md` remains authoritative."
-pattern = "agent-team"
-used_by = [
-    "commands.read",
-    "intents.reading",
-    "intents.talk",
-]
 
 [agents.scholar]
 source = ".claude/agents/scholar.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation", "model-tier", "parallelization"]
 status = "portable-adapted"
 description = "Deep-cognition variant of Reader: same lenses, same workflow, dispatched with stronger voices for dense theory, foundational papers, and hard texts. Le cercle archetype: The Scholar."
 codex_prompt = "Run the Scholar role through native Codex agent `scholar`; `.claude/agents/scholar.md` remains authoritative."
-pattern = "agent-team"
-used_by = [
-    "commands.read",
-]
 
 [agents.researcher]
 source = ".claude/agents/researcher.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation"]
 status = "portable-adapted"
 description = "Gathers raw context from the painter's œuvre ($OV/). Le cercle archetype: The Observer (Pissarro)."
 codex_prompt = "Run the Researcher role through native Codex agent `researcher`; `.claude/agents/researcher.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "commands.civ",
-    "commands.prm",
-    "commands.promote",
-    "commands.read",
-    "commands.sync",
-    "intents.promote",
-    "intents.reading",
-    "intents.sync",
-    "intents.talk",
-]
 
 [agents.reviewer]
 source = ".claude/agents/reviewer.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["system", "app"]
-dispatch_rationale = ["tool-isolation", "parallelization"]
 status = "portable-adapted"
 description = "Quality-checks session outputs and system evolution changes. Le cercle archetype: The Arbiter (Manet)."
 codex_prompt = "Run the Reviewer role through native Codex agent `reviewer`; `.claude/agents/reviewer.md` remains authoritative."
-pattern = "generator-verifier"
-used_by = [
-    "commands.introspect",
-    "commands.prm",
-    "commands.promote",
-    "commands.read",
-    "commands.sync",
-    "commands.system-review",
-    "intents.introspect",
-    "intents.sync",
-]
 
 [agents.scout]
 source = ".claude/agents/scout.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["app"]
-dispatch_rationale = ["parallelization"]
 status = "portable-adapted"
 description = "Gathers external context from outside the œuvre: articles, discussions, research, recent developments. Le cercle archetype: The Flâneur."
 codex_prompt = "Run the Scout role through native Codex agent `scout`; `.claude/agents/scout.md` remains authoritative."
-pattern = "agent-team"
-used_by = [
-    "commands.read",
-]
 
 [agents.synthesizer]
 source = ".claude/agents/synthesizer.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["app"]
-dispatch_rationale = ["context-isolation"]
 status = "portable-adapted"
 description = "Composes gathered context into structured reflections, summaries, and insights. Le cercle archetype: The Colorist (Monet)."
 codex_prompt = "Run the Synthesizer role through native Codex agent `synthesizer`; `.claude/agents/synthesizer.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "commands.civ",
-    "commands.read",
-]
 
 [agents.thinker]
 source = ".claude/agents/thinker.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-kinds = ["app"]
-dispatch_rationale = ["model-tier"]
 status = "portable-adapted"
 description = "Applies structured thinking frameworks for outside-view reasoning. Le cercle archetype: The Structuralist (Cézanne)."
 codex_prompt = "Run the Thinker role through native Codex agent `thinker`; `.claude/agents/thinker.md` remains authoritative."
-pattern = "orchestrator-subagent"
-used_by = [
-    "commands.daily-reflection",
-    "commands.decision",
-    "commands.read",
-    "intents.decision",
-    "intents.reflection",
-]
 
 [agents.privacy-reviewer]
 source = ".claude/agents/privacy-reviewer.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-kinds = ["system"]
-dispatch_rationale = ["tool-isolation"]
 status = "portable-adapted"
 description = "Semantic privacy scanner for committed-file diffs. Catches leaks the mechanical scripts/privacy_check.py misses. Le cercle archetype: The Steward."
 codex_prompt = "Run the Privacy Reviewer role through native Codex agent `privacy-reviewer`; `.claude/agents/privacy-reviewer.md` remains authoritative."
-pattern = "generator-verifier"
-used_by = [
-    "commands.push",
-    "commands.system-review",
-]
 
 [agents.scribe]
 source = ".claude/agents/scribe.md"
-voices = { native = "haiku" }
-kinds = ["app"]
-dispatch_rationale = ["model-tier", "tool-isolation"]
+voices = { native = "haiku" }  # single-leg by design: it writes files; a second leg risks duplicate writes or leaks
 status = "portable-adapted"
-description = "Records user-dictated raw content to the named target file verbatim. Single-leg by design: write-capable, dual would risk duplicate writes or leak verbatim user content externally. Exists so the orchestrator does not burn deep-cognition tokens on mechanical I/O. Le cercle archetype: The Typewriter."
+description = "Records user-dictated raw content to the named target file verbatim. Le cercle archetype: The Typewriter."
 codex_prompt = "Run the Scribe role through native Codex agent `scribe`; `.claude/agents/scribe.md` remains authoritative. Verbatim preservation is the trust property; no paraphrasing, summarizing, or editorialization."
-pattern = "solo"
-used_by = [
-    "commands.daily-reflection",
-    "commands.sync",
-    "intents.capture",
-    "intents.reflection",
-    "intents.sync",
-]
-
-[agents.external-reviewer]
-source = "scripts/review.sh"
-voices = { direct = "deepseek_pro_max", codex = "codex_gpt55_max" }
-kinds = ["system"]
-dispatch_rationale = ["model-tier", "tool-isolation"]
-status = "script-driven"
-description = "External reviewers for /system-review. Independent voices from two non-Anthropic providers. Script-driven (invoked by `bash scripts/review.sh`); no Anthropic native leg by design."
-codex_prompt = "external-reviewer is invoked via `bash scripts/review.sh`, not via agent dispatch. See scripts/review.sh and .claude/commands/system-review.md."
-pattern = "generator-verifier"
-used_by = [
-    "commands.system-review",
-]

@@ -9,6 +9,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+
+import decay_scan
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -54,6 +57,30 @@ class LowSignalBandTest(unittest.TestCase):
             for key in ("words", "links_in", "tags", "age_days"):
                 self.assertIn(key, first)
             self.assertFalse(out["redundant_ran"])
+
+
+class QmdCandidateTest(unittest.TestCase):
+    def test_scores_rank_candidates_without_legacy_floor(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-qmd-decay-") as tmp:
+            vault = Path(tmp)
+            base = vault / "wip"
+            base.mkdir()
+            (base / "candidate.md").write_text("candidate")
+            rows = [{"path": path, "score": .01, "backend": "qmd"} for path in
+                    ("wip/candidate.md", "wip/a.md", "research/b.md", "reflections/c.md")]
+            native = subprocess.CompletedProcess([], 0, json.dumps(rows), "")
+            with patch.object(decay_scan, "tier", return_value=base), \
+                 patch.object(decay_scan, "_tier_of", side_effect=lambda path: path.split("/")[0]), \
+                 patch.object(decay_scan.subprocess, "run", return_value=native):
+                findings = decay_scan.scan_redundant(vault, "wip", 15)
+                self.assertEqual(len(findings), 1)
+                self.assertEqual(findings[0]["mode"], "qmd")
+                self.assertTrue(findings[0]["requires_content_review"])
+                native.stdout = json.dumps([rows[1], rows[1], rows[2]])
+                self.assertEqual(decay_scan.scan_redundant(vault, "wip", 15), [])
+                native.returncode = 2
+                with self.assertRaisesRegex(RuntimeError, "retrieval failed"):
+                    decay_scan.scan_redundant(vault, "wip", 15)
 
 
 if __name__ == "__main__":

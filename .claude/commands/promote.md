@@ -105,9 +105,9 @@ For each `(language_code, shadow_dir)` entry:
 
 1. **Translate** the entry to the target language following these rules:
    - Translate all prose (Summary, claim text, body paragraphs, Revision Log)
-   - DO NOT translate: technical terms (e.g., Lance, Ray Data, PyArrow, MVCC), code identifiers, URLs, file paths
-   - DO NOT translate `@anchor`/`@pass` blocks or `@cite` lines: copy exactly as-is
-   - DO NOT translate block IDs
+   - Leave untranslated: technical terms (e.g., Lance, Ray Data, PyArrow, MVCC), code identifiers, URLs, file paths
+   - Leave untranslated: `@anchor`/`@pass` blocks and `@cite` lines, copied exactly as-is
+   - Leave untranslated: block IDs
    - Keep the `# Title` in English (filename must match the source)
    - Add a localized backreference at the top, e.g. for Chinese:
      `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`

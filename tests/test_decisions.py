@@ -12,7 +12,6 @@ from concurrent import futures
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
 import decisions  # noqa: E402
 
 
@@ -25,40 +24,6 @@ def _run(ledger: Path, *argv: str, vault: Path | None = None) -> dict:
     payload = json.loads(proc.stdout)
     payload["_exit"] = proc.returncode
     return payload
-
-
-QUEUE = """schema_version = 1
-
-[[pending]]
-id = "a"
-category = "time-stale-A"
-proposed_action = "close the lapsed plan"
-evidence_summary = "by end of Q3 2025"
-proposed_at = "2099-01-01"
-status = "dismissed"
-dismiss_reason = "plan is still active"
-resolved_at = "2099-01-05"
-peers = ["wip/plan.md"]
-
-[[pending]]
-id = "b"
-category = "time-stale-A"
-proposed_action = "verify the exercise"
-evidence_summary = "before April"
-proposed_at = "2099-01-01"
-status = "auto-dismissed"
-dismiss_reason = "older than 30d"
-peers = ["wip/x.md"]
-
-[[pending]]
-id = "c"
-category = "low-signal"
-proposed_action = "archive"
-evidence_summary = "87 words"
-proposed_at = "2099-01-02"
-status = "applied"
-peers = ["wip/y.md"]
-"""
 
 
 class LedgerTest(unittest.TestCase):
@@ -74,24 +39,6 @@ class LedgerTest(unittest.TestCase):
             rows = _run(ledger, "list", "--class", "t/x")["rows"]
             self.assertEqual(rows[0]["features"], {"tier": "wip"})
             self.assertEqual(rows[0]["by"], "human")
-
-    def test_import_autoevo_skips_silence_and_is_idempotent(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            vault = Path(tmp)
-            (vault / "_meta").mkdir()
-            queue = vault / "_meta" / "autoevo_pending.toml"
-            queue.write_text(QUEUE, encoding="utf-8")
-            ledger = vault / "_meta" / "decisions.jsonl"
-            out = _run(ledger, "import-autoevo", "--queue", str(queue), vault=vault)
-            self.assertEqual([r["id"] for r in out["imported"]], ["a", "c"])
-            self.assertIn({"id": "b", "reason": "status auto-dismissed"}, out["skipped"])
-            rows = _run(ledger, "list", vault=vault)["rows"]
-            self.assertEqual({r["subject"]: r["verdict"] for r in rows}, {"a": "dismiss", "c": "apply"})
-            self.assertEqual(rows[0]["features"]["tier"], "wip")
-            self.assertTrue(rows[1]["reason"].startswith("(no reason"))
-            again = _run(ledger, "import-autoevo", "--queue", str(queue), vault=vault)
-            self.assertEqual(again["imported"], [])
-            self.assertEqual(len(_run(ledger, "list", vault=vault)["rows"]), 2)
 
     def test_stats_count_vetoes_against_precedent_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

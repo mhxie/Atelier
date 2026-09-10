@@ -1,40 +1,8 @@
 #!/usr/bin/env python3
-"""
-snapshot_anchors.py: Save url: and gist: wiki anchors to Readwise
-and backfill the readwise: document ID into the anchor marker.
+"""Snapshot URL and gist evidence to Readwise and backfill document IDs.
 
-Why this exists: wiki anchors with url: or gist: types reference ephemeral
-web content. If the URL goes down, the evidence backing the wiki claim is
-lost. Readwise snapshots web content at save time and stores it
-permanently, making the evidence durable (L3). The readwise: field on an
-anchor marker records the Readwise document ID so the evidence can be
-retrieved regardless of whether the original URL is still live.
-
-Usage:
-    # Dry run: show what would be saved (no writes)
-    scripts/snapshot_anchors.py
-
-    # Save to Readwise and backfill IDs into wiki files
-    scripts/snapshot_anchors.py --apply
-
-    # Process a single wiki entry
-    scripts/snapshot_anchors.py --apply --note zk/wiki/some-entry.md
-
-    # Skip URL categories that don't scrape well
-    scripts/snapshot_anchors.py --apply --skip-categories github_code,deepwiki
-
-    # Just report: show URLs grouped by category
-    scripts/snapshot_anchors.py --report
-
-Exit codes:
-    0  All anchors processed (or dry run)
-    1  Some anchors failed to save to Readwise (partial success)
-    2  CLI/IO error
-
-See also:
-    protocols/wiki-schema.md   anchor evidence resolution, readwise: field
-    scripts/lint.py            WARN on missing readwise: (readwise-missing)
-    sources/readwise.md        Readwise CLI reference
+Dry-run is the default; ``--apply`` performs the remote save and local marker
+update. Exit status distinguishes complete, partial, and CLI/IO failure.
 """
 
 from __future__ import annotations
@@ -48,17 +16,13 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, tier  # type: ignore[import-not-found]  # noqa: E402
 
 WIKI_DIR = tier("wiki")
 
-# Regex to match anchor lines with url: or gist: types
-# Captures: full line, anchor type+id, and optional readwise field
-ANCHOR_LINE_RE = re.compile(
-    r"^(@anchor:\s+(?:url|gist):(\S+).*?)(\s*\|\s*readwise:\s*\S+)?\s*$"
-)
+ANCHOR_LINE_RE = re.compile(r"^@anchor:\s+(url|gist):([^\s|]+)(?:\s*\|.*)?\s*$")
+READWISE_FIELD_RE = re.compile(r"\|\s*readwise:\s*[^\s|]+\s*(?=\||$)")
 
-# URL category patterns for --skip-categories and --report
 URL_CATEGORIES = {
     "github_code": re.compile(r"github\.com/.+/blob/"),
     "github_issue": re.compile(r"github\.com/.+/(issues|discussions|pull)/"),
@@ -85,11 +49,7 @@ def categorize_url(url: str) -> str:
 def find_anchors_missing_readwise(
     note_path: Path | None = None,
 ) -> list[dict]:
-    """Scan wiki files and return anchors missing the readwise: field.
-
-    Returns a list of dicts:
-        {path, line_no, line, url, anchor_type, category}
-    """
+    """Return anchor locations and exact source lines lacking a Readwise ID."""
     if note_path:
         files = [note_path]
     else:
@@ -98,27 +58,32 @@ def find_anchors_missing_readwise(
 
     results = []
     for fpath in files:
+        if fpath.is_symlink():
+            raise ValueError(f"symlink note refused: {fpath}; select its canonical target explicitly")
         lines = fpath.read_text(encoding="utf-8").splitlines()
         for i, line in enumerate(lines, 1):
             m = ANCHOR_LINE_RE.match(line)
             if not m:
                 continue
-            # Skip lines that already have readwise: field
-            if m.group(3):
+            if READWISE_FIELD_RE.search(line):
                 continue
             url = m.group(2)
-            atype = "gist" if line.strip().startswith("@anchor: gist:") else "url"
             results.append(
                 {
                     "path": fpath,
                     "line_no": i,
                     "line": line,
                     "url": url,
-                    "anchor_type": atype,
+                    "anchor_type": m.group(1),
                     "category": categorize_url(url),
                 }
             )
     return results
+
+
+def _document_id(data: object) -> str | None:
+    value = (data.get("document_id") or data.get("id")) if isinstance(data, dict) else None
+    return value if isinstance(value, str) and re.fullmatch(r"[^\s|]+", value) else None
 
 
 def search_readwise_for_url(url: str) -> str | None:
@@ -147,12 +112,10 @@ def search_readwise_for_url(url: str) -> str | None:
         docs = json.loads(result.stdout)
         if not isinstance(docs, list):
             return None
-        # Match by source_url field (exact or contained)
         for doc in docs:
-            source_url = doc.get("source_url", "") or ""
-            doc_url = doc.get("url", "") or ""
-            if url in source_url or url in doc_url:
-                return doc.get("document_id") or doc.get("id")
+            if isinstance(doc, dict) and url in (doc.get("source_url"), doc.get("url")):
+                if doc_id := _document_id(doc):
+                    return doc_id
         return None
     except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
         return None
@@ -180,8 +143,7 @@ def save_to_readwise(url: str) -> str | None:
             )
             return None
         data = json.loads(result.stdout)
-        # The create-document response may have different shapes
-        doc_id = data.get("document_id") or data.get("id")
+        doc_id = _document_id(data)
         if doc_id:
             return doc_id
         sys.stderr.write(
@@ -193,31 +155,25 @@ def save_to_readwise(url: str) -> str | None:
         return None
 
 
-def backfill_readwise_id(path: Path, line_no: int, doc_id: str) -> bool:
-    """Add | readwise: <doc_id> to an anchor line in a wiki file.
-    Returns True on success."""
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
-    idx = line_no - 1  # 0-based
-    if idx >= len(lines):
-        sys.stderr.write(f"  line {line_no} out of range in {path}\n")
-        return False
-
-    line = lines[idx]
-    m = ANCHOR_LINE_RE.match(line.rstrip("\n"))
-    if not m:
-        sys.stderr.write(f"  line {line_no} in {path} no longer matches anchor pattern\n")
-        return False
-
-    # Already has readwise: (race condition check)
-    if m.group(3):
+def backfill_readwise_id(path: Path, line_no: int, doc_id: str, expected_line: str) -> bool:
+    """Backfill only the discovered anchor, preserving other bytes and permissions."""
+    try:
+        if path.is_symlink():
+            raise ValueError("symlink note refused; select its canonical target explicitly")
+        with path.open(encoding="utf-8", newline="") as handle:
+            lines = handle.read().splitlines(keepends=True)
+        idx = line_no - 1
+        if not 0 <= idx < len(lines) or lines[idx].rstrip("\r\n") != expected_line:
+            raise ValueError(f"anchor changed at line {line_no}; rediscover before retrying")
+        if not ANCHOR_LINE_RE.fullmatch(expected_line) or not _document_id({"id": doc_id}):
+            raise ValueError("invalid anchor or document ID")
+        ending = lines[idx][len(expected_line):]
+        lines[idx] = f"{expected_line} | readwise: {doc_id}{ending}"
+        atomic_write(path, "".join(lines), newline="")
         return True
-
-    # Insert readwise: field before the newline
-    stripped = line.rstrip("\n")
-    new_line = f"{stripped} | readwise: {doc_id}\n"
-    lines[idx] = new_line
-    path.write_text("".join(lines), encoding="utf-8")
-    return True
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"  backfill failed for {path}: {exc}\n")
+        return False
 
 
 def report_categories(anchors: list[dict]) -> str:
@@ -287,7 +243,11 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"error: {WIKI_DIR} not found. Run from the repo root.\n")
         return 2
 
-    anchors = find_anchors_missing_readwise(args.note)
+    try:
+        anchors = find_anchors_missing_readwise(args.note)
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
 
     if not anchors:
         print("All url:/gist: anchors already have readwise: IDs. Nothing to do.")
@@ -297,7 +257,6 @@ def main(argv: list[str] | None = None) -> int:
         print(report_categories(anchors))
         return 0
 
-    # Deduplicate by URL: save each URL once, then backfill all occurrences
     skip_cats = set()
     if args.skip_categories:
         skip_cats = {c.strip() for c in args.skip_categories.split(",")}
@@ -326,7 +285,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"                    in: {locations}")
         return 0
 
-    # Apply mode: save to Readwise and backfill
     saved = 0
     failed = 0
     already_in_readwise = 0
@@ -335,14 +293,12 @@ def main(argv: list[str] | None = None) -> int:
         cat = anchor_list[0]["category"]
         print(f"  [{cat:15s}] {url} ... ", end="", flush=True)
 
-        # Step 1: check if already in Readwise
         doc_id = search_readwise_for_url(url)
         if doc_id:
             print(f"already saved (ID: {doc_id})")
             already_in_readwise += 1
         else:
-            # Step 2: save to Readwise
-            time.sleep(args.rate_limit)  # rate limiting
+            time.sleep(args.rate_limit)
             doc_id = save_to_readwise(url)
             if not doc_id:
                 print("FAILED")
@@ -351,12 +307,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"saved (ID: {doc_id})")
             saved += 1
 
-        # Step 3: backfill all occurrences in wiki files
         for a in anchor_list:
-            ok = backfill_readwise_id(a["path"], a["line_no"], doc_id)
+            ok = backfill_readwise_id(a["path"], a["line_no"], doc_id, a["line"])
             if ok:
                 print(f"    backfilled {a['path'].name}:{a['line_no']}")
             else:
+                failed += 1
                 print(f"    FAILED to backfill {a['path'].name}:{a['line_no']}")
 
     print(f"\nDone: {saved} newly saved, {already_in_readwise} already in Readwise, "

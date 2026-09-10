@@ -1,32 +1,9 @@
 #!/usr/bin/env python3
-"""
-staleness.py: Active forgetting for L2 working-layer content.
+"""Score working-layer notes for archival, compaction, or promotion review.
 
-Scans L2 directories (agent-findings, wip, gtd, preprints, reflections)
-and scores each note by staleness. Flags candidates for archival, compaction,
-or promotion to L4.
-
-Staleness model (v1, mtime-based):
-
-    staleness = days_since_modified / (1 + log(1 + reference_count))
-
-Notes referenced frequently from wiki entries or recent reflections decay
-slower. Notes untouched and unreferenced decay at full speed.
-
-Thresholds (calibrated to the user's current corpus):
-    - STALE (>= 90 days equivalent): candidate for archival to zk/archive/
-    - DORMANT (>= 45 days equivalent): candidate for review or compaction
-    - PROMOTION_CANDIDATE: >= 180 days old, 2+ inbound references, no L4 entry
-
-Output: human table by default, --json for machine consumption.
-Exit code: 0 always (staleness is advisory, never blocking).
-
-CLI:
-    scripts/staleness.py                 human report
-    scripts/staleness.py --json          structured output
-    scripts/staleness.py --dir zk/wip   scan a single L2 directory
-
-Paths are project-relative. Run from the repo root.
+The mtime-based score discounts age by inbound references. Thresholds classify
+stale and dormant notes; old referenced notes without a wiki entry become
+promotion candidates. Results are advisory and never make the command fail.
 """
 
 from __future__ import annotations
@@ -36,6 +13,7 @@ import json
 import math
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -49,6 +27,7 @@ from _paths import tier, tier_files  # type: ignore[import-not-found]  # noqa: E
 L2_DIRS = [
     tier("agent_findings"),
     tier("wip"),
+    tier("research"),
     tier("gtd"),
     tier("preprints"),
     tier("reflections"),
@@ -56,38 +35,20 @@ L2_DIRS = [
 
 WIKI_DIR = tier("wiki")
 
-# Thresholds (staleness score units, roughly "days-equivalent").
 STALE_THRESHOLD = 90
 DORMANT_THRESHOLD = 45
 PROMOTION_AGE_DAYS = 180
 PROMOTION_MIN_REFS = 2
 
 
+@dataclass(slots=True, eq=False, repr=False)
 class NoteScore:
-    __slots__ = (
-        "path",
-        "days_since_modified",
-        "reference_count",
-        "staleness",
-        "category",
-        "has_wiki_entry",
-    )
-
-    def __init__(
-        self,
-        path: Path,
-        days_since_modified: int,
-        reference_count: int,
-        staleness: float,
-        category: str,
-        has_wiki_entry: bool,
-    ):
-        self.path = path
-        self.days_since_modified = days_since_modified
-        self.reference_count = reference_count
-        self.staleness = staleness
-        self.category = category
-        self.has_wiki_entry = has_wiki_entry
+    path: Path
+    days_since_modified: int
+    reference_count: int
+    staleness: float
+    category: str
+    has_wiki_entry: bool
 
     def to_dict(self) -> dict:
         return {
@@ -155,7 +116,6 @@ def _compute_staleness(days: int, refs: int) -> float:
 
 def _categorize(score: NoteScore) -> str:
     """Assign an actionable category."""
-    # Promotion candidate: old but well-referenced, no wiki entry yet.
     if (
         score.days_since_modified >= PROMOTION_AGE_DAYS
         and score.reference_count >= PROMOTION_MIN_REFS
@@ -174,7 +134,6 @@ def scan(
     today: date,
 ) -> list[NoteScore]:
     """Scan L2 directories and score each note."""
-    # Build reference corpus: wiki entries + recent reflections + recent daily notes.
     corpus: list[Path] = []
     if WIKI_DIR.exists():
         corpus.extend(WIKI_DIR.rglob("*.md"))
@@ -191,7 +150,6 @@ def scan(
             if p.exists():
                 corpus.append(p)
 
-    # Collect wiki entry stems for promotion-candidate detection.
     wiki_stems: set[str] = set()
     if WIKI_DIR.exists():
         for p in WIKI_DIR.rglob("*.md"):
@@ -215,7 +173,6 @@ def scan(
 
             staleness = _compute_staleness(days, refs)
 
-            # Check if a wiki entry with a similar slug exists.
             has_wiki = path.stem in wiki_stems
 
             ns = NoteScore(
@@ -249,7 +206,6 @@ def format_table(scores: list[NoteScore]) -> str:
     )
     lines.append("")
 
-    # Only show non-active notes (the actionable ones).
     actionable = [s for s in scores if s.category != "active"]
     if not actionable:
         lines.append("All L2 notes are active. Nothing to do.")

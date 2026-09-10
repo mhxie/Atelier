@@ -16,7 +16,7 @@ contextual invocation with `scripts/intent_coverage.py intent-log`. Kinds:
 | `routed` | One row fit with confidence; `intent` names it. |
 | `general` | Nothing fit; `intents.general` handed the request to the runtime's ordinary routing. `final_dispatch` may name what ran. |
 | `clarified` | The orchestrator asked the user to choose; `candidates` lists what was offered and `clarified_to` what was picked. |
-| `corrected` | A confident route the user redirected after the announcement: `intent` is the announced row, `clarified_to` the one that should have run. Logged as a second line after the original `routed` line; this is the false-hit signal, and `corrected / routed` is the false-hit rate in `scripts/eval_run.py`. |
+| `corrected` | A confident route the user redirected after the announcement: `intent` is the announced row, `clarified_to` the one that should have run. Logged as a second line after the original `routed` line; this is the false-hit signal. |
 
 Location: `$OV/_meta/intent_routes/YYYY-MM-DD.jsonl`, falling back to
 `~/.cache/atelier/intent_routes/` when `$OV` is unset. The filename date is
@@ -59,60 +59,9 @@ lists those repeaters with their clarified or dispatched target; `--json`
 carries the same rows under `proposals` for `/triage`. `--since` filters at
 file-date granularity.
 
-`scripts/eval_run.py` records route coverage (confident routes over all
-routes in the last 30 days) as the `routing` component of each eval snapshot,
-and `scripts/cues.py check_intent_misses` raises a soft cue when a phrase
-recurs unrouted on 3+ distinct days within 14 days. Coverage is not
-correctness; see the judged eval below.
-
-## Judged routing eval
-
-Coverage says how often a route was confident, not whether it was right.
-Correctness is checked by a cheap model acting as the classifier: dispatch a
-`general-purpose` subagent (model `sonnet`) with the prompt below, then fold
-its verdict into the eval snapshot. Run it after any change to a
-`description`, before `/system-review` on a routing change, or when the
-coverage cue fires. It costs about 45k subagent tokens and a minute; nothing
-enters the main context except the verdict.
-
-Two case sets feed it: the public fixture, and the private regression set at
-`$OV/_meta/evals/routing_cases.json` (`{"cases": [{"id", "input", "label"?}]}`,
-seeded from the retired substring router's real misses). Cases with a
-`label` score accuracy; cases without one report the pick distribution and
-the clarify rate. Append new `corrected` and `clarified` ledger phrases to it
-when they recur.
-
-Prompt (verbatim, fill the two paths):
-
-```text
-You are the /hi intent classifier for the repo at <repo root>. Judged routing
-eval: classify each fixture input against the intent catalog using ONLY the
-row descriptions.
-1. Run exactly `uv run scripts/intent_coverage.py catalog`. Do NOT pass
-   --examples, do NOT open harness/intents.toml, and do NOT open anything
-   under tests/ except the fixture below; examples would leak answers.
-2. Read `.claude/commands/hi.md` § Contextual routing.
-3. Read `tests/fixtures/routing_evalset.json` (cases: [{input, expected}]).
-4. For each case write your pick BEFORE reading its `expected`; use `general`
-   when no row fits. Note whether hi.md's clarify rule would have fired.
-5. Write ONLY this JSON to <verdict path>: {"model": "sonnet", "cases": N,
-   "passed": N, "catalog_bytes": N, "misses": [{"input": ..., "expected":
-   ..., "got": ..., "why": one sentence, "suggest": reworded description}],
-   "collisions": [{"rows": ["a", "b"], "why": ...}]}
-Do not modify any other file.
-```
-
-Then:
-
-```bash
-uv run scripts/eval_run.py --no-semantic --judged-routing <verdict path>
-```
-
-The snapshot records `judged.routing` (`cases`, `passed`, `score`, `misses`,
-`model`), and `scripts/cues.py check_eval_regression` compares it across
-consecutive snapshots alongside route coverage. Act on `misses` and
-`collisions` exactly as on a recurring phrase below: the fix is always a
-sharper description, never priority machinery.
+`scripts/cues.py check_intent_misses` raises a soft cue when a phrase recurs
+unrouted on 3+ distinct days within 14 days. A confident route is not
+necessarily a correct one; the ledger records what happened, not a verdict.
 
 ## Acting on a recurring phrase
 
@@ -136,7 +85,7 @@ sharper description, never priority machinery.
 
    The row appears in the catalog marked `(private)` with the defaults of a
    solo, script-free route (`mode = "private-feature"`, no profile reads);
-   `mode`, `agents`, `profile_reads`, `context_budget_bytes` may be set.
+   `mode`, `agents`, `profile_reads`, `context_budget_tokens` may be set.
    Requests for private capabilities that reach `general` are the largest
    source of false hits into neighbouring public rows; this is the fix.
 4. **Accept the miss.** One-off engineering, app, or tool requests belong to
@@ -150,4 +99,3 @@ fix is to narrow one description, never to add priority machinery.
 - `harness/intents.toml`: the catalog; `description` is the routing contract.
 - `.claude/commands/hi.md` § Contextual routing: when to clarify, what to log.
 - `scripts/intent_coverage.py`: `catalog`, `intent-log`, `intent-misses`.
-- `protocols/shadow-log.md`: sibling JSONL-append and report system.

@@ -1,24 +1,11 @@
 #!/usr/bin/env python3
-"""Render per-runtime edge files from the canonical registries.
+"""Render runtime edges from the canonical harness registries.
 
-The Codex edge (`.codex/agents/*.toml`, `.agents/skills/<cmd>/SKILL.md`,
-`.agents/skills/<cmd>/agents/openai.yaml`) is a pure function of
-`harness/agents.toml`, `harness/commands.toml`, and `harness/models.toml`;
-`harness_lint.py` already enforces that shape. Hand-maintaining ~55 template
-files invites drift, and every additional runtime (declared in
-`harness/runtimes.toml`) would add its own set. This renderer generates them.
-
-Usage:
-  uv run scripts/render_runtime_edges.py --runtime codex --check   # exit 1 on drift
-  uv run scripts/render_runtime_edges.py --runtime codex --apply   # write files
-
-`--check` must reproduce the committed edge byte-for-byte before `--apply`
-is trusted; the smoke suite runs it continuously. Hand-written surfaces are
-excluded: `.agents/skills/atelier/` (the router skill) and `.codex/hooks.json`
-(no cross-runtime hook schema exists yet).
-
-Per-runtime quirks live in small data tables (`EXTRA_AGENT_LINES`), not in
-prose; a new quirk belongs there or, better, in the registry.
+Run with --runtime codex: --check exits 1 on drift; --apply writes the edges.
+Check byte-for-byte parity before trusting apply. Hand-written Atelier skill
+and .codex/hooks.json are excluded. Quirks belong in registry data or the
+small runtime tables here, never hand-edited generated files.
+Registry ownership and validation: harness/README.md.
 """
 
 from __future__ import annotations
@@ -72,7 +59,7 @@ def render_codex(agents: dict, commands: dict, models: dict) -> dict[Path, str]:
     for key, row in sorted(agents.get("agents", {}).items()):
         source = str(row.get("source", ""))
         if not source.startswith(".claude/agents/"):
-            continue  # script-driven roles (external-reviewer) have no adapter
+            continue  # script-driven roles have no adapter
         native = row.get("voices", {}).get("native")
         tier = models.get("models", {}).get(native, {}).get("reasoning_tier")
         effort = TIER_TO_EFFORT.get(tier)

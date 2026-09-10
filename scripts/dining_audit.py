@@ -16,6 +16,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import date_in_text  # noqa: E402
+
 REQUIRED_ROLES = (
     "Regional dining catalog",
     "Meal-history tracker",
@@ -23,6 +26,7 @@ REQUIRED_ROLES = (
     "Benefits tracker",
     "Prepaid-balance tracker",
 )
+DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 EXPECTED_COLUMNS = (
     "Date",
     "Restaurant",
@@ -42,7 +46,6 @@ EXPECTED_COLUMNS = (
 ESTABLISHMENT_COLUMNS = ("餐厅", "分店", "地址", "状态", "核验日", "来源")
 LIFECYCLE_STATUSES = {"active", "closed", "moved", "unknown"}
 UNKNOWN = {"", "—", "-"}
-DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})")
 MONEY_RE = re.compile(r"^(~)?([$¥])([0-9]+(?:,[0-9]{3})*(?:\.[0-9]{1,2})?)$")
 PROFILE_ROLE_RE = re.compile(r"^[A-Za-z][A-Za-z -]+$")
 LINK_RE = re.compile(r"\[[^\]]+\]\((?:<([^>]+)>|([^)]+))\)")
@@ -804,12 +807,8 @@ def _recent_meals(
         if len(cells) != len(EXPECTED_COLUMNS):
             continue
         row = dict(zip(EXPECTED_COLUMNS, cells, strict=True))
-        match = DATE_RE.search(row["Date"])
-        if not match:
-            continue
-        try:
-            event_date = date.fromisoformat(match.group(1))
-        except ValueError:
+        event_date = date_in_text(row["Date"])
+        if event_date is None:
             continue
         parsed.append((event_date, index, row))
 

@@ -3,7 +3,7 @@ description: Personal relationship management audit grounded in local relationsh
 ---
 # PRM: Personal Relationship Management
 
-Audit the health and robustness of the user's social support system. Grounded in Dunbar's layer model, House's four-dimension support framework, and the cached research at `<paths.cache>/dunbar-energy-allocation-plosone-2025.md`.
+Audit the health and robustness of the user's social support system. Grounded in Dunbar's layer model, House's four-dimension support framework, and the cached Dunbar energy-allocation paper under `<paths.cache>/` when present.
 
 ## Prerequisites
 
@@ -18,7 +18,7 @@ Audit the health and robustness of the user's social support system. Grounded in
 - **PRM template:** `<paths.archive>/templates/` PRM template file (layer definitions and scoring rules)
 - **Daily notes:** `<paths.daily_notes>/` (for interaction frequency detection)
 - **Profile:** `profile/identity.md` (Key People section, Active Life Areas: Social & Emotional)
-- **Prior reflections:** `<paths.reflections>/` (Support System Log sections from prior sessions)
+- **Prior reflections:** `<paths.reflections>/` (relationship findings from prior reflection and PRM sessions)
 
 ## Reference Frameworks
 
@@ -196,4 +196,4 @@ The PRM audit file in `<paths.reflections>/` is the durable session output. Dail
 
 ## Frequency
 
-Recommended: monthly full audit, weekly pulse via the Support System Pulse step in daily reflections. The daily pulse feeds longitudinal data; the monthly `/prm` audit synthesizes structural patterns.
+Recommended: monthly full audit. Between audits, the Relationships check-in in `.claude/commands/daily-reflection.md` → Relevant life context supplies longitudinal evidence when it comes up; the monthly `/prm` audit synthesizes structural patterns.

@@ -19,9 +19,8 @@ User says something like:
 
 ## Prerequisites
 
-1. Reuse the current `decision` context projection from `$hi`; for direct
-   invocation, run `uv run scripts/context_bundle.py --intent decision
-   --format json`.
+1. Reuse the current `decision` Repomix context artifact from `$hi`; for direct
+   invocation, run `uv run scripts/context_bundle.py --intent decision`.
 
 ## The Decision Process
 
@@ -45,12 +44,8 @@ constraints, or decisions could change the answer.
 - For a costly, irreversible, or high-uncertainty choice, dispatch the native
   Thinker. Add the direct Thinker leg only when independent framing could
   materially change the outcome.
-- When using both legs, follow `protocols/voice-dispatch.md` and
-  `protocols/shadow-log.md`: start with
-  `python3 scripts/shadow.py group-start --task decision --agent thinker`,
-  resolve the native identity with
-  `python3 scripts/shadow.py native-model --agent thinker`, close the group,
-  and surface disagreement. A missing direct leg is a soft downgrade.
+- When using both legs, follow `protocols/agent-handoff.md` → Responsibilities and Voice Legs, surface
+  disagreement, and treat a missing direct leg as a soft downgrade.
 
 ### Step 4: Decision Record
 
@@ -59,6 +54,10 @@ Don't push for a decision. If the user is ready, capture it. If not, capture the
 ## Output
 
 **File:** `<paths.gtd>/decisions/<slugified-topic>.md`
+
+Present the proposed record or update and obtain approval before saving it.
+The decision itself, agreement with the analysis, and permission to write are
+distinct; do not treat a discussion as approval to persist it.
 
 Slugify the topic for the stable filename: lowercase, replace spaces with
 hyphens, and remove special characters (e.g., "SF vs NYC job" →
@@ -104,13 +103,14 @@ review: YYYY-MM-DD or trigger
 
 ## Session Log
 
-After writing the decision file, emit a session log:
-1. `Bash: uv run scripts/session_log.py --type decision --duration <minutes>`
-2. `Edit` the created file to populate sections from session data (agents dispatched, searches, questions, frameworks, anomalies). The canonical fill-in guide lives in `protocols/session-log.md` § "Section Guidance". Leave empty sections with headers only. If the write fails, warn and continue.
+Run `uv run scripts/session_log.py --type decision --duration <minutes>` and fill
+the compact Continuity, Anomalies, and Operations sections per
+`protocols/session-log.md`. Keep the revisit trigger and actual write outcome;
+do not duplicate the decision analysis in the log. Warn on a logging failure
+without blocking the conversation.
 
 ## Wrap Up
 
-The stable decision file in `<paths.gtd>/decisions/` is the durable output;
-the dated session log is the process record. Daily notes are user-authored;
-the system reads them but does not modify them. Tell the user whether the
-decision record was created or updated and where to find it.
+The approved stable decision file is the durable output; the compact log
+carries continuity. Daily notes remain read-only. Report whether the decision
+record was created, updated, or not saved, and its location when saved.

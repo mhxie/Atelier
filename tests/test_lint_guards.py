@@ -1,240 +1,580 @@
-"""Mutation tests for the two harness_lint guards added on 2026-08-22.
-
-A guard is only a guard once it has failed on the bug it was written for.
-The first version of the flat-tier-glob regex silently matched nothing
-(an escape swallowed during insertion); these tests pin both checks to the
-exact offending shapes so a future refactor of harness_lint.py cannot
-neuter them quietly.
-"""
+"""Outcome tests for harness lint guards."""
 
 from __future__ import annotations
 
+import copy
+import contextlib
+import io
 import json
-import os
+import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
+import tomllib
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+import harness_lint as h  # noqa: E402
+
+PUBLIC_CONFIG_PATHS = (
+    "harness/models.toml",
+    "harness/agents.toml",
+    "harness/commands.toml",
+    "harness/capabilities.toml",
+    "harness/runtimes.toml",
+    "harness/intents.toml",
+    "harness/paths.toml",
+    ".codex/hooks.json",
+    ".claude/settings.json",
+)
 
 
-def _run_py(body: str, env_extra: dict | None = None) -> dict:
-    code = "import json, sys\nsys.path.insert(0, 'scripts')\nimport harness_lint as h\nfrom pathlib import Path\n" + textwrap.dedent(body)
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        cwd=REPO_ROOT,
-        env={**os.environ, **(env_extra or {})},
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    if proc.returncode != 0:
-        raise AssertionError(proc.stderr)
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+@contextlib.contextmanager
+def _lint_root():
+    with tempfile.TemporaryDirectory(prefix="atelier-lint-") as tmp:
+        root = Path(tmp)
+        with patch.object(h, "ROOT", root):
+            yield root
+
+
+def _write(root: Path, name: str, body: str) -> Path:
+    target = root / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
+class RootFileGuardsTest(unittest.TestCase):
+    def test_claude_size_boundaries_and_bold_markers(self) -> None:
+        with _lint_root() as root:
+            _write(root, "AGENTS.md", "CLAUDE.md protocols/runtime-adapters.md")
+            _write(root, "protocols/runtime-adapters.md", "runtime contract")
+            for size, severity in ((8192, None), (8193, "WARN"), (15000, "WARN"), (15001, "ERROR")):
+                with self.subTest(size=size):
+                    _write(root, "CLAUDE.md", "x" * size)
+                    findings = h.check_root_files()
+                    self.assertEqual([(f.code, f.severity) for f in findings],
+                                     [("claude-size", severity)] if severity else [])
+            _write(root, "CLAUDE.md", "**bold**")
+            self.assertEqual([(f.code, f.severity) for f in h.check_root_files()],
+                             [("claude-bold", "INFO")])
+
+
+class RegistrySchemaGuardTest(unittest.TestCase):
+    def setUp(self) -> None:
+        temporary = tempfile.TemporaryDirectory(prefix="atelier-registry-schema-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        for name in (*PUBLIC_CONFIG_PATHS, "harness/registry.schema.json"):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(REPO_ROOT / name, target)
+        # load_harness_config deliberately resolves the validator from ROOT.
+        # Keep a patched-root fixture on the same interpreter as the real suite.
+        project_venv = REPO_ROOT / ".venv"
+        if project_venv.is_dir():
+            (self.root / ".venv").symlink_to(project_venv, target_is_directory=True)
+        else:
+            python = self.root / ".venv" / "bin" / "python"
+            python.parent.mkdir(parents=True)
+            python.symlink_to(Path(sys.executable))
+
+    def load(self) -> tuple[dict, list[h.Finding]]:
+        with patch.object(h, "ROOT", self.root):
+            return h.load_harness_config()
+
+    def validate(self, data: dict) -> list[h.Finding]:
+        with patch.object(h, "ROOT", self.root):
+            return h.validate_harness_config(data)
+
+    def test_all_nine_documents_are_clean_and_each_schema_branch_rejects_bad_data(self) -> None:
+        data, findings = self.load()
+        self.assertEqual(findings, [])
+        self.assertEqual(set(data), set(PUBLIC_CONFIG_PATHS))
+
+        model = next(iter(data["harness/models.toml"]["models"]))
+        agent = next(iter(data["harness/agents.toml"]["agents"]))
+        command = next(iter(data["harness/commands.toml"]["commands"]))
+        capability = next(iter(data["harness/capabilities.toml"]["capabilities"]))
+        intent = next(iter(data["harness/intents.toml"]["intents"]))
+        path_name = next(
+            name for name, value in data["harness/paths.toml"]["paths"].items()
+            if isinstance(value, str)
+        )
+        temporal = tomllib.loads(
+            "date = 1979-05-27\ntime = 07:32:00\ndatetime = 1979-05-27T07:32:00Z\n"
+        )
+        faults = (
+            ("harness/models.toml", ("models", model, "reasoning_tier"), 7),
+            ("harness/agents.toml", ("agents", agent, "source"), 7),
+            ("harness/commands.toml", ("commands", command, "source"), 7),
+            ("harness/capabilities.toml", ("capabilities", capability, "codex"), []),
+            ("harness/runtimes.toml", ("runtime", "default"), "claude"),
+            ("harness/intents.toml", ("intents", intent, "context_budget_tokens"), 0),
+            ("harness/intents.toml", ("intents", intent, "context_budget_tokens"), 16385),
+            ("harness/intents.toml", ("intents", intent, "context_budget_bytes"), 8192),
+            ("harness/paths.toml", ("paths", path_name), 7),
+            (".codex/hooks.json", ("hooks",), []),
+            (".claude/settings.json", ("hooks",), []),
+            ("harness/models.toml", ("models", model, "reasoning_tier"), temporal["date"]),
+            ("harness/intents.toml", ("intents", intent, "description"), temporal["time"]),
+            ("harness/intents.toml", ("intents", intent, "procedure"), temporal["datetime"]),
+        )
+        for name, keys, value in faults:
+            with self.subTest(name=name, field=".".join(keys)):
+                broken = copy.deepcopy(data)
+                cursor = broken[name]
+                for key in keys[:-1]:
+                    cursor = cursor[key]
+                cursor[keys[-1]] = value
+                errors = self.validate(broken)
+                self.assertTrue(errors)
+                self.assertEqual({finding.code for finding in errors}, {"registry-schema"})
+                self.assertTrue(
+                    any(finding.where.startswith(f"{name}:$") for finding in errors),
+                    errors,
+                )
+
+        budget_path = ("harness/intents.toml", "intents", intent, "context_budget_tokens")
+        for value, expected_codes in ((8192, []), (8192.0, ["registry-schema"])):
+            with self.subTest(context_budget_tokens=value):
+                broken = copy.deepcopy(data)
+                broken[budget_path[0]][budget_path[1]][budget_path[2]][budget_path[3]] = value
+                self.assertEqual(
+                    [finding.code for finding in self.validate(broken)],
+                    expected_codes,
+                )
+
+    def test_unknown_agent_and_intent_metadata_remain_supported(self) -> None:
+        data, findings = self.load()
+        self.assertEqual(findings, [])
+        metadata = {
+            "pattern": None,
+            "used_by": 42,
+            "kinds": [],
+            "dispatch_rationale": False,
+            **tomllib.loads(
+                "metadata_date = 1979-05-27\n"
+                "metadata_time = 07:32:00\n"
+                "metadata_datetime = 1979-05-27T07:32:00Z\n"
+            ),
+        }
+        agent = next(iter(data["harness/agents.toml"]["agents"].values()))
+        intent = next(iter(data["harness/intents.toml"]["intents"].values()))
+        agent.update(metadata)
+        intent.update(metadata)
+        self.assertEqual(self.validate(data), [])
+
+    def test_loader_accumulates_malformed_and_missing_public_documents(self) -> None:
+        (self.root / "harness" / "models.toml").write_text("[models.bad\n", encoding="utf-8")
+        (self.root / ".codex" / "hooks.json").write_text("{", encoding="utf-8")
+        (self.root / "harness" / "capabilities.toml").unlink()
+        data, findings = self.load()
+        self.assertEqual(data, {})
+        self.assertEqual({finding.code for finding in findings}, {"registry-read"})
+        self.assertEqual(
+            {finding.where for finding in findings},
+            {"harness/models.toml", "harness/capabilities.toml", ".codex/hooks.json"},
+        )
+
+    def test_schema_and_validator_fail_closed(self) -> None:
+        schema_path = self.root / "harness" / "registry.schema.json"
+        original = schema_path.read_text(encoding="utf-8")
+        for name, replacement in (("missing schema", None), ("malformed schema", "{")):
+            with self.subTest(name=name):
+                if replacement is None:
+                    schema_path.unlink()
+                else:
+                    schema_path.write_text(replacement, encoding="utf-8")
+                data, findings = self.load()
+                self.assertEqual(data, {})
+                self.assertEqual([finding.code for finding in findings], ["registry-validator"])
+                schema_path.write_text(original, encoding="utf-8")
+
+        data, findings = self.load()
+        self.assertEqual(findings, [])
+        failures = (
+            ("missing tool", FileNotFoundError("missing validator")),
+            ("malformed output", subprocess.CompletedProcess([], 2, "not-json", "broken")),
+            (
+                "operational failure",
+                subprocess.CompletedProcess([], 2, '{"status":"fail","errors":[]}', "broken"),
+            ),
+        )
+        for name, outcome in failures:
+            with self.subTest(name=name), patch.object(h.subprocess, "run") as run:
+                if isinstance(outcome, BaseException):
+                    run.side_effect = outcome
+                else:
+                    run.return_value = outcome
+                errors = self.validate(data)
+                self.assertEqual([finding.code for finding in errors], ["registry-validator"])
+
+
+class HarnessLintCliContractTest(unittest.TestCase):
+    def test_json_envelope_and_exit_codes(self) -> None:
+        cases = (
+            ([], 0, {"error": 0, "warn": 0, "info": 0}),
+            ([h.Finding("WARN", "advisory", "harness/x", "message")], 0,
+             {"error": 0, "warn": 1, "info": 0}),
+            ([h.Finding("ERROR", "broken", "harness/x", "message")], 1,
+             {"error": 1, "warn": 0, "info": 0}),
+        )
+        for findings, expected_exit, counts in cases:
+            with self.subTest(expected_exit=expected_exit), patch.object(h, "run_lints", return_value=findings):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = h.main(["--json"])
+                payload = json.loads(output.getvalue())
+                self.assertEqual(exit_code, expected_exit)
+                self.assertEqual(payload["counts"], counts)
+                self.assertEqual(
+                    [set(finding) for finding in payload["findings"]],
+                    [{"severity", "code", "where", "message"} for _ in findings],
+                )
+
+    def test_unknown_argument_uses_argparse_exit_two(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            h.main(["--unknown"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_schema_failure_gates_domain_checks(self) -> None:
+        failure = h.Finding("ERROR", "registry-schema", "harness/models.toml:$", "bad")
+        with patch.object(h, "load_harness_config", return_value=({}, [failure])), \
+             patch.object(h, "load_claude_agents", side_effect=AssertionError("domain checks ran")):
+            self.assertEqual(h.run_lints(), [failure])
 
 
 class FlatTierGlobGuardTest(unittest.TestCase):
-    def test_regexes_match_the_original_offending_lines(self) -> None:
-        out = _run_py(
-            """
-            py_lines = [
-                'weeklies = sorted(weekly_dir.glob("*-weekly.md"))',
-                'for f in sorted(REFLECTIONS_DIR.glob("*.md")):',
-                'any_audit = list(findings_dir.glob("autoevo-applied-*.md"))',
-                'x = tier("reflections").glob("*.md")',
-            ]
-            ok_lines = ['corpus.extend(WIKI_DIR.rglob("*.md"))', 'for f in tier_files("reflections", "*.md"):']
-            ls_lines = [
-                'Bash: last_full=$(ls "$OV"/reflections/*-review.md 2>/dev/null | sort | tail -1)',
-                'Wiki count (`ls "$OV"/wiki/*.md | wc -l`)',
-                'ls "$OV"/reflections/${date_str}-reflection*.md 2>/dev/null > /dev/null || echo missing',
-            ]
-            ok_ls = ['find "$OV/reflections" -name "*-weekly.md"', 'ls "$OV"/gtd/*.md']
-            print(json.dumps({
-                "py_hits": [any(r.search(l) for r in h._FLAT_TIER_PY_RES) for l in py_lines],
-                "py_ok": [any(r.search(l) for r in h._FLAT_TIER_PY_RES) for l in ok_lines],
-                "ls_hits": [bool(h._FLAT_TIER_LS_RE.search(l)) for l in ls_lines],
-                "ls_ok": [bool(h._FLAT_TIER_LS_RE.search(l)) for l in ok_ls],
-                "tiers": list(h.BUCKETED_TIERS),
-            }))
-            """
+    def test_python_alias_and_shell_shapes_are_rejected(self) -> None:
+        with _lint_root() as root:
+            _write(root, "scripts/victim.py",
+                   'weeklies = sorted(weekly_dir.glob("*-weekly.md"))\n'
+                   'for f in sorted(REFLECTIONS_DIR.glob("*.md")): pass\n'
+                   'x = tier("reflections").glob("*.md")\n'
+                   'refl = tier("reflections")\n'
+                   'reviews = sorted(refl.glob("*-growth-review.md"))\n'
+                   'safe = WIKI_DIR.rglob("*.md")\n')
+            _write(root, "protocols/victim.md",
+                   'ls "$OV"/reflections/*-review.md\n'
+                   'find "$OV/reflections" -name "*-weekly.md"\n')
+            findings = h.check_flat_tier_globs()
+        self.assertEqual(
+            [(f.code, f.where) for f in findings],
+            [("flat-tier-glob", where) for where in (
+                "scripts/victim.py:1",
+                "scripts/victim.py:2",
+                "scripts/victim.py:3",
+                "scripts/victim.py:5",
+                "protocols/victim.md:1",
+            )],
         )
-        self.assertTrue(all(out["py_hits"]), out)
-        self.assertFalse(any(out["py_ok"]), out)
-        self.assertTrue(all(out["ls_hits"]), out)
-        self.assertFalse(any(out["ls_ok"]), out)
-        for tier in ("reflections", "agent-findings", "wiki", "people"):
-            self.assertIn(tier, out["tiers"])
-
-
-class AliasedFlatGlobGuardTest(unittest.TestCase):
-    def test_alias_assigned_from_tier_is_flagged(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-lint-") as tmp:
-            import shutil
-            root = Path(tmp)
-            for extra in ("harness", ".claude", ".codex", "protocols"):
-                if (REPO_ROOT / extra).exists():
-                    shutil.copytree(REPO_ROOT / extra, root / extra, ignore=shutil.ignore_patterns("__pycache__"))
-            shutil.copy(REPO_ROOT / ".gitignore", root / ".gitignore")
-            (root / "scripts").mkdir()
-            (root / "scripts" / "victim.py").write_text(
-                'from _paths import tier\n'
-                'refl = tier("reflections")\n'
-                'reviews = sorted(refl.glob("*-growth-review.md"))\n',
-                encoding="utf-8",
-            )
-            out = _run_py(
-                f"""
-                h.ROOT = Path({str(root)!r})
-                findings = h.check_flat_tier_globs()
-                print(json.dumps([(f.code, f.where) for f in findings]))
-                """
-            )
-            self.assertTrue(any(c == "flat-tier-glob" and "victim.py:3" in w for c, w in out), out)
 
 
 class IntentAgentsInProcedureGuardTest(unittest.TestCase):
     def test_declared_agent_missing_from_procedure_is_an_error(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-lint-") as tmp:
-            root = Path(tmp)
-            (root / "procs").mkdir()
-            (root / "procs" / "good.md").write_text("Dispatch the **Thinker** then the Scribe.\n", encoding="utf-8")
-            (root / "procs" / "bad.md").write_text("Runs retrieval inline; no dispatch.\n", encoding="utf-8")
-            out = _run_py(
-                f"""
-                h.ROOT = Path({str(root)!r})
-                intents = {{
-                    "ok": {{"agents": ["thinker", "scribe"], "procedure": "procs/good.md"}},
-                    "stale": {{"agents": ["researcher"], "procedure": "procs/bad.md"}},
-                    "none": {{"agents": [], "procedure": "procs/bad.md"}},
-                }}
-                findings = h.check_intents_agents_in_procedure(intents)
-                print(json.dumps([(f.code, f.where, f.severity) for f in findings]))
-                """
-            )
-            self.assertEqual(len(out), 1, out)
-            self.assertEqual(out[0][0], "intent-agent-not-in-procedure")
-            self.assertIn("intents.stale", out[0][1])
-            self.assertEqual(out[0][2], "ERROR")
+        with _lint_root() as root:
+            _write(root, "procs/good.md", "Dispatch the **Thinker** then the Scribe.\n")
+            _write(root, "procs/bad.md", "Runs retrieval inline; no dispatch.\n")
+            findings = h.check_intents_agents_in_procedure({
+                "ok": {"agents": ["thinker", "scribe"], "procedure": "procs/good.md"},
+                "stale": {"agents": ["researcher"], "procedure": "procs/bad.md"},
+                "none": {"agents": [], "procedure": "procs/bad.md"},
+            })
+        self.assertEqual(len(findings), 1, findings)
+        self.assertEqual(findings[0].code, "intent-agent-not-in-procedure")
+        self.assertIn("intents.stale", findings[0].where)
+        self.assertEqual(findings[0].severity, "ERROR")
 
 
 class DecisionRecordPathGuardTest(unittest.TestCase):
     def test_dated_reflection_output_is_rejected(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-decision-path-") as tmp:
-            root = Path(tmp)
-            (root / ".claude" / "commands").mkdir(parents=True)
-            (root / "protocols").mkdir()
-            (root / ".claude" / "commands" / "decision.md").write_text(
-                "<paths.reflections>/YYYY-MM-DD-decision-<slugified-topic>.md\n",
-                encoding="utf-8",
-            )
-            (root / "protocols" / "session-continuity.md").write_text(
-                "<paths.gtd>/decisions/*.md\n",
-                encoding="utf-8",
-            )
-            out = _run_py(
-                f"""
-                h.ROOT = Path({str(root)!r})
-                findings = h.check_decision_record_contract()
-                print(json.dumps([(f.code, f.where) for f in findings]))
-                """
-            )
-            self.assertIn(
-                ["decision-record-path", ".claude/commands/decision.md"], out
-            )
-
-
-class SessionReplayConfigShapeGuardTest(unittest.TestCase):
-    def test_bad_example_shape_is_flagged(self) -> None:
-        import shutil
-        with tempfile.TemporaryDirectory(prefix="atelier-lint-") as tmp:
-            root = Path(tmp)
-            shutil.copytree(REPO_ROOT / "harness", root / "harness")
-            shutil.copy(REPO_ROOT / ".gitignore", root / ".gitignore")
-            for extra in (".claude", ".codex", "scripts"):
-                if (REPO_ROOT / extra).exists():
-                    shutil.copytree(REPO_ROOT / extra, root / extra, ignore=shutil.ignore_patterns("__pycache__", "_results*", "*.log"))
-            (root / "harness" / "session-replay.toml.example").write_text(
-                '[session_replay]\nenabled = "yes"\nextra = 1\n', encoding="utf-8"
-            )
-            out = _run_py(
-                f"""
-                h.ROOT = Path({str(root)!r})
-                findings = h.check_runtime_registry()
-                print(json.dumps([f.code for f in findings]))
-                """
-            )
-            self.assertIn("session-replay-config-shape", out, out)
-
-
-class ThresholdSourceOfTruthTest(unittest.TestCase):
-    """The 90/30/3 numbers live in autoevo_pending.py's flags; prose must
-    point at the flags, and the flag defaults must match what prose quotes."""
-
-    def test_defaults_and_prose_agree(self) -> None:
-        import re
-        helper = (REPO_ROOT / "scripts" / "autoevo_pending.py").read_text(encoding="utf-8")
-        dedupe = re.search(r'"--dedupe-days", type=int, default=(\d+)', helper)
-        max_age = re.search(r'"--max-age-days", type=int, default=(\d+)', helper)
-        self.assertIsNotNone(dedupe)
-        self.assertIsNotNone(max_age)
-        self.assertIn('int(entry.get("surface_count", 0)) >= 3', helper)
-        protocol = (REPO_ROOT / "protocols" / "autoevo.md").read_text(encoding="utf-8")
-        self.assertIn(f"`--dedupe-days` window (default {dedupe.group(1)})", protocol)
-        self.assertIn(f"`--max-age-days` (default {max_age.group(1)})", protocol)
-        review = (REPO_ROOT / ".claude" / "commands" / "autoevo-review.md").read_text(encoding="utf-8")
-        self.assertIn(f"`--max-age-days` (default {max_age.group(1)})", review)
+        with _lint_root() as root:
+            _write(root, ".claude/commands/decision.md",
+                   "<paths.reflections>/YYYY-MM-DD-decision-<slugified-topic>.md\n")
+            _write(root, "protocols/session-continuity.md", "<paths.gtd>/decisions/*.md\n")
+            findings = h.check_decision_record_contract()
+        self.assertIn(("decision-record-path", ".claude/commands/decision.md"),
+                      [(f.code, f.where) for f in findings])
 
 
 class HotPathCeilingGuardTest(unittest.TestCase):
     def test_oversized_hot_path_file_is_flagged(self) -> None:
-        out = _run_py(
-            """
-            import tempfile, pathlib
-            tmp = pathlib.Path(tempfile.mkdtemp(prefix='atelier-ceiling-'))
-            big = tmp / 'big.md'
-            big.write_text('x' * 2048, encoding='utf-8')
-            findings = h.check_hot_path_ceilings({str(big): 1024})
-            print(json.dumps([f.code for f in findings]))
-            """
-        )
-        self.assertIn("hot-path-ceiling", out)
+        with _lint_root() as root:
+            big = _write(root, "big.md", "x" * 2048)
+            self.assertIn("hot-path-ceiling", [f.code for f in h.check_hot_path_ceilings({str(big): 1024})])
 
     def test_real_hot_path_files_are_under_ceiling(self) -> None:
-        out = _run_py(
-            """
-            findings = h.check_hot_path_ceilings()
-            print(json.dumps([f"{f.code}:{f.path}" for f in findings]))
-            """
-        )
-        self.assertEqual(out, [])
+        self.assertEqual(h.check_hot_path_ceilings(), [])
 
 
 class BotTrailerBanGuardTest(unittest.TestCase):
     def test_reintroduced_trailer_is_flagged(self) -> None:
-        out = _run_py(
-            """
-            import tempfile, pathlib
-            tmp = pathlib.Path(tempfile.mkdtemp(prefix='atelier-trailer-'))
-            bad = tmp / 'cmd.md'
-            bad.write_text('Co-Authored-By: Atelier Autoevo Bot <x@y>', encoding='utf-8')
-            findings = h.check_bot_trailer_banned(roots=[str(tmp)])
-            print(json.dumps([f.code for f in findings]))
-            """
-        )
-        self.assertIn("bot-trailer-banned", out)
+        with _lint_root() as root:
+            _write(root, "cmd.md", "Co-Authored-By: Atelier Autoevo Bot <x@y>")
+            self.assertIn("bot-trailer-banned", [f.code for f in h.check_bot_trailer_banned(roots=[str(root)])])
 
     def test_repo_prompt_surfaces_are_clean(self) -> None:
-        out = _run_py(
-            """
-            findings = h.check_bot_trailer_banned()
-            print(json.dumps([f"{f.code}:{f.path}" for f in findings]))
-            """
+        self.assertEqual(h.check_bot_trailer_banned(), [])
+
+
+class LegacyFramingGuardTest(unittest.TestCase):
+    """The present-tense rule shipped without an executor; these two phrasings
+    survived in the repo until a hand audit found them."""
+
+    REGRESSIONS = (
+        "`/lint` used to flag this and was wrong about it.",
+        "It is now a draft the system produces on its own; the human",
+    )
+
+    def test_system_biography_phrasings_are_flagged(self) -> None:
+        for body in self.REGRESSIONS:
+            with self.subTest(body=body), _lint_root() as root:
+                _write(root, "doc.md", body)
+                findings = h.check_legacy_framing(roots=[str(root)])
+                self.assertEqual(["legacy-framing"], [f.code for f in findings])
+                self.assertIn("doc.md:1", findings[0].where)
+
+    def test_rule_owning_docs_may_quote_the_phrasings(self) -> None:
+        with _lint_root() as root:
+            _write(root, "protocols/repo-conventions.md", '"earlier versions used to be X"')
+            self.assertEqual(h.check_legacy_framing(roots=["protocols"]), [])
+
+    def test_live_uses_of_the_broad_detect_list_are_not_flagged(self) -> None:
+        """The original prose detect list was written for a human reading a
+        diff. Gating on it verbatim would fire on these."""
+        with _lint_root() as root:
+            _write(root, "doc.md", "\n".join((
+                "| Catalog rating (legacy field) = 3 | +3 |",
+                "| **Decay** | Previously active theme going quiet |",
+                "zettelm no longer holds the file",
+                'It is a "previously on..." anchor, not a summary.',
+                "Refuse to frame later iterations as better than earlier versions",
+                "For v1:",
+            )))
+            self.assertEqual(h.check_legacy_framing(roots=[str(root)]), [])
+
+    def test_repo_prose_surface_is_clean(self) -> None:
+        self.assertEqual(h.check_legacy_framing(), [])
+
+
+class SourceBudgetGuardTest(unittest.TestCase):
+    def test_current_tracked_and_untracked_public_text_is_counted(self) -> None:
+        with _lint_root() as root:
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            _write(root, "source.py", "staged\n")
+            deleted = _write(root, "gone.py", "deleted\n")
+            subprocess.run(["git", "-C", str(root), "add", "source.py", "gone.py"], check=True)
+            deleted.unlink()
+            for name, body in {
+                ".gitignore": "ignored/\n", "source.py": "one\ntwo\n",
+                "new.toml": "key = 1\n", "tests/test_unit.py": "test\n",
+                "protocols/rule.md": "note\n", "ignored/private.py": "not counted\n",
+                "profile/private.py": "not counted\n", "uv.lock": "not counted\n",
+                ".agents/skills/generated/SKILL.md": "not counted\n", "asset.bin": "\0",
+            }.items():
+                _write(root, name, body)
+            (root / "alias.py").symlink_to(root / "ignored/private.py")
+            footprint, findings = h.source_footprint()
+        self.assertEqual(findings, [])
+        self.assertEqual(footprint["total"]["lines"], 6)
+        self.assertEqual({k: v["lines"] for k, v in footprint["by_kind"].items()},
+                         {"implementation/config": 4, "tests": 1, "prose": 1})
+
+    def test_total_and_file_boundaries_fail_the_footprint_cli(self) -> None:
+        with _lint_root() as root, patch.object(h, "git_paths", return_value=["a.py", "b.toml"]):
+            for name in ("a.py", "b.toml"):
+                _write(root, name, "one\ntwo\n")
+            for total_limit, file_limit, locations in (
+                (4, 2, []), (3, 2, ["implementation/config"]), (4, 1, ["a.py", "b.toml"]),
+            ):
+                with self.subTest(total=total_limit, file=file_limit), \
+                     patch.object(h, "SOURCE_LINE_CEILING", total_limit), \
+                     patch.object(h, "SOURCE_FILE_LINE_CEILING", file_limit), \
+                     contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(h.main(["--footprint"]), int(bool(locations)))
+                report = json.loads(output.getvalue())
+                self.assertEqual([f["where"] for f in report["findings"]], locations)
+                self.assertTrue(all(f["severity"] == "ERROR" for f in report["findings"]))
+                self.assertEqual(report["budgets"]["implementation/config_lines"], total_limit)
+
+    def test_inventory_failure_is_not_a_zero_sized_success(self) -> None:
+        with patch.object(h, "git_paths", side_effect=RuntimeError("inventory unavailable")), \
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(h.main(["--footprint"]), 1)
+        report = json.loads(output.getvalue())
+        self.assertNotIn("total", report)
+        self.assertEqual(report["findings"][0]["code"], "source-inventory")
+
+    def test_normal_lint_includes_source_budget_findings(self) -> None:
+        failure = h.Finding("ERROR", "source-budget", "implementation/config", "over ceiling")
+        with patch.object(h, "source_footprint", return_value=({}, [failure])):
+            self.assertIn(failure, h.run_lints())
+
+
+class ProseBudgetGuardTest(unittest.TestCase):
+    def test_command_procedures_are_inside_the_budget(self) -> None:
+        """`.claude/commands/` is the largest routed prose surface and sat
+        outside every aggregate budget until 2026-09."""
+        self.assertIn(".claude/commands", h.PROSE_BUDGET_ROOTS)
+
+    def test_a_new_doc_counts_as_note_facing_not_plumbing(self) -> None:
+        """The frozen half is an explicit list, so an unlisted file must land
+        in the half that still has headroom, never in the one that cannot grow."""
+        with _lint_root() as root:
+            _write(root, "protocols/brand-new.md", "x" * 64)
+            with patch.object(h, "PROSE_PLUMBING_CEILING", 0), patch.object(h, "PROSE_NOTES_WARN", 8192), \
+                 patch.object(h, "PROSE_NOTES_ERROR", 16384):
+                self.assertEqual([], h.check_prose_budget(roots=("protocols",)))
+
+    def test_repo_is_under_budget_and_the_budget_still_binds(self) -> None:
+        self.assertEqual(h.check_prose_budget(), [])
+        plumbing = notes = 0
+        for root in h.PROSE_BUDGET_ROOTS:
+            for path in (h.ROOT / root).rglob("*.md"):
+                rel = str(path.relative_to(h.ROOT))
+                if rel in h.PROSE_PLUMBING:
+                    plumbing += path.stat().st_size
+                else:
+                    notes += path.stat().st_size
+        # Plumbing is frozen: the ceiling stays within 2% of the real surface, so
+        # it still binds without forcing a re-baseline on every byte trimmed.
+        self.assertLess(h.PROSE_PLUMBING_CEILING, plumbing * 1.02)
+        # Notes keep headroom, but not so much that the next growth pass sails through.
+        self.assertLess(h.PROSE_NOTES_WARN, notes * 1.25)
+        self.assertLess(h.PROSE_NOTES_WARN, h.PROSE_NOTES_ERROR)
+
+    def test_boundaries(self) -> None:
+        with _lint_root() as root:
+            _write(root, "protocols/big.md", "x" * 4096)
+            with patch.object(h, "PROSE_PLUMBING_CEILING", 8192), \
+                 patch.object(h, "PROSE_NOTES_WARN", 1024), patch.object(h, "PROSE_NOTES_ERROR", 8192):
+                self.assertEqual(["WARN"], [f.severity for f in h.check_prose_budget(roots=("protocols",))])
+            with patch.object(h, "PROSE_PLUMBING_CEILING", 8192), \
+                 patch.object(h, "PROSE_NOTES_WARN", 512), patch.object(h, "PROSE_NOTES_ERROR", 1024):
+                self.assertEqual(["ERROR"], [f.severity for f in h.check_prose_budget(roots=("protocols",))])
+            with patch.object(h, "PROSE_PLUMBING_CEILING", 8192), \
+                 patch.object(h, "PROSE_NOTES_WARN", 8192), patch.object(h, "PROSE_NOTES_ERROR", 16384):
+                self.assertEqual([], h.check_prose_budget(roots=("protocols",)))
+
+    def test_a_listed_plumbing_file_cannot_grow_past_its_frozen_ceiling(self) -> None:
+        with _lint_root() as root:
+            _write(root, "protocols/README.md", "x" * 4096)
+            with patch.object(h, "PROSE_PLUMBING_CEILING", 1024), \
+                 patch.object(h, "PROSE_NOTES_WARN", 8192), patch.object(h, "PROSE_NOTES_ERROR", 16384):
+                findings = h.check_prose_budget(roots=("protocols",))
+            self.assertEqual(["ERROR"], [f.severity for f in findings])
+            self.assertIn("plumbing", findings[0].message)
+
+
+class AnnotationRemovalGuardTest(unittest.TestCase):
+    def test_runtime_rendering_routing_and_context_ignore_annotations(self) -> None:
+        from render_runtime_edges import render_codex
+        from intent_coverage import catalog_rows
+        import context_bundle as cb
+
+        agents, intents, commands, models = (
+            tomllib.loads((REPO_ROOT / 'harness' / f'{name}.toml').read_text())
+            for name in ('agents', 'intents', 'commands', 'models')
         )
-        self.assertEqual(out, [])
+        metadata = {'pattern': 'obsolete', 'used_by': ['obsolete'], 'kinds': ['obsolete'],
+                    'dispatch_rationale': ['obsolete']}
+        annotated_agents, annotated_intents = copy.deepcopy(agents), copy.deepcopy(intents)
+        for row in annotated_agents['agents'].values():
+            row.update(metadata)
+        for row in annotated_intents['intents'].values():
+            row.update(metadata)
+
+        def routes(rows):
+            with patch.object(cb, 'load_intents', return_value=rows):
+                return [cb.resolve_route(intent_arg=name, intents_path=Path('/fixture/intents.toml')) for name in rows]
+
+        self.assertTrue(all(not set(row).intersection(metadata) for row in agents['agents'].values()))
+        self.assertTrue(all('pattern' not in row for row in intents['intents'].values()))
+        self.assertEqual(render_codex(agents, commands, models), render_codex(annotated_agents, commands, models))
+        self.assertEqual(catalog_rows(intents['intents']), catalog_rows(annotated_intents['intents']))
+        self.assertEqual(routes(intents['intents']), routes(annotated_intents['intents']))
+
+    def test_metadata_is_optional_but_live_registry_errors_still_fail(self) -> None:
+        with _lint_root() as root:
+            source = '.claude/agents/sample.md'
+            _write(root, source, 'Sample role.')
+            row = {'source': source, 'voices': {'native': 'known'}, 'status': 'portable-adapted',
+                   'description': 'Sample role.', 'codex_prompt': source}
+
+            def check_agent(entry):
+                return [f.code for f in h.check_agent_registry(
+                    {'sample': {'path': source}}, {'known': {}}, {'sample': entry}
+                )]
+
+            intent = {'description': 'Sample request.', 'agents': ['sample']}
+            metadata = {'pattern': None, 'used_by': 42, 'kinds': [], 'dispatch_rationale': False}
+            self.assertEqual(check_agent(row), [])
+            self.assertEqual(check_agent({**row, **metadata}), [])
+            self.assertIn('agents-voices-unknown-model', check_agent({**row, 'voices': {'native': 'unknown'}}))
+            self.assertEqual(h.check_intents_registry({'sample': {**intent, **metadata}}, {'sample': {}}, {'sample': {}}), [])
+            errors = [f.code for f in h.check_intents_registry({'sample': intent}, {}, {})]
+            self.assertIn('intents-agent-missing-claude', errors)
+            self.assertIn('intents-agent-missing-harness', errors)
+
+
+class WorkflowContractOwnerGuardTest(unittest.TestCase):
+    def test_retired_router_and_missing_migrated_boundaries_fail(self) -> None:
+        paths = ('protocols/orchestrator.md', '.claude/commands/read.md',
+                 '.claude/commands/sync.md', 'protocols/intent-capture.md')
+
+        def assert_broken():
+            self.assertEqual([f.code for f in h.check_workflow_contract_owners()], ['workflow-contract-owner'])
+
+        with _lint_root() as root:
+            for name in paths:
+                _write(root, name, (REPO_ROOT / name).read_text())
+            self.assertEqual(h.check_workflow_contract_owners(), [])
+            retired = _write(root, 'protocols/orchestrator-actions.md',
+                             'Read [[Article]]: Reader (3-5 instances) + Researcher + Scout + Thinker')
+            assert_broken()
+            retired.unlink()
+            mutations = (
+                ('protocols/orchestrator.md', '`harness/intents.toml` selects the procedure'),
+                ('.claude/commands/read.md', 'Start with one **Reader**, or one **Scholar**'),
+                ('.claude/commands/sync.md', 'protocols/agent-handoff.md'),
+                ('protocols/intent-capture.md', '`/dine` Intent C'),
+                ('protocols/intent-capture.md', 'ask the user once for a default GTD filename'),
+                ('protocols/intent-capture.md', 'Do not pass an empty `target_file`'),
+                ('protocols/intent-capture.md', 'confirm with the user before dispatch'),
+                ('protocols/intent-capture.md', 'rather than retrying with a guess'),
+            )
+            for name, needle in mutations:
+                with self.subTest(boundary=needle):
+                    target = root / name
+                    original = target.read_text()
+                    self.assertIn(needle, original)
+                    target.write_text(original.replace(needle, 'REMOVED'))
+                    try:
+                        assert_broken()
+                    finally:
+                        target.write_text(original)
+
+
+class SharedReadingContractGuardTest(unittest.TestCase):
+    def test_missing_shared_source_or_reintroduced_duplicate_body_fails(self) -> None:
+        body = '## Shared reading contract\n## Reading Lenses\nOne shared body.\n## How You Work\nRead.\n## Output Format\nBrief.\n'
+        adapter = "Read `.claude/agents/reader.md`; preserve this role's own frontmatter.\n"
+        with _lint_root() as root:
+            reader = _write(root, '.claude/agents/reader.md', '---\nname: reader\n---\n' + body)
+            for name, value in (('clean', adapter), ('missing_pointer', 'Preserve own frontmatter.'),
+                                ('missing_identity', 'Read .claude/agents/reader.md.'), ('duplicate', adapter + body)):
+                with self.subTest(case=name):
+                    scholar = _write(root, '.claude/agents/scholar.md', '---\nname: scholar\n---\n' + value)
+                    expected = [] if name == 'clean' else ['reader-scholar-sync']
+                    self.assertEqual([f.code for f in h.check_reader_scholar_sync()], expected)
+            scholar.write_text(adapter)
+            reader.write_text('Empty shared source.')
+            self.assertEqual([f.code for f in h.check_reader_scholar_sync()], ['reader-scholar-sync'])
+            reader.unlink()
+            self.assertEqual([f.code for f in h.check_reader_scholar_sync()], ['reader-scholar-sync'])
 
 
 if __name__ == "__main__":

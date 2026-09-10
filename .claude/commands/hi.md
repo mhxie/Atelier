@@ -60,12 +60,14 @@ off semantically → <capability>` and execute `intents.general`.
 When the row declares `profile_reads`, run:
 
 ```bash
-uv run scripts/context_bundle.py --intent <name> --format json
+uv run scripts/context_bundle.py --intent <name>
 ```
 
-The helper applies the row's `context_budget_bytes`. Reuse the projection; do
-not reload the same profile or continuity sources. Skip it when
-`profile_reads` is empty unless the procedure requests a specific source.
+The helper copies only the route-selected profile and continuity sources into
+an isolated staging tree, then emits a standard Repomix XML artifact. It applies
+the row's hard `context_budget_tokens` ceiling without truncation. Reuse the
+artifact; do not reload the same sources. Skip it when `profile_reads` is empty
+unless the procedure requests a specific source.
 
 Read only the row's `procedure` file and execute it as the selected workflow.
 When the row is parallel, dispatch the declared initial agents in one native

@@ -2,7 +2,7 @@
 
 > **A personal workshop, published.** A reflective-thinking system for [Codex CLI](https://github.com/openai/codex), [Claude Code](https://docs.anthropic.com/en/docs/claude-code), and a local-first Zettelkasten: daily reflection, decision journals, deep reading, goal tracking, knowledge crystallization. Not a product. The patterns are reusable; the configuration is bespoke.
 
-The system surrounds an **œuvre**: notes, decisions, and reflections kept as local Markdown under `$OV/`, outside this repository. Fifteen agents (le cercle) run the sessions, a deterministic trust engine scores the wiki layer, and one registry layer drives both runtimes. The repo is written to be read in place, by people and by agents; this page is only the map.
+The system surrounds an **œuvre**: notes, decisions, and reflections kept as local Markdown under `$OV/`, outside this repository. Task-specific agents run the sessions, a deterministic trust engine scores the wiki layer, and shared registries drive both runtimes. This page is the map, not a workflow specification.
 
 ## Install
 
@@ -35,11 +35,18 @@ Command names are stable across runtimes (`$hi` in Codex is `/hi` in Claude Code
 | How two runtimes share one spec; plugins, sandbox, permissions | `protocols/runtime-adapters.md` |
 | Session workflows and the menu | `protocols/hi-menu.md`, `.claude/commands/` |
 | Agent roles and their archetypes | `.claude/agents/`, `protocols/atelier.md` |
-| The behavior index agents start from | `protocols/README.md` |
-| Rules every harness change passes | `protocols/evolution.md` |
+| On-demand contract index | `protocols/README.md` |
 | Retrieval and quality gates | `scripts/semantic.py`, `scripts/lint.py`, `scripts/privacy_check.py` |
 
-Generated runtime edges (`.codex/agents/`, `.agents/skills/`) are rendered from the registries by `scripts/render_runtime_edges.py`; edit registries, never the generated files.
+The file boundaries are:
+
+- `CLAUDE.md` holds shared runtime invariants; `AGENTS.md` adapts them for Codex.
+- `harness/` owns registration and runtime/model metadata, not workflow bodies.
+- `.claude/commands/` and `.claude/agents/` are the current shared workflow and role sources. Their Claude-shaped location is a compatibility boundary, not a second source for Codex.
+- `protocols/` holds shared contracts; `frameworks/` and `sources/` are on-demand references, not required startup context.
+- `scripts/` owns executable behavior; [its map](scripts/README.md) separates shared infrastructure, applications, and verification. `tests/` owns the checks.
+
+Generated runtime edges (`.codex/agents/`, `.agents/skills/`, except the hand-written `atelier` skill) are rendered by `scripts/render_runtime_edges.py`. Edit their registry inputs, never generated files. Runtime hooks remain hand-maintained. Private knowledge and preferences remain outside this public tree.
 
 ## Forking
 

@@ -46,22 +46,57 @@ points at the canonical sources and adds only what is Codex-native.
 
 ## Operations
 
-- Local scheduled routines: `uv run scripts/routine_owner.py status`; the
-  transfer procedure is in `scripts/launchd/README.md` (unload the source
-  scheduler first, then `claim --force --source-stopped`). Run
-  `python3 scripts/routine_audit.py audit --check-system --json` before
-  enabling or handing off launchd jobs.
+- Local retrieval uses `scripts/semantic.py` with the pinned QMD dependency.
+  `sources/semantic.md` owns setup, scopes, and the bounded JSON contract.
+  Queries use cached models only; downloads require explicit initialization.
+- Route context packs selected repository profiles and registered session logs
+  with pinned Repomix; `protocols/session-continuity.md` owns selection and ceilings.
+- Reflection's energy and exploration intents share
+  `.claude/commands/daily-reflection.md` while keeping their selected context.
+  That procedure and `protocols/session-log.md` own the branches and compact logs.
+- `$digest` uses `collect --json` then `write` with preinstalled markdown-it-py
+  and local MJML; optional quota comes from CodexBar OAuth JSON. The shared
+  command owns setup and offline boundaries; never sync during a run.
+- Reading feedback connects Curate, Read, Introspect, and explicit policy evaluation through
+  `protocols/decision-ledger.md` → Reading feedback loop. Use its typed
+  `decisions.py` helpers for compact event batches and stored policy IDs;
+  load Offline reading evaluation only for policy experiments.
+- Dispatch inputs and completion reporting live in `protocols/agent-handoff.md`;
+  load its common sections and the selected payload contract. The procedure owns
+  calls; `protocols/agent-handoff.md` also owns responsibilities and voice legs.
+  Reader owns the shared reading behavior; Scholar keeps only its role settings
+  and the shared-contract pointer.
+- Direct chat-completion calls are unlogged. Runtime hooks only age out legacy
+  full-payload invocation logs through `scripts/invocation_log_gc.py`.
+
+- Local scheduled routines: validate declarations with
+  `uv run --frozen python scripts/routine_prefect.py validate --json` and read
+  recent Prefect state with `uv run --frozen python scripts/routine_status.py`.
+  `scripts/cron_spec.py` uses Prefect's cron engine for health-check dates and cadence.
+  The transfer procedure is in `scripts/launchd/README.md`: stop every source
+  scheduler before loading the Prefect deployment service. Runtime and adapter
+  ownership is documented in `protocols/runtime-adapters.md`.
+  Autoevo drafts only in its isolated workspace; the trusted parent owns
+  publication and its single structured result (`protocols/autoevo.md`).
 - Private routine mappings, digest ledger declarations, and private skill
   sources stay under `$OV` and `<paths.private_features>/`; the contracts are
-  `protocols/remote-routines.md` and `protocols/private-features.md`.
+  `protocols/remote-routines.md` (including staged RSS and latest digest context)
+  and `protocols/private-features.md`.
+- `$civ` loads framework definitions from the private source referenced by the profile.
 
 ## Harness Changes
 
 Follow the checklist in `AGENTS.md` and `harness/README.md`. The registries
 are `harness/commands.toml`, `harness/agents.toml`, `harness/intents.toml`,
-`harness/models.toml`, `harness/capabilities.toml`, `harness/paths.toml`, and
+`harness/models.toml`, `harness/capabilities.toml`, `harness/retrieval.toml`, `harness/paths.toml`, and
 `harness/runtimes.toml`; edit them, never the generated `.codex/` or
 `.agents/` files. Run `python3 scripts/harness_lint.py` before finishing and
 `scripts/harness_smoke.py` after helper or registry edits. Keep command
 skills thin: they point to shared Claude command specifications and must not
 copy workflow bodies into the Codex edge.
+Public configuration shape lives in `harness/registry.schema.json`; lint uses
+the pinned validator in the project `.venv`. Setup and error codes are documented
+in `harness/README.md`; lint never installs missing dependencies itself.
+
+Before edits, read `protocols/repo-conventions.md` → Editing discipline for
+whole-feature budgets, approval thresholds, smoke scope, and cost reporting.

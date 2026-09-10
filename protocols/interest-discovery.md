@@ -83,8 +83,9 @@ would add, each with mode, evidence URL, and the ledger entry it hangs off.
 The digest gives proposals one line. The user accepts with `interests.py add`
 (or by dictating a consumption event, which is the stronger signal) and
 declines with `interests.py decline <slug>`; declined slugs are read by every
-routine and skipped. Weekly review carries an `## Interest Pulse` section
-whose answers are events too.
+routine and skipped. Weekly review opens an interest pulse only when the user
+raises an interest or current evidence makes it relevant; supported answers
+are events too. Unrelated reviews do not ingest or ask an interest questionnaire.
 
 ### Privacy
 

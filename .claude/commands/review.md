@@ -17,7 +17,7 @@ Review progress on near/mid/long-term goals. Surface what's progressing, what's 
 | **Light pulse** | Monthly | 5-min check inside `/weekly` or standalone: any goal materially advanced? Any neglected? Any newly born? No file write required if nothing surfaced. |
 | **Annual reset** | Yearly (Jan or birthday) | Full rebuild anchored to `<year>小目标`. Touches `directions.md` directly. Often paired with `/introspect`. |
 
-Inspect the last full review and the last pulse-equivalent so the monthly cadence does not produce duplicate pulses within 30 days. A pulse-equivalent is either a standalone `*-review-pulse.md` OR a `*-weekly.md` (because `/weekly`'s Honest Assessment section doubles as the monthly pulse — see Cadence table). Take whichever is most recent:
+Inspect the last full review and the last pulse-equivalent so the monthly cadence does not produce duplicate pulses within 30 days. A pulse-equivalent is either a standalone `*-review-pulse.md` or a `*-weekly.md`, whose goal and commitment check supplies the monthly pulse. Take whichever is most recent:
 
 ```
 Bash: last_full=$(find "$OV/reflections" -name '*-review.md' ! -name '*-review-pulse.md' 2>/dev/null | sort | tail -1)
@@ -40,19 +40,18 @@ Stale-goal floor: every full review must explicitly resolve each item under `## 
 
 ## Prerequisites
 
-1. Check if `profile/identity.md` exists. If not, tell the user: "No profile found. Run `/introspect` first to build your self-model." and stop.
-2. Read only its `Last built:` line. If older than 7 days, warn: "Your profile is stale (built on [date]). Consider running `/introspect` to refresh."
+The routed context helper below stops toward `/introspect` for a missing
+declared profile and reports staleness for selected profiles.
 
 ## Context Loading
 
-1. Reuse the current `review` context projection from `$hi`; for direct
-   invocation, run `uv run scripts/context_bundle.py --intent review
-   --format json`.
+1. Reuse the current `review` Repomix context artifact from `$hi`; for direct
+   invocation, run `uv run scripts/context_bundle.py --intent review`.
 
-2. Use the projected reflection headings and closing sections as the continuity
-   seed. Search the selected lookback window, 90 days for a full review or 30
-   days for a pulse, and triage bounded capsules before reading 3 to 5 relevant
-   source sections. Do not preload every reflection in the window.
+2. Use the artifact's latest session sections as the continuity seed. Search the
+   selected lookback window, 90 days for a full review or 30 days for a pulse,
+   and triage QMD candidates before reading 3 to 5 relevant source sections. Do
+   not preload every reflection in the window.
 
 3. **Pull goal-related updates from the local vault, bounded to the lookback window.** Do NOT issue an unbounded `Grep(path: "$OV/")` — an unbounded grep will pull stale historical matches that skew the review. Use `find -print0 | xargs -0 grep` so recency actually binds. Substitute `<N>` with the lookback (90 for full, 30 for pulse):
    - `Bash: find "$OV"/daily-notes "$OV"/reflections "$OV"/gtd "$OV"/wiki -type f -name "*.md" -mtime -<N> -print0 2>/dev/null | xargs -0 grep -HnE "目标|goal|progress|进展|milestone" 2>/dev/null` — recency-bounded goal and progress mentions across both languages in one pass. Safe with an empty working set (xargs does nothing if stdin is empty).
@@ -94,65 +93,33 @@ Have the user's priorities changed? Look for:
 
 Present the review interactively, category by category. For each finding, cite the specific source note.
 
-After discussing, write a review file:
+After discussing, present the draft and obtain approval before writing:
 
 **File:** `<paths.reflections>/YYYY-MM-DD-review.md` for **full** reviews; `<paths.reflections>/YYYY-MM-DD-review-pulse.md` for **monthly light pulse** runs. The distinct suffix lets the Cadence Bash check (above) tell them apart so a pulse does not silently defer the next quarterly review.
 
-**Pulse write gate**: skip the pulse file write entirely if the pulse surfaced no material change (no goal advanced, none neglected newly, none newly born). Tell the user "no material change this month" and exit without a file. Empty pulse artifacts pollute the longitudinal record and confuse the next cadence check. Full reviews always write a file (even if findings are mostly "still on track") because the quarterly cadence anchor matters.
-```markdown
-# Goal Review — YYYY-MM-DD
+**Pulse write gate:** no material change means no pulse file. Full reviews
+still produce a draft when goals are unchanged, so an approved save can anchor
+the quarterly cadence. A declined save must not be reported as a completed
+cadence anchor. Neither branch changes `directions.md` without separate approval.
 
-## Summary
-[One paragraph: overall assessment of goal progress since last review]
-
-## By Category
-
-### Mastery and impact
-- **Progressing:** [goals with evidence] — Source: [[Note Title]]
-- **Neglected:** [goals with no recent activity] — Source: [[Note Title]]
-- **Shifted:** [any changes in direction]
-
-### Learning
-- **Progressing:** ...
-- **Neglected:** ...
-- **Shifted:** ...
-
-### Energy and family
-- **Progressing:** ...
-- **Neglected:** ...
-- **Shifted:** ...
-
-### Capacity and optionality
-- **Progressing:** ...
-- **Neglected:** ...
-- **Shifted:** ...
-
-## Commitments
-| Commitment | Observable next evidence | State | Source |
-|---|---|---|---|
-
-## Long-term ladder (full review only)
-- [long-term line] ← [mid-term carrier or `(none)`]
-
-## Emerging Interests
-[Topics appearing in recent notes that aren't captured in any goal — potential new directions]
-
-## Suggested Experiments
-[2-3 concrete actions for the next review period, tied to specific neglected goals or emerging interests]
-
-## Notes Referenced
-[List of all notes cited during this review]
-```
+Keep a short summary, progressing/neglected/shifted findings under the actual
+direction headings, commitment evidence and state, and source links. Full reviews
+also show the long-term ladder and explicit resolutions of stale goals. Include
+new interests, experiments, or a trend comparison only when supported; do not
+fill fixed category templates or manufacture a quota of actions.
 
 ## Session Log
 
-After writing the review file, emit a session log:
-1. `Bash: uv run scripts/session_log.py --type review --duration <minutes>`
-2. `Edit` the created file to populate sections from session data (agents dispatched, searches, questions, frameworks, anomalies). The canonical fill-in guide lives in `protocols/session-log.md` § "Section Guidance". Leave empty sections with headers only. If the write fails, warn and continue.
+Run `uv run scripts/session_log.py --type review --duration <minutes>` and fill
+the compact Continuity, Anomalies, and Operations sections per
+`protocols/session-log.md`. Record the next review trigger and actual save/update
+outcomes, including a no-change pulse or declined write. Logs never block the session.
 
 ## Wrap Up
 
-The review file in `<paths.reflections>/` is the durable session output. Daily notes are user-authored; the system reads them but does not modify them. Tell the user the review has been saved and where to find it.
+The approved review file is the durable output. Daily notes remain read-only.
+Report the actual saved location, no-change pulse, or declined write; never
+announce a save that did not happen.
 
 Suggest follow-ups:
 - `/hi` for daily check-ins between reviews

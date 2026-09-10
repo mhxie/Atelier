@@ -1,57 +1,10 @@
 #!/usr/bin/env python3
-"""
-aggregate_freshness.py: detect aggregate-vs-detail staleness.
+"""Report aggregate files older than their source details.
 
-Problem this exists for. Atelier's L1-L5 axis describes *certification depth*
-but is silent about *aggregation*. Detail files (e.g. `travel/trips/<trip>.md`)
-are the source of truth for a specific subject; aggregate trackers (e.g.
-`travel/<calendar>.md`, `travel/<inventory>.md`, and
-`finance/<benefits-tracker>.md`) are hand-mirrored views over many subjects. When the user
-updates a detail file, nothing pushes back to the aggregates, so read commands
-Read workflows can surface stale facts as authoritative. This is
-antipattern #6 (shadow state) at the data layer.
-
-This script is a read-time guard. Given a subjects directory and a list of
-aggregate files, it reports any aggregate whose `Last updated:` line is older
-than the newest subject's `Last updated:` line. Read commands call it as a
-pre-step and surface divergence to the user before quoting aggregate values.
-
-The script doesn't fix the divergence (that requires human judgement about
-which fields in the aggregate were derived from which subject). It just makes
-the divergence loud at read time.
-
-Timestamp source. The script looks for an explicit signal first and falls
-back to filesystem mtime so it stays useful on files the user hasn't tagged
-manually:
-  1. A line of the form `Last updated: YYYY-MM-DD` within the first 10 lines.
-  2. A YAML frontmatter key `last_updated: YYYY-MM-DD` (or `updated:`).
-  3. Filesystem mtime.
-
-Aggregates typically carry the explicit `Last updated:` line (it's part of
-the tracker convention). Detail files often don't — that's fine, mtime is a
-better signal for "did the user edit this since the aggregate was refreshed?"
-anyway.
-
-CLI:
-    aggregate_freshness.py \
-        --subjects travel/trips \
-        --aggregates travel/<calendar>.md travel/<inventory>.md \
-            finance/<benefits-tracker>.md \
-        --json
-
-    # Or walk $OV automatically for files declaring themselves aggregates:
-    aggregate_freshness.py --discover [--stale-only]
-
-Discovery mode. With `--discover`, the script walks `$OV` looking for files
-whose YAML frontmatter contains `freshness: required` and a `subjects:` key
-pointing at a directory. It groups aggregates by their declared subjects dir
-and runs the same comparison the explicit-args path does. `--stale-only`
-filters the output to entries flagged stale (useful for session-start cues:
-silent when everything is fresh).
-
-Exit code: 0 always. Staleness is advisory; the caller decides what to do
-with the JSON. (Non-zero exit would block read commands, which is worse than
-showing stale data with a warning.)
+Dates come from a leading ``Last updated:`` marker, YAML ``last_updated`` or
+``updated``, then filesystem mtime. Discovery reads self-declared
+``freshness: required`` aggregates. Findings are advisory and never rewrite
+the divergent files.
 """
 
 from __future__ import annotations
@@ -64,15 +17,14 @@ import sys
 from datetime import date, datetime
 from pathlib import Path
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import fmt, parse_iso_date, vault_root  # type: ignore[import-not-found]  # noqa: E402
 
 _LAST_UPDATED_RE = re.compile(r"^Last updated:\s*(\d{4}-\d{2}-\d{2})\s*$")
 _YAML_UPDATED_RE = re.compile(r"^(?:last_updated|updated):\s*(\d{4}-\d{2}-\d{2})\s*$")
-_FRESHNESS_REQ_RE = re.compile(r"^freshness:\s*required\s*$")
-_SUBJECTS_RE = re.compile(r"^subjects:\s*(.+?)\s*$")
 _HEAD_LINES = 20
-# Directories to skip when walking $OV for --discover (large/irrelevant trees).
 _DISCOVER_SKIP_DIRS = {
     ".git", ".obsidian", "cache", "papers", "preprints", "archive", "zettelm",
     "node_modules", ".venv", "__pycache__",
@@ -125,36 +77,27 @@ def _resolve(p: str) -> Path:
 
 
 def _read_aggregate_frontmatter(path: Path) -> dict | None:
-    """Extract `subjects:` and `freshness:` from a file's YAML frontmatter.
-
-    Returns {"subjects": <str>, "freshness": "required"} if both keys are
-    present in a leading `---`-fenced YAML block; None otherwise. Only the
-    first frontmatter block is consulted; only the keys we care about are
-    parsed (no full YAML loader needed).
-    """
+    """Read a bounded, closed YAML header declaring a required aggregate."""
     try:
         with path.open(encoding="utf-8", errors="replace") as fh:
             first = fh.readline()
             if first.rstrip() != "---":
                 return None
-            data: dict = {}
+            header: list[str] = []
             for _ in range(_HEAD_LINES):
                 line = fh.readline()
                 if not line:
                     return None
                 stripped = line.rstrip()
                 if stripped == "---":
-                    break
-                if _FRESHNESS_REQ_RE.match(stripped):
-                    data["freshness"] = "required"
-                    continue
-                m = _SUBJECTS_RE.match(stripped)
-                if m:
-                    data["subjects"] = m.group(1).strip()
-            if data.get("freshness") == "required" and data.get("subjects"):
-                return data
+                    data = yaml.load("".join(header), Loader=yaml.BaseLoader)
+                    if (isinstance(data, dict) and data.get("freshness") == "required"
+                            and isinstance(data.get("subjects"), str) and data["subjects"].strip()):
+                        return {"subjects": data["subjects"], "freshness": "required"}
+                    return None
+                header.append(line)
             return None
-    except OSError:
+    except (OSError, yaml.YAMLError):
         return None
 
 
@@ -166,9 +109,8 @@ def discover(stale_only: bool = False, verbose: bool = False) -> dict:
     Each group payload matches `scan()`'s return shape.
     """
     root = vault_root()
-    pairs: dict[str, list[Path]] = {}  # subjects_str -> [aggregate paths]
+    pairs: dict[str, list[Path]] = {}
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune skip dirs in-place.
         dirnames[:] = [d for d in dirnames if d not in _DISCOVER_SKIP_DIRS and not d.startswith(".")]
         for fn in filenames:
             if not fn.endswith(".md"):
@@ -187,7 +129,7 @@ def discover(stale_only: bool = False, verbose: bool = False) -> dict:
         stale_here = [a for a in payload["aggregates"] if a.get("stale")]
         stale_total += len(stale_here)
         if stale_only:
-            if not stale_here:
+            if not stale_here and not payload["warnings"]:
                 continue
             payload = dict(payload)
             payload["aggregates"] = stale_here
@@ -205,26 +147,17 @@ def scan(
     aggregates: list[Path],
     verbose: bool = False,
 ) -> dict:
-    """Compare aggregate timestamps to the newest subject timestamp.
-
-    Returns a structured payload:
-        {
-          "subjects_dir": "$OV/travel/trips",
-          "newest_subject": {"path": ..., "last_updated": "YYYY-MM-DD"},
-          "aggregates": [
-            {"path": ..., "last_updated": ..., "stale": bool, "days_behind": int}
-          ],
-          "warnings": [...]
-        }
-    """
+    """Return the newest subject, per-aggregate staleness/days_behind, and warnings."""
     warnings: list[str] = []
 
-    # Collect subject files and their Last-updated dates.
     subjects: list[tuple[Path, date, str]] = []
-    if not subjects_dir.exists():
-        warnings.append(f"subjects_dir does not exist: {fmt(subjects_dir)}")
+    if not subjects_dir.is_dir():
+        warnings.append(f"subjects_dir is missing or not a directory: {fmt(subjects_dir)}")
     else:
-        for sp in sorted(subjects_dir.glob("*.md")):
+        aggregate_paths = {ap.resolve() for ap in aggregates}
+        for sp in sorted(subjects_dir.rglob("*.md")):
+            if sp.resolve() in aggregate_paths or any(p.startswith(".") for p in sp.relative_to(subjects_dir).parts):
+                continue
             r = _read_last_updated(sp)
             if r is None:
                 if verbose:
@@ -244,7 +177,6 @@ def scan(
             "source": src,
         }
 
-    # Score each aggregate against the newest subject date.
     agg_results: list[dict] = []
     for ap in aggregates:
         if not ap.exists():

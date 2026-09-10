@@ -10,8 +10,10 @@ import tempfile
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+import precedent  # noqa: E402
 CLS = "autoevo/time-stale-A"
 
 
@@ -45,6 +47,20 @@ class PrecedentJudgeTest(unittest.TestCase):
             _line("a1", "apply", "genuinely abandoned", tier="research", action="retire the milestone"),
         ])
         return ledger
+
+    def test_model_judgment_uses_transport_without_telemetry_flags(self) -> None:
+        completed = subprocess.CompletedProcess(
+            ["fixture"], 0,
+            json.dumps({"verdict": "human", "confidence": 0.5, "cited": [], "reason": "uncertain"}),
+            "",
+        )
+        with mock.patch.object(precedent.subprocess, "run", return_value=completed) as run:
+            result = precedent.call_model("fixture", "prompt")
+        argv = run.call_args.args[0]
+        self.assertEqual(result["verdict"], "human")
+        self.assertNotIn("--task-type", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "fixture")
+        self.assertIn("--max-tokens", argv)
 
     def test_bundle_orders_by_similarity_and_excludes_non_human(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

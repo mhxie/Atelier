@@ -1,42 +1,14 @@
 #!/usr/bin/env python3
-"""
-zk_audit.py: Post-ingestion hygiene audit for the $OV vault.
+"""Read-only post-ingestion hygiene audit of $OV; heuristics, not repair authority.
 
-The Drive -> zk ingestion protocol describes how new material should land
-(raw/ siblings, per-domain README, digest in the working tier, no orphans
-at root). This script is the matching post-condition check: after a heavy
-ingestion sweep, run it to catch the gaps that the protocol can describe
-but a human eye will miss.
+Checks missing domain READMEs/digests, archive overlap, root markdown orphans
+(except README.md), empty markdown, and suspicious top-level directories.
+Archive empty stubs are counted, not individually listed, to avoid drowning
+current ingestion debt. Individual checks explain their false-positive bias.
 
-Audit categories (all reporting only; never mutates $OV):
-
-  [1] Missing READMEs in working-tier domains.
-  [2] Raw subtrees with no apparent digest in the working tier.
-  [3] Archive subtrees that overlap a current working-tier domain
-      (consolidation candidates).
-  [4] Root-level .md orphans (only README.md belongs at $OV root) and
-      empty (0-byte) .md files in the working tier or vault root.
-      Empty stubs under archive/ are counted in aggregate but not
-      listed individually (they are a pre-ingestion pattern, not
-      new ingestion debt).
-  [5] Suspicious top-level dirs: Finder duplicates (` 2`, `(2)`, etc.),
-      empty dirs, and skeleton dirs (no README, <3 files).
-
-CLI:
-    uv run scripts/zk_audit.py            human report
-    uv run scripts/zk_audit.py --json     machine-readable output
-
-Exit code: 0 always (audit is advisory; user decides what to consolidate).
-2 only on IO error (e.g., $OV is missing).
-
-Design notes:
-  - Stdlib only, mirrors scripts/privacy_check.py and scripts/lint.py style.
-  - Reads $OV via _paths.vault_root(); exits with a clear error if $OV is
-    unset (no silent fallback to a relative directory). Never hardcodes
-    user paths, domain names from the user's vault, or filename stems.
-    Domain names are discovered by walking $OV/.
-  - Heuristics, not perfect detectors. Each category documents its
-    false-positive direction so the human reader can calibrate.
+Run `uv run scripts/zk_audit.py [--json]` for a human/JSON report. Advisory
+findings exit 0; IO errors exit 2. `_paths.vault_root()` requires $OV, with no
+relative fallback; domain names are discovered, never hardcoded.
 """
 
 from __future__ import annotations
@@ -49,36 +21,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
 
-# Top-level directories that are NOT Drive->zk ingestion targets.
-# These are still working-tier (L2 per CLAUDE.md) but they hold
-# user-authored notes (reflections, drafts, gtd) or different-tier
-# content (wiki, papers); they have no `raw/` convention. Includes
-# infrastructure (cache, assets), other tier homes, and the archive
-# (which is checked separately for overlap with ingestion domains).
-_NON_INGESTION_DOMAINS = {
-    tier_segments().get("meta", "_meta"),
-    "agent-findings",
-    "archive",
-    "assets",
-    "cache",
-    "daily-notes",
-    "gtd",
-    "papers",
-    "preprints",
-    "profile",
-    "readwise",
-    "reflections",
-    "research",
-    "sessions",
-    "wiki",
-    "wiki-cn",
-    "wip",
-    "zettelm",
-}
+# Registered non-ingestion tiers have no working-domain raw/digest contract.
+_NON_INGESTION_DOMAINS = {"assets", "profile", "readwise"}
+for _path in [tier(name) for name in (
+    "meta", "agent_findings", "archive", "cache", "daily_notes", "gtd",
+    "papers", "preprints", "reflections", "research", "sessions", "wip", "zettelm",
+    "inbox", "routine_prompts", "private_features",
+)] + wiki_dirs():
+    if _path.is_relative_to(OV) and len(_path.relative_to(OV).parts) == 1:
+        _NON_INGESTION_DOMAINS.add(_path.relative_to(OV).parts[0])
 
 # Pattern: directory ending in " 2", " 3", " (2)", etc. Finder produces
 # these when iCloud or Drive sync detects a phantom duplicate.
@@ -246,7 +201,7 @@ def check_archive_overlap(root: Path, domains: list[Path]) -> list[Finding]:
     direction (working-tier name in archive name, or vice versa).
     """
     out: list[Finding] = []
-    archive = root / "archive"
+    archive = root / tier_segments()["archive"]
     if not archive.is_dir():
         return out
 
@@ -292,18 +247,9 @@ def check_archive_overlap(root: Path, domains: list[Path]) -> list[Finding]:
 
 
 def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
-    """Returns (root_md_orphans, empty_md_in_working_or_root, empty_md_archive_count).
+    """Return (root orphans except README.md, listed empty files, archive-empty count).
 
-    Root orphans: any *.md file at $OV root other than README.md. Per
-    the protocol, the root is structural; content lives in tier dirs.
-
-    Empty .md files: 0-byte markdown files in the working tier or at
-    the vault root are flagged individually (likely sync artifacts or
-    abandoned drafts from recent ingestion). Empty .md files under
-    archive/ are counted in aggregate only: archive accumulated empty
-    stubs over years from earlier workflows, and listing them all
-    drowns the high-signal findings. The aggregate count keeps the
-    debt visible without polluting the report.
+    Archive stubs stay aggregate-only so old ingestion debt cannot drown current gaps.
     """
     if not root.is_dir():
         return [], [], 0
@@ -322,6 +268,7 @@ def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
 
     empty_listed: list[Finding] = []
     empty_archive = 0
+    archive = root / tier_segments()["archive"]
     for path in root.rglob("*.md"):
         rel_parts = path.relative_to(root).parts
         if any(part.startswith(".") for part in rel_parts):
@@ -331,7 +278,7 @@ def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
                 continue
         except OSError:
             continue
-        if rel_parts and rel_parts[0] == "archive":
+        if path.is_relative_to(archive):
             empty_archive += 1
         else:
             empty_listed.append(Finding("empty_md", _rel(path)))
@@ -339,17 +286,9 @@ def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
 
 
 def check_suspicious_dirs(root: Path) -> list[Finding]:
-    """Three sub-checks at top level:
+    """Find top-level Finder duplicates, empty dirs, and eligible README-less skeletons.
 
-    (a) Finder-duplicate names: `<name> 2`, `<name> (2)`, etc.
-    (b) Empty top-level dirs (no files, no subdirs).
-    (c) Skeleton/abandoned: top-level dir with no README and fewer than
-        3 entries (files+subdirs combined). Skips infrastructure and
-        other tier homes.
-
-    (c) is intentionally permissive on the file-count threshold: 3 is
-    enough to clear single-file experiments without flagging a real
-    domain that is mid-build.
+    Three entries clear a skeleton: avoid flagging a real domain still being built.
     """
     out: list[Finding] = []
     if not root.is_dir():
@@ -445,7 +384,7 @@ def format_human(report: Report) -> str:
             "[4b] Empty (0-byte) .md files in working tier or root",
             report.empty_md,
             (
-                f"+ {report.empty_md_archive_count} empty .md under archive/ "
+                f"+ {report.empty_md_archive_count} empty .md under the registered archive "
                 f"(aggregated; pre-ingestion stubs, not new debt)"
                 if report.empty_md_archive_count
                 else None
@@ -498,10 +437,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     args = parser.parse_args(argv)
 
-    if not OV.exists():
-        msg = f"zk_audit: {OV} does not exist; nothing to audit"
+    if not OV.is_dir():
+        msg = f"zk_audit: {OV} is not a vault directory"
         if args.json:
-            print(json.dumps({"vault": OV.as_posix(), "error": "missing"}, indent=2))
+            print(json.dumps({"vault": OV.as_posix(), "error": "not_directory" if OV.exists() else "missing"}, indent=2))
         else:
             sys.stderr.write(msg + "\n")
         return 2

@@ -21,6 +21,38 @@ def _row(d: str, name: str, rating: str, again: str) -> str:
 
 
 class DineRankTest(unittest.TestCase):
+    def test_markdown_identity_and_rating_match_the_audit(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-dine-") as tmp:
+            tracker = Path(tmp) / "tracker.md"
+            tracker.write_text("\n".join([
+                HEADER, SEP,
+                _row("2098-01-01", "Fixture Diner", "8", "Y"),
+                _row("2099-05-31", "[ Fixture Diner ](catalog.md)", "**6**", "—"),
+            ]) + "\n")
+            proc = subprocess.run(
+                [sys.executable, "scripts/dine_rank.py", "--tracker", str(tracker), "--today", "2099-06-01"],
+                cwd=REPO_ROOT, env={**os.environ, "OV": tmp}, capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            out = json.loads(proc.stdout)
+            self.assertEqual(list(out["restaurants"]), ["Fixture Diner"])
+            self.assertEqual(out["restaurants"]["Fixture Diner"]["avg_rating_last3"], 7)
+            self.assertEqual(out["excluded"], ["Fixture Diner"])
+
+    def test_bad_dates_and_ratings_report_json_errors(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-dine-") as tmp:
+            tracker = Path(tmp) / "tracker.md"
+            for day, rating in (("2099-02-31", "8"), ("2099-01-01", "NaN"), ("2099-01-01", "Infinity")):
+                with self.subTest(day=day, rating=rating):
+                    tracker.write_text("\n".join([HEADER, SEP, _row(day, "Fixture Diner", rating, "Y")]) + "\n")
+                    proc = subprocess.run(
+                        [sys.executable, "scripts/dine_rank.py", "--tracker", str(tracker), "--today", "2099-06-01"],
+                        cwd=REPO_ROOT, env={**os.environ, "OV": tmp}, capture_output=True, text=True,
+                    )
+                    self.assertEqual(proc.returncode, 2, proc.stderr)
+                    self.assertIn("error", json.loads(proc.stdout))
+                    self.assertNotIn("Traceback", proc.stderr)
+
     def test_aggregates_scores_and_exclusions(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-dine-") as tmp:
             vault = Path(tmp) / "vault"

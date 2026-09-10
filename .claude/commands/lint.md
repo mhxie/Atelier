@@ -25,13 +25,12 @@ Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint
 | Technical term in claim body not in vocabulary allowlist and not matching any wiki entry title (`unfounded-term`) | INFO | `scripts/lint.py` — add term to `scripts/wiki_vocabulary.txt` if common knowledge, or add a wiki entry, or add a parenthetical definition inline |
 | Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — run /promote Phase 4 or regenerate the shadow manually. Configured shadow paths live under `[paths.wiki_localized]` in `harness/paths.local.toml`. |
 | Localized shadow older than English source (`shadow-stale`) | WARN | `scripts/lint.py` — re-translate the localized shadow to match the updated English source |
-| Claude/Codex harness portability (`missing-agents-md`, `models-agent-missing`, `capability-agent-missing`, `agents-registry-entry-missing`, `commands-entry-missing`, `skill-missing`, etc.) | ERROR/WARN/INFO | `scripts/harness_lint.py` |
+| Public configuration schema and Claude/Codex harness alignment (`registry-schema`, `registry-read`, `registry-validator`, source/reference/edge findings) | ERROR/WARN/INFO | `harness/registry.schema.json` + `scripts/harness_lint.py` |
 | `$OV` ingestion hygiene (missing READMEs, raw-without-digest, archive↔working-tier overlap, root-level orphans, empty .md files, suspicious top-level dirs) | INFO (advisory) | `scripts/zk_audit.py` — see `protocols/drive-zk-ingestion.md` § Post-ingestion verification |
-| Auto-memory hygiene (`dead-link`, `orphan-file`, `index-bloat`, `stale-mtime`, `provisional-marker`, `frontmatter-missing`) | WARN/INFO (advisory) | `scripts/auto_memory_audit.py` — capability-side check on `~/.claude-personal/projects/<encoded-cwd>/memory/`; surfaces entries the recall pipeline can't reach (orphan/dead-link), entries past the index truncation horizon (>200 lines), and entries the human should re-verify (mtime/provisional). The (A) path of bi-temporal forgetting; frontmatter-level expiry is (B). |
 | Claim missing `^cn` block ID (`block-id-missing`, deferred — Phase D) | WARN | `scripts/lint.py` — regex `\^c[0-9]+$` on last line of each claim body; absent marker is a nudge, not a reject (per `protocols/wiki-schema.md` §"When `^cn` is recommended") |
 | Non-`^cn` block ID inside a wiki entry (`block-id-violation`, deferred — Phase D) | ERROR | `scripts/lint.py` — any `^<token>` that does not match `\^c[0-9]+$` is a schema violation (no `^summary`, `^fig1`, `^revlog-*`, etc.) |
 
-**Not checked:** cross-note `@anchor` date consistency. Per `protocols/wiki-schema.md`, `valid_at` is the day the marker was added to its home note, so the same source being anchored from two notes on different days is the normal case. `/lint` used to flag this and was wrong about it.
+**Not checked:** cross-note `@anchor` date consistency. Per `protocols/wiki-schema.md`, `valid_at` is the day the marker was added to its home note, so the same source being anchored from two notes on different days is the normal case.
 
 Exit code: 0 if no ERROR-level findings, 1 otherwise. WARN and INFO never fail the run.
 
@@ -43,21 +42,13 @@ Exit code: 0 if no ERROR-level findings, 1 otherwise. WARN and INFO never fail t
 Bash: python3 scripts/harness_lint.py --json
 ```
 
-Parse the JSON. Shape:
-```json
-{
-  "counts": { "error": 0, "warn": 0, "info": 0 },
-  "findings": [
-    { "severity": "ERROR|WARN|INFO", "code": "...", "where": "...", "message": "..." }
-  ]
-}
-```
+Read `counts` and `findings` (`severity`, `code`, `where`, `message`). Any ERROR
+blocks the run until fixed; WARN and INFO are advisory. This pass owns the
+CLAUDE.md size and bold-marker checks; do not repeat them manually.
 
-Any ERROR-level finding blocks the run until the harness contract is fixed. WARN and INFO findings are advisory.
-
-```
-Bash: wc -c CLAUDE.md
-```
+`registry-schema` identifies the source file and failing field. A
+`registry-validator` setup error requires installing the pinned dependencies
+with `uv sync --locked` before retrying; lint itself never installs them.
 
 ```
 Bash: uv run scripts/routine_digest.py check; echo "exit=$?"
@@ -72,38 +63,13 @@ is one nobody acted on. `0` is clean. Any other nonzero exit is an execution
 failure (unset `$OV`, a broken digest registry, an unreadable artifact) and
 counts as ERROR like any other Phase 0 failure.
 
-If CLAUDE.md exceeds 8,192 bytes (~2,000 tokens), emit a WARN: "CLAUDE.md is [size] bytes (target: <8KB). This file is inherited by every subagent; excess size multiplies token cost across all agent dispatches. Run a prune pass or move rules to agent definitions/protocols."
-
-If CLAUDE.md exceeds 15,000 bytes, escalate to ERROR. The file has likely accumulated rules that belong elsewhere.
-
-Also check for bold formatting:
-```
-Bash: grep -c '\*\*' CLAUDE.md
-```
-If count > 0, emit INFO: "CLAUDE.md contains [N] bold markers. Bold has no semantic weight for the model and wastes tokens. Consider removing."
-
 ### Phase 0b: $OV ingestion hygiene audit
 
 ```
 Bash: uv run scripts/zk_audit.py --json
 ```
 
-Parse the JSON. Shape:
-```json
-{
-  "vault": "/path/to/zk",
-  "categories": {
-    "missing_readmes":      [{ "category": "...", "where": "...", "detail": "..." }],
-    "raw_no_digest":        [...],
-    "archive_overlap":      [...],
-    "root_orphans":         [...],
-    "empty_md":             [...],
-    "empty_md_archive_count": N,
-    "suspicious_dirs":      [...]
-  },
-  "total": N
-}
-```
+Read `categories` and `total`; category rows identify `where` and `detail`.
 
 Advisory only: never blocks the run. Exit code 0 unless $OV is missing (exit 2). Surface a one-line summary per non-empty category. Detailed listings are read on demand via `uv run scripts/zk_audit.py` (no `--json`). Source of truth: `protocols/drive-zk-ingestion.md` § Post-ingestion verification.
 
@@ -115,59 +81,16 @@ Bash: uv run scripts/privacy_check.py --json
 
 `--json` mode emits a document on every run regardless of exit code. Route on its `action` field: `"proceed"` → pass (WARN first on any `coverage_warnings`); `"soft_skip"` → note "privacy gate skipped (<reason>)" and continue; `"abort"` → ERROR, block and present each `hits` entry verbatim. No JSON / exit ≥ 2 without JSON → real script error: surface stderr, soft-skip.
 
-Normal-scan JSON shape:
-```json
-{
-  "ov_dir": "...",
-  "filename_stems": N,
-  "wikilink_targets": N,
-  "private_slugs": N,
-  "private_terms": N,
-  "private_terms_configured": true,
-  "terms_scanned": N,
-  "allowlist_size": N,
-  "coverage_warnings": [],
-  "hit_count": N,
-  "hits": [
-    { "file": "...", "line": N, "private_title": "...", "source": "path|worktree|index" }
-  ]
-}
-```
-
 Any non-empty `hits` array is an ERROR: each entry is a private identifier (filename stem, wikilink target, slug from `profile/private_slugs.txt`, or exact term from `profile/private_terms.txt`) that appears in a public-bound pathname, worktree file, or staged blob. Present each hit verbatim with its file, source, and line number. Remediation:
 
 - Replace the private title with a generic placeholder (e.g., `Sample Wiki Entry`, `Topic A`).
 - Add private names, places, program labels, and preference phrases that cannot be inferred from vault titles to gitignored `profile/private_terms.txt`, one exact term per line.
 - Or, if the exposure is deliberate (e.g., the title is fully public and appears as an illustrative example), add the stem to `scripts/privacy_allowlist.txt` and document the rationale in the commit message.
 
-The check is a blocking quality gate for any system-evolution commit that touches tracked files when the gate ran meaningfully (no skip flag). Do not proceed to structural lint if Phase 0c returns hits.
+The check is a blocking quality gate for any commit that touches tracked files when the gate ran meaningfully (no skip flag). Do not proceed to structural lint if Phase 0c returns hits.
 An absent exact-term sidecar is a coverage warning, not proof of a leak. Keep the
 semantic privacy round enabled and populate the gitignored sidecar before
 claiming exact identity or preference coverage.
-
-### Phase 0d: Auto-memory hygiene
-
-```
-Bash: uv run scripts/auto_memory_audit.py --json
-```
-
-Parse the JSON. Shape:
-```json
-{
-  "memory_dir": "/path/to/memory",
-  "thresholds": { "stale_days": 90, "index_truncation": 200 },
-  "counts": {
-    "total_files": N, "indexed_files": N,
-    "dead-link": N, "orphan-file": N, "index-bloat": N,
-    "stale-mtime": N, "provisional-marker": N, "frontmatter-missing": N
-  },
-  "findings": [
-    { "severity": "WARN|INFO", "code": "...", "where": "...", "message": "..." }
-  ]
-}
-```
-
-Advisory only: never blocks the run. Exit code 0 always; missing memory dir produces a single `memory-dir-missing` INFO finding so the JSON parse path stays uniform on first-run setups. Surface a one-line summary per non-zero finding code. Detailed listings on demand via `uv run scripts/auto_memory_audit.py` (no `--json`). The memory dir auto-discovers from CWD; override via `CLAUDE_MEMORY_DIR` or `--dir`. WARN-level findings (`dead-link`, `orphan-file`, `index-bloat`) point at concrete recall-pipeline breakage; INFO-level (`stale-mtime`, `provisional-marker`, `frontmatter-missing`, `memory-dir-missing`) are nudges to re-verify or invalidate. Source of truth: `protocols/local-first-architecture.md` (auto-memory as L1 fallback).
 
 ### Phase 1a: Structural lint
 
@@ -175,17 +98,7 @@ Advisory only: never blocks the run. Exit code 0 always; missing memory dir prod
 Bash: python3 scripts/lint.py --json
 ```
 
-Parse the JSON. It has the shape:
-
-```json
-{
-  "wiki_dir": "zk/wiki",
-  "counts": { "error": 0, "warn": 0, "info": 0 },
-  "findings": [
-    { "severity": "ERROR|WARN|INFO", "code": "...", "where": "...", "message": "..." }
-  ]
-}
-```
+Read `wiki_dir`, `counts`, and `findings` using the Phase 0 finding fields.
 
 ### Phase 1b: Staleness lint
 
@@ -193,15 +106,7 @@ Parse the JSON. It has the shape:
 Bash: python3 scripts/staleness.py --json
 ```
 
-Parse the JSON. Shape:
-
-```json
-{
-  "thresholds": { "stale": 90, "dormant": 45, ... },
-  "counts": { "stale": N, "dormant": N, "promote": N, "active": N, "total": N },
-  "notes": [{ "path": "...", "staleness": N, "category": "stale|dormant|promote|active", ... }]
-}
-```
+Read `thresholds`, `counts`, and `notes` (`path`, `staleness`, `category`).
 
 Staleness findings are always advisory (no ERROR level). They surface L2 notes that have gone cold, using the formula `days_since_modified / (1 + log(1 + reference_count))`. Notes referenced from wiki entries or recent reflections decay slower.
 

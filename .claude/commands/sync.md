@@ -74,7 +74,7 @@ Wiki-tier targets under `<paths.wiki>/` are the only exception to the GitHub-lin
 
 For each markdown file:
 
-1. **Snapshot the source**: `cp "<paths.zettelm>/<file>.md" "<paths.cache>/sync-<basename>.md"` so the Curator works from a stable snapshot per the snapshot-first protocol in `protocols/orchestrator-actions.md`.
+1. **Snapshot the source**: `cp "<paths.zettelm>/<file>.md" "<paths.cache>/sync-<basename>.md"` so the Curator works from a stable snapshot under `protocols/agent-handoff.md` → Orchestrator → Curator (Compact/Merge Dispatch).
 2. **Dispatch Curator** with: the snapshot path, the Researcher's entity → link map, the target daily-note path, and these enrichment rules:
    - Typo correction: light hand only. Fix obvious typos in Chinese (漏字 / 错字 / 拼音错位) and English (autocomplete glitches). Do not rewrite voice, restructure sentences, or "improve" the text. If a phrase reads awkwardly but is unambiguous, leave it.
    - Backlinks: wrap exactly the entities returned in the link map. Do not invent new backlinks. Do not link generic words (`今天`, `早上`, `吃了`).
@@ -118,7 +118,7 @@ Once all merge blocks are drafted and reviewed in (3), dispatch a single **Chall
 - The past 3 daily notes (`<paths.daily_notes>/`, sorted by date, exclude today's).
 - The user's `profile/identity.md` themes and `profile/directions.md` active goals.
 
-Challenger returns exactly 3 prompts grounded in this material. Mix is allowed: 1-3 may be reflective questions on what was captured; 1-2 may be tangential "random thought" provocations the captures suggest. Each prompt one line, no preamble.
+Challenger returns up to three prompts, each grounded in this material, and fewer when the captures do not support more. Reflective questions on what was captured and tangential provocations the captures suggest may mix. Each prompt one line, no preamble.
 
 The orchestrator formats them as:
 

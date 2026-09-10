@@ -39,7 +39,7 @@ class TriageCommandContractTest(unittest.TestCase):
             "scripts/routine_digest.py",
             "scripts/recurring.py",
             "scripts/aggregate_freshness.py",
-            "scripts/routine_audit.py",
+            "scripts/routine_status.py",
             "scripts/intent_coverage.py",
         ):
             self.assertIn(helper, text)
@@ -47,8 +47,9 @@ class TriageCommandContractTest(unittest.TestCase):
     def test_mutations_keep_dry_run_and_recovery_gates(self) -> None:
         text = SPEC.read_text(encoding="utf-8")
         self.assertIn("ack --manifest \"$SCRATCH/routine-batch.json\" --dry-run", text)
-        self.assertIn("require explicit confirmation", text)
-        self.assertIn("--confirm-effects-reviewed", text)
+        self.assertIn("obtain explicit approval", text)
+        self.assertIn("review external effects", text)
+        self.assertIn("Do not modify or delete a receipt", text)
         self.assertIn("Stop after each batch", text)
 
 
@@ -81,36 +82,3 @@ class TriageCommandContractTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-class RoutineHealthLaneSchemaTest(unittest.TestCase):
-    """Every count `routine_audit.py health --json` emits, except the plain
-    routine total, must be summed by the triage lane. Measured 2026-09-03:
-    `counts.not_loaded` was added to health and the lane formula still summed
-    the three older counts, so an unloaded launchd job scored `clear`."""
-
-    def test_lane_formula_sums_every_health_count(self) -> None:
-        import os
-        import tempfile
-        from unittest import mock
-
-        sys.path.insert(0, str(ROOT / "scripts"))
-        import routine_audit as ra
-
-        row = next(
-            line
-            for line in SPEC.read_text(encoding="utf-8").splitlines()
-            if line.startswith("| Routine health |")
-        )
-        summed = set(re.findall(r"`counts\.(\w+)`", row))
-        with tempfile.TemporaryDirectory(prefix="atelier-triage-") as tmp:
-            vault = Path(tmp)
-            (vault / "_meta").mkdir()
-            (vault / "_meta" / "routine_watch.toml").write_text("routine = []\n", encoding="utf-8")
-            with mock.patch.dict(os.environ, {"OV": str(vault)}), mock.patch.object(
-                ra, "_loaded_launchd_labels", return_value=(set(), None)
-            ):
-                payload, _ = ra._health()
-        emitted = set(payload["counts"]) - {"routines"}
-        self.assertEqual(summed, emitted)

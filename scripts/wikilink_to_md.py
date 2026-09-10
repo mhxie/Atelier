@@ -1,24 +1,9 @@
 #!/usr/bin/env python3
-"""Convert Obsidian wikilinks to standard markdown.
+"""Convert Obsidian wikilinks to portable Markdown.
 
-Transforms:
-  [[Foo]] resolves              → [Foo](relative/Foo.md)
-  [[Foo|Bar]] resolves          → [Bar](relative/Foo.md)
-  [[Foo#Section]] resolves      → [Foo](relative/Foo.md#section-slug)
-  [[Foo#^block]] resolves       → [Foo](relative/Foo.md)         (block id dropped)
-  [[<full-date>]]               → [YYYY-MM-DD](daily-notes/YYYY/MM/YYYY-MM-DD.md)
-                                  if file exists, else plain ISO text
-  [[2025]] / [[123]]            → 2025 / 123                     (strip; no pure-num tags)
-  [[]]                          → (stripped)
-  [[Side Notes]] unresolved    → #side-notes                   (semantic tag)
-  ![[image.png]]                → ![](image.png)                 (standard image embed)
-  ![[NoteName]] (no img ext)    → [NoteName](path) if resolved   (note transclusion lossy → link)
-
-Usage:
-  uv run scripts/wikilink_to_md.py --dry-run --file zk/wiki/Foo.md
-  uv run scripts/wikilink_to_md.py --dry-run --tier wiki --limit 3
-  uv run scripts/wikilink_to_md.py --dry-run --all --quiet
-  uv run scripts/wikilink_to_md.py --apply --all
+Notes and full dates resolve to relative links; numeric targets become text and
+unresolved names become semantic tags. Image embeds stay images, while note
+transclusions degrade to links. Code regions are masked during conversion.
 """
 
 from __future__ import annotations
@@ -31,9 +16,11 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from markdown_it import MarkdownIt
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from _paths import vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, vault_root  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
 
@@ -232,26 +219,32 @@ def transform_embed(inner: str, source_rel: Path, idx: dict[str, list[Path]]) ->
     return transform_wikilink(inner, source_rel, idx)
 
 
-FENCED_CODE_RE = re.compile(r"```[\s\S]*?```")
-INLINE_CODE_RE = re.compile(r"`[^`\n]+`")
+INLINE_CODE_RE = re.compile(r"(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)")
 
 
 def mask_code(text: str) -> tuple[str, list[str]]:
     """Replace code regions with sentinel placeholders. Returns (masked, originals)."""
     originals: list[str] = []
 
-    def _mask(m: re.Match) -> str:
-        originals.append(m.group(0))
+    def _mask(value: str) -> str:
+        originals.append(value)
         return f"\x00CODE_{len(originals) - 1}\x00"
 
-    masked = FENCED_CODE_RE.sub(_mask, text)
-    masked = INLINE_CODE_RE.sub(_mask, masked)
-    return masked, originals
+    lines = text.splitlines(keepends=True)
+    for token in reversed(MarkdownIt().parse(text)):
+        if token.map and token.type in {"fence", "code_block", "inline"}:
+            start, end = token.map
+            block = "".join(lines[start:end])
+            masked = (INLINE_CODE_RE.sub(lambda m: _mask(m.group(0)), block)
+                      if token.type == "inline" else _mask(block))
+            lines[start:end] = [masked]
+    return "".join(lines), originals
 
 
 def unmask_code(text: str, originals: list[str]) -> str:
     """Restore sentinels back to original code spans."""
-    for i, orig in enumerate(originals):
+    for i in range(len(originals) - 1, -1, -1):
+        orig = originals[i]
         text = text.replace(f"\x00CODE_{i}\x00", orig)
     return text
 
@@ -261,7 +254,8 @@ def transform_file(path: Path, idx: dict[str, list[Path]]) -> tuple[str, list[tu
 
     Wikilinks inside fenced or inline code are preserved verbatim — they may
     document syntax rather than reference notes."""
-    text = path.read_text(encoding="utf-8")
+    with path.open(encoding="utf-8", newline="") as handle:
+        text = handle.read()
     source_rel = path.resolve().relative_to(OV)
     diffs: list[tuple[str, str]] = []
 
@@ -377,7 +371,7 @@ def main() -> None:
                 print(f"  - {old}")
                 print(f"  + {new}")
         if args.apply:
-            f.write_text(new_text, encoding="utf-8")
+            atomic_write(f, new_text, newline="")
 
     action = "applied" if args.apply else "dry-run"
     print(f"\n[done] {files_changed} files changed, {total_changes} replacements ({action})",

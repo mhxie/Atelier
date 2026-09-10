@@ -10,7 +10,6 @@ import unittest
 from datetime import date
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import interests as ix  # noqa: E402
 
@@ -150,6 +149,22 @@ class IngestTests(unittest.TestCase):
             self.assertEqual(by_name["Example Series C"].events[0].kind, "started")
             self.assertNotIn("Example Series A", by_name)
 
+    def test_anilist_bad_cache_shape_preserves_the_previous_baseline(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = build_vault(Path(tmp))
+            state = {"anilist": {"1": {"status": "COMPLETED", "progress": 12}}}
+            bad_caches = [[], {"anime": []}, {"anime": {"library": "bad"}}, {"anime": {"library": [None]}}]
+            bad_caches.extend({"anime": {"library": [{"id": 1, "title": "Example Series", "progress": value}]}}
+                              for value in ([], {}, "", False, 0.0, -1, "3"))
+            for cache in bad_caches:
+                with self.subTest(cache=cache):
+                    (Path(tmp) / "hi-tracking.json").write_text(json.dumps(cache))
+                    items = []
+                    notes = ix.ingest_anilist(vault, items, TODAY, state)
+                    self.assertIn("invalid", " ".join(notes))
+                    self.assertEqual(state["anilist"]["1"]["progress"], 12)
+                    self.assertEqual(items, [])
+
     def test_experience_log_rows_map_categories_and_skip_bad_dates(self):
         with tempfile.TemporaryDirectory() as tmp:
             vault = build_vault(Path(tmp))
@@ -272,6 +287,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("resolved", self._run(vault, "resolve", pid).stdout)
             self.assertEqual(json.loads(self._run(vault, "evidence", "--json").stdout)["pending"], [])
             self.assertEqual(self._run(vault, "resolve", pid).returncode, 1)
+            self.assertEqual(self._run(vault, "ingest", "--source", "experience-log").returncode, 0)
+            self.assertEqual(json.loads(self._run(vault, "evidence", "--json").stdout)["pending"], [])
 
 
 class ActNameTests(unittest.TestCase):

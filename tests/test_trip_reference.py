@@ -12,7 +12,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import trip_reference
 import _paths
@@ -135,6 +134,26 @@ class TripReferenceTests(unittest.TestCase):
                 )["status"],
                 "anchor_missing",
             )
+
+    def test_eof_anchor_and_crlf_are_preserved(self):
+        with self.vault() as vault:
+            for ending in ("\n", "\r\n"):
+                with self.subTest(ending=repr(ending)):
+                    note = vault / "trip.md"
+                    before = HEADING + ending + ANCHOR
+                    note.write_bytes(before.encode())
+                    expected_hash = trip_reference.section_sha256(before, HEADING)
+                    self.assertEqual(self.invoke(note, expected_hash)["status"], "inserted")
+                    self.assertEqual(note.read_bytes(), (before + ending + REFERENCE + ending).encode())
+
+    def test_quoted_example_is_not_an_existing_reference(self):
+        with self.vault() as vault:
+            note = self.make_note(vault)
+            before = note.read_text().replace(ANCHOR, f"> Example: {REFERENCE}\n{ANCHOR}")
+            note.write_text(before)
+            expected_hash = trip_reference.section_sha256(before, HEADING)
+            self.assertEqual(self.invoke(note, expected_hash)["status"], "inserted")
+            self.assertEqual(note.read_text(), before.replace(ANCHOR, ANCHOR + "\n" + REFERENCE))
 
 
 if __name__ == "__main__":

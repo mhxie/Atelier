@@ -1,53 +1,12 @@
 #!/usr/bin/env python3
-"""
-trust.py: TrustRank for the zk/wiki/ knowledge layer.
+"""Compute deterministic TrustRank over wiki claims.
 
-Walks zk/wiki/*.md, parses each wiki entry into claims + anchor/cite/pass
-markers, builds a directed trust graph, and runs Personalized PageRank with
-the teleport distribution restricted to external @anchor seed nodes. The
-result is a per-claim trust score; note-level scores are the mean of their
-claims.
-
-Algorithm (Gyongyi, Garcia-Molina, Pedersen, VLDB 2004):
-
-    Seed:      external @anchor markers become seed nodes. Their initial
-               mass is the PageRank personalization vector. Non-anchored
-               claims start at zero.
-    Propagate: internal @cite markers become directed edges from the cited
-               claim to the citing claim. Trust flows along cite edges.
-    Floor:     internal @pass markers never accumulate trust. A wiki entry
-               that passes structural integrity (items 1 to 10 of
-               protocols/wiki-schema.md) AND has at least one
-               `@pass: reviewer | status: verified` earns a claim-level
-               floor of 0.1 on every claim in the note.
-
-Personalized PageRank is the full implementation. The random-walk teleport
-distribution puts all mass on anchor seed nodes; all other nodes contribute
-no initial mass. Damping factor 0.85.
-
-This implementation is deterministic and stdlib-only. It avoids the
-networkx dependency by doing a direct power-iteration PageRank with
-dangling-node mass redistributed to the personalization vector, matching
-`networkx.pagerank(G, personalization=anchor_dict)` semantics.
-
-Bi-temporal: every marker carries valid_at, optional invalid_at. The
-`--as-of YYYY-MM-DD` flag filters markers by the temporal window. Default
-as-of is today.
-
-CLI:
-    scripts/trust.py                         default table over zk/wiki/
-    scripts/trust.py --note zk/wiki/foo.md   per-claim breakdown
-    scripts/trust.py --as-of 2025-06-01      bi-temporal snapshot
-    scripts/trust.py --json                  structured output for /lint
-    scripts/trust.py --index                 write zk/wiki/index.md
-
-Paths are project-relative. Run from the repo root.
-
-See also:
-    protocols/wiki-schema.md            the schema this parser enforces
-    protocols/local-first-architecture.md  layer model
-    handoffs/<date>-<topic>.md           optional local design handoff
-        (gitignored and not shipped in clones)
+External anchors seed Personalized PageRank and cites propagate trust from the
+cited claim. Structurally valid notes with a verified reviewer pass receive a
+claim floor; pass markers do not add graph mass. With no seeds, every score is
+zero. Marker validity uses ``[valid_at, invalid_at)`` and may be queried as of
+a date. The stdlib power iteration redistributes dangling mass only to anchor
+seeds.
 """
 
 from __future__ import annotations
@@ -56,11 +15,12 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import parse_iso_date, tier  # type: ignore[import-not-found]  # noqa: E402
+from _paths import tier  # type: ignore[import-not-found]  # noqa: E402
 
 WIKI_DIR = tier("wiki")
 DAMPING = 0.85
@@ -87,19 +47,12 @@ BARE_CITE_RE = re.compile(r"^\s*@cite:\s+")
 # ----------------------------------------------------------------------------
 
 
+@dataclass(slots=True, eq=False, repr=False)
 class Marker:
-    __slots__ = (
-        "kind",
-        "fields",
-        "line_no",
-        "raw",
-    )
-
-    def __init__(self, kind: str, fields: dict, line_no: int, raw: str):
-        self.kind = kind
-        self.fields = fields
-        self.line_no = line_no
-        self.raw = raw
+    kind: str
+    fields: dict
+    line_no: int
+    raw: str
 
     @property
     def valid_at(self) -> date | None:
@@ -172,9 +125,13 @@ class WikiNote:
 # Parser
 # ----------------------------------------------------------------------------
 
-
-def _parse_iso(s: str) -> date | None:
-    return parse_iso_date(s)
+def _parse_iso(value: str) -> date | None:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _split_marker_line(line: str) -> tuple[str, str, list[str]] | None:
@@ -377,7 +334,7 @@ def parse_wiki_note(path: Path, today: date) -> WikiNote:
         note.parse_errors.append("missing H1 title")
     if not any(CLAIMS_HEADING_RE.match(line) for line in lines):
         note.parse_errors.append("missing `## Claims` section")
-    if not note.claims and in_claims_section is False and not any(note.parse_errors):
+    elif not note.claims:
         # Empty claims section is itself a structural fail.
         note.parse_errors.append("no claims found under `## Claims`")
     for claim in note.claims:

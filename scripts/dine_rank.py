@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
-"""Log-side dining aggregates: the deterministic half of /dine Intent A.
-
-The dine flow re-read the whole meal-history tracker with a top-tier model on
-every run, so its cost grew linearly with dining history. This script is the
-sole owner of the log-derived facts and score components; the table in
-`.claude/commands/dine.md` § Step 3 consumes `log_score` and keeps only the
-catalog-side factors (场景索引, credit cycles, Michelin moods).
-
-Emits one JSON object:
-  restaurants   per-restaurant aggregates + log-side score component
-  excluded      visited within --avoid-days (hard filter)
-  sourced_rows  how many tracker rows fed the aggregates
-
-Reuses `dining_audit`'s canonical-schema parsing so the two never drift.
-"""
+"""Aggregate canonical meal-history rows for /dine's log-side scores and exclusions."""
 
 from __future__ import annotations
 
@@ -43,7 +29,7 @@ def _parse_rows(path: Path) -> list[dict]:
         if tuple(da._split_markdown_row(line)) == da.EXPECTED_COLUMNS
     ]
     if len(header_indexes) != 1:
-        raise SystemExit("meal history lacks exactly one canonical table (run dining_audit)")
+        raise ValueError("meal history lacks exactly one canonical table (run dining_audit)")
     rows = []
     for line in lines[header_indexes[0] + 2 :]:
         if not line.strip().startswith("|"):
@@ -56,6 +42,10 @@ def _parse_rows(path: Path) -> list[dict]:
         if not m:
             continue
         row["_date"] = date.fromisoformat(m.group(1))
+        rating = str(row["评分"]).replace("*", "").strip()
+        row["_rating"] = None if rating in da.UNKNOWN else int(rating)
+        if row["_rating"] is not None and not 1 <= row["_rating"] <= 10:
+            raise ValueError("meal rating must be an integer from 1 to 10 or dash")
         rows.append(row)
     return rows
 
@@ -93,7 +83,6 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     vault = vault_root()
-    today = date.fromisoformat(args.today) if args.today else date.today()
     if args.tracker:
         tracker = Path(args.tracker)
     else:
@@ -103,26 +92,27 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "meal-history tracker not resolvable; pass --tracker"}))
         return 2
 
-    rows = _parse_rows(tracker)
+    try:
+        today = date.fromisoformat(args.today) if args.today else date.today()
+        if args.avoid_days < 0:
+            raise ValueError("--avoid-days must be nonnegative")
+        cutoff = today - timedelta(days=args.avoid_days)
+        rows = _parse_rows(tracker)
+    except (OSError, ValueError, OverflowError) as exc:
+        print(json.dumps({"error": str(exc)}))
+        return 2
     by_restaurant: dict[str, list[dict]] = {}
     for row in rows:
-        name = str(row.get("Restaurant", "")).strip()
+        name = da._plain_restaurant(str(row.get("Restaurant", ""))).strip()
         if name and name not in da.UNKNOWN:
             by_restaurant.setdefault(name, []).append(row)
 
-    cutoff = today - timedelta(days=args.avoid_days)
     restaurants, excluded = {}, []
     for name, visits in sorted(by_restaurant.items()):
         visits.sort(key=lambda r: r["_date"])
         last = visits[-1]
         days_since = (today - last["_date"]).days
-        ratings = []
-        for row in visits[-3:]:
-            raw = str(row.get("评分", "")).strip()
-            try:
-                ratings.append(float(raw))
-            except ValueError:
-                continue
+        ratings = [row["_rating"] for row in visits[-3:] if row["_rating"] is not None]
         avg_recent = round(sum(ratings) / len(ratings), 2) if ratings else None
         # 再去 goes unfilled once a restaurant is settled (profile/diet.md
         # "Capture tiers"), so carry the most recent decided value forward

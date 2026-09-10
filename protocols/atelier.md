@@ -39,12 +39,9 @@ Each agent maps to an impressionist-period archetype. **Dispatch keys are unchan
 | `scholar` | The Scholar | the deep close-reader for foundational texts |
 | `librarian` | The Cataloguer | maintains the source register |
 | `meeting` | The Stenographer | takes the bench notes verbatim |
-| `evolver` | The Master of the Atelier | system meta — runs the atelier itself |
 | `privacy-reviewer` | The Steward | keeps confidences from the public exhibition |
 | `forgetter` | The Conservator | preserves the œuvre by removing decay, not by hoarding |
 | `scribe` | The Typewriter | records what is dictated, no editorial hand |
-
-(The `external-reviewer` is registry infrastructure — script-driven via `scripts/review.sh` for `/system-review` — not part of le cercle proper.)
 
 ## Mode
 

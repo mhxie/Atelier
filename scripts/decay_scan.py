@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
-"""Deterministic Forgetter bands: low-signal fully, redundant via retrieval.
+"""Deterministic low-signal checks and QMD candidates for redundancy review.
 
-The nightly sweep dispatched a 60-turn model agent to evaluate conditions a
-script can check (`.claude/agents/forgetter.md` § Low-signal: five
-conjunctive conditions; § Redundant: top-5 retrieval overlap). This scanner
-computes those two bands; era-stale and contradicted remain model judgment.
-
-Low-signal (ALL five, per the agent spec):
-  words < 150; zero inbound wikilinks; zero #tags; mtime older than 90 days;
-  path under <paths.wip>/.
-
-Redundant (with --redundant; needs the semantic index):
-  3+ peers in the candidate's top-5 retrieval above the floor (real-mode
-  default 0.6), self-matches dropped, and only working-tier peers count
-  (papers/preprints/wiki/profile/daily-notes are the note's subject, not its
-  duplicate).
-
-Output: one JSON object with per-band findings carrying the same evidence
-fields the Forgetter envelope records, so the nightly command (or an
-interactive /hi forget) can consume either source interchangeably.
+Low-signal requires all five: <150 words, no inbound wikilinks, no tags,
+mtime older than 90 days, and a path under <paths.wip>/.
+--redundant needs 3+ working-tier peers in QMD's top 5, excluding self and
+subject documents. Scores are not merge authority or numerically calibrated;
+content overlap, era-staleness, and contradictions remain model judgment.
+Output is one JSON object with per-band Forgetter-compatible evidence.
 """
 
 from __future__ import annotations
@@ -39,7 +27,6 @@ WORKING_TIERS = ("wip", "research", "reflections", "agent_findings")
 SUBJECT_PREFIX_TIERS = ("papers", "preprints", "wiki", "daily_notes")
 LOW_SIGNAL_MAX_WORDS = 150
 LOW_SIGNAL_MIN_AGE_DAYS = 90
-REDUNDANT_FLOOR = 0.6
 REDUNDANT_MIN_PEERS = 3
 TAG_RE = re.compile(r"#[A-Za-z]")
 WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)")
@@ -70,7 +57,7 @@ def low_signal_content_failures(vault: Path, rel: str) -> list[str]:
     `conditions_met` count it was handed.
     """
     failures: list[str] = []
-    wip_prefix = f"{tier('wip').relative_to(vault)}/"
+    wip_prefix = f"{tier_segments()['wip'].rstrip('/')}/"
     if not str(rel).startswith(wip_prefix):
         failures.append(f"not under {wip_prefix}")
     path = vault / rel
@@ -132,7 +119,7 @@ def _tier_of(rel_path: str) -> str | None:
     return None
 
 
-def scan_redundant(vault: Path, scope: str, max_candidates: int, floor: float) -> list[dict]:
+def scan_redundant(vault: Path, scope: str, max_candidates: int) -> list[dict]:
     base = tier(scope)
     if not base.is_dir():
         return []
@@ -142,28 +129,35 @@ def scan_redundant(vault: Path, scope: str, max_candidates: int, floor: float) -
         title = path.stem
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "semantic.py"), "query", title,
-             "--top", "5", "--format", "json", "--sources", "local"],
+             "--top", "5", "--format", "json"],
             cwd=ROOT, capture_output=True, text=True, timeout=120, check=False,
         )
         if result.returncode != 0:
-            continue
+            raise RuntimeError(f"QMD retrieval failed: {result.stderr.strip()[:300]}")
         try:
             rows = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("QMD retrieval returned invalid JSON") from exc
+        if not isinstance(rows, list):
+            raise RuntimeError("QMD retrieval did not return a result list")
         rel_self = str(path.relative_to(vault))
         peers = []
-        for row in rows if isinstance(rows, list) else []:
+        seen = {rel_self}
+        for row in rows:
+            if not isinstance(row, dict) or row.get("backend") != "qmd":
+                raise RuntimeError("redundant candidate retrieval needs explicitly labelled QMD evidence")
             rel = str(row.get("path", ""))
             score = row.get("score")
-            if rel == rel_self or not isinstance(score, (int, float)) or score < floor:
+            if rel in seen or not isinstance(score, (int, float)):
                 continue
             if _tier_of(rel) not in WORKING_TIERS:
                 continue  # subject documents never count as duplicates
+            seen.add(rel)
             peers.append({"path": rel, "score": score})
         if len(peers) >= REDUNDANT_MIN_PEERS:
             findings.append(
-                {"band": "redundant", "path": rel_self, "peers": peers, "floor": floor}
+                {"band": "redundant", "path": rel_self, "peers": peers,
+                 "mode": "qmd", "requires_content_review": True}
             )
     return findings
 
@@ -173,14 +167,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--redundant", action="store_true", help="Also run the retrieval-overlap band (needs the semantic index).")
     parser.add_argument("--scope", default="wip", help="Tier name for the redundant band (default wip).")
     parser.add_argument("--max-candidates", type=int, default=15)
-    parser.add_argument("--floor", type=float, default=REDUNDANT_FLOOR)
     args = parser.parse_args(argv)
 
     vault = vault_root()
     now = time.time()
     payload = {
         "low_signal": scan_low_signal(vault, now),
-        "redundant": scan_redundant(vault, args.scope, args.max_candidates, args.floor) if args.redundant else [],
+        "redundant": scan_redundant(vault, args.scope, args.max_candidates) if args.redundant else [],
         "redundant_ran": bool(args.redundant),
     }
     print(json.dumps(payload, ensure_ascii=False, sort_keys=True))

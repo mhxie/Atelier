@@ -1,5 +1,5 @@
 ---
-description: Read & Discuss procedure — owns the three Read flows (Read & Discuss, Focused Read, Multi-Lens Read) and the Reader/Scholar selection, Readwise prefetch, and source-backup sub-procedures.
+description: Read and discuss a source with one reading worker; expand perspectives, evidence gathering, or review when the task needs it.
 ---
 # Read & Discuss
 
@@ -11,18 +11,21 @@ Procedure for Read intent. Owns Reader/Scholar selection, Readwise prefetch, sou
 |--------|-------|-------------|
 | 1 | **Read & Discuss** | Quick read + interactive discussion (default) |
 | 2 | **Focused Read** | Pick 1-2 specific lenses to focus on |
-| 3 | **Multi-Lens Read** | Read with all 4 lenses in parallel — full analysis |
+| 3 | **Multi-Lens Read** | Examine the text through all four lenses |
 
 ## Reader vs Scholar selection (applies to all three Read modes)
 
-Before dispatching the reading agent, apply the auto-promotion check from `protocols/orchestrator.md` → "Reader → Scholar auto-promotion". If any condition fires (`word_count > 8000`, source path under `<paths.papers>/` or `<paths.preprints>/`, frontmatter `difficulty: hard`), dispatch **Scholar** instead of Reader. Same lens framework, same prompt — only the bound voices differ. All three Read modes below use this selection.
+Start with one **Reader**, or one **Scholar** when `word_count > 8000`, the
+source is under `<paths.papers>/` or `<paths.preprints>/`, or frontmatter
+declares `difficulty: hard`. Both use the same reading workflow; their voice
+bindings differ. This procedure owns the selection rule.
 
 ## Local cache check (before fetching; applies to all three Read modes when the source is a paper or external URL)
 
 If the source is a paper or an external URL (arXiv, conference PDF, a paper named by title), check local material FIRST and only hit the web on a miss. The cached copy is often already on disk; a web round-trip before checking it is wasted latency.
 
 1. Surface prior local material. Run `uv run scripts/semantic.py query "<title
-   or distinctive keywords>" --top 5 --context --format json`. The central
+   or distinctive keywords>" --top 5 --format json`. The central
    corpus policy returns current authored notes and may return compact
    locators for assets under a `raw/` cluster. It does not extract a binary PDF
    or index `<paths.cache>/`, so treat these hits as related context or a raw
@@ -43,11 +46,16 @@ If the source is a Readwise podcast, video, or article (user provides a Readwise
 3. Pass `cache_path: <paths.cache>/rw-<id>.md` to every reading-agent dispatch (Reader or Scholar). The convention is documented in `.claude/agents/reader.md` § "Readwise transcript cache"; Scholar follows the same convention.
 4. For podcasts specifically: also pass the guest name (parsed from title) and host name (from the `author` field) in the dispatch prompt so the reading agent doesn't have to re-infer for citation.
 
-## Backup to Readwise (final step in every Read mode)
+## Backup to Readwise (optional final step in every Read mode)
 
-After the reflection file is saved, fire one `readwise reader-create-document` call as a last-resort backup of the source. The reflection file in `<paths.reflections>/` remains the durable artifact; this is just so the source itself is preserved if its origin URL ever rots.
+After the reflection file is saved, make one `readwise reader-create-document`
+call only if the user explicitly authorized backing up this source to Readwise.
+Approval to save the local reflection does not authorize this external write.
+Without backup authority, skip it without blocking the local save. The reflection
+in `<paths.reflections>/` remains the durable artifact.
 
 **Skip conditions (do NOT call the CLI):**
+- The user has not explicitly authorized this Readwise backup.
 - Input was a Readwise URL or `document_id` (already in Readwise; the Prefetch Step handled it).
 - Input was a local `[[Note Title]]` (no source URL exists).
 - Input was a transcript paste with no accompanying URL (nothing to back up).
@@ -63,12 +71,25 @@ readwise reader-create-document \
 ```
 
 - `--url`: canonical source URL. For arXiv use the abs page (`/abs/<id>`), not the PDF URL.
-- `--tags`: 3-5 tags derived from the paper/article topic. Orchestrator picks them; no user prompt.
+- `--tags`: 3-5 topic tags selected by the orchestrator within the authorized backup.
 - `--category`: default `article`; use `pdf` for arXiv/PDF papers, `video` or `podcast` for transcripts.
 
 Print the resulting Readwise URL or `document_id` to the user as a one-liner confirmation. Do not pre-check for duplicates: if Readwise re-creates a doc, the second `document_id` is fine. Do not loop on errors; if the call fails (network, auth), report the error and continue, since the reflection file is already saved.
 
 ## Initial-analysis persistence checkpoint
+
+For a source handed off from Curate, retain its reading episode/item/policy
+IDs. Follow `protocols/decision-ledger.md` → Reading feedback loop for any
+explicit reading decision, consumption observation, or usefulness feedback
+that arrives during discussion. Record the user's reason and source turn;
+do not ask for a rating merely to complete telemetry. An analysis completing
+or a reflection being saved does not prove the user consumed or valued it.
+For direct reading, look up `decisions.py reading-episodes --item <source-id>`
+when attribution is needed. Use a prior episode only when its origin is
+unambiguous; a truncated or multiple-match result does not establish that.
+If no unambiguous curation episode exists,
+use a new direct-reading episode with `policy_id: direct`; its feedback may
+inform taste but receives no curation-policy outcome credit.
 
 Immediately after the first complete reading analysis returns, run the reading
 checkpoint defined in protocols/session-log.md before presenting the analysis
@@ -80,46 +101,52 @@ interruption window.
 
 ## Per-option flows
 
-- **Read & Discuss:** Ask for the article/note. Run the Prefetch Step above if it's a Readwise source. Dispatch 1 Reader (Critical lens) + 1 Researcher (find related notes). Complete the Initial-analysis persistence checkpoint, then present the analysis and enter interactive discussion mode. Before any user-approved reflection write, dispatch **Reviewer** + **Challenger** in parallel to verify accuracy. After the reflection is saved, run the Backup to Readwise step above. This is the lightweight default — most reading sessions start here.
-- **Focused Read:** Ask the user which article/note and which lens(es): Critical, Structural, Practical, or Dialectical. Run the Prefetch Step above if it's a Readwise source. Dispatch 1-2 Reader instances with the chosen lenses. Reader automatically handles transcript format (video/podcast) with preprocessing before applying the lens. Complete the Initial-analysis persistence checkpoint before discussion. Before any user-approved reflection write, dispatch **Reviewer** + **Challenger** in parallel to verify accuracy. After the reflection is saved, run the Backup to Readwise step above. Use when the user knows what angle they want.
-- **Multi-Lens Read:** Ask the user which article or note to read. Run the Prefetch Step above if it's a Readwise source. Then follow the Reading Hub flow below. Use for important articles worth deep multi-angle analysis.
+Use the supplied source; ask only when the source or a requested focus is
+missing. Apply the matching cache/prefetch branch before dispatch.
+
+- **Read & Discuss:** One Reader or Scholar examines the argument and its
+  evidence, starting with the Critical lens. Complete the Initial-analysis
+  persistence checkpoint, present the analysis, and discuss it with the user.
+- **Focused Read:** The same worker applies the requested lens or lenses,
+  keeping their findings distinct. Complete the same checkpoint before
+  presentation or discussion.
+- **Multi-Lens Read:** On request, follow the Reading Hub flow below.
+
+Add a specialist only for a concrete task the reading has exposed: **Researcher**
+for a needed connection to local notes, one **Scout** for bounded verification,
+**Thinker** for a consequential framework question, or **Challenger** for a specific
+assumption that needs independent scrutiny. Name that task in the dispatch.
+Use **Synthesizer** only when combining substantial independent briefs needs
+separate synthesis. Additional agents are not a completion requirement.
 
 ## Reading Hub Flow (Multi-Lens Read)
 
-1. **Parallel dispatch — Phase 1 (gather + read):**
-   - 2-4x **Reader** instances, each with a different lens. Always include Critical + Structural. Add by content type:
-     - Opinion/journalism/essays → + Dialectical (find the tensions)
-     - How-to/research/strategy → + Practical (extract takeaways)
-     - Philosophy/argument/debate → + Dialectical + Practical
-     - Video/podcast transcripts → Critical + Practical (Reader auto-preprocesses transcript format)
-   - **Researcher** — find user's existing notes related to the topic
-   - **Scout** (1-2 instances) — gather external context on the topic
-   - **Thinker** — select and apply a relevant framework
+1. One Reader or Scholar applies Critical, Structural, Practical, and
+   Dialectical perspectives in separate sections. Use independent readers
+   when the user requests independent takes or a specific disputed claim
+   warrants them; parallelize only those independent tasks.
+2. The orchestrator presents convergence, disagreement, and remaining
+   uncertainty across the findings. Complete the Initial-analysis persistence
+   checkpoint before presenting the report in Chinese or entering discussion.
+3. Follow the user's questions. Expand a lens or seek specific evidence when
+   needed; there is no fixed fanout or mandatory synthesis stage.
 
-2. **Convergence — Phase 2 (synthesize):**
-   - **Synthesizer** combines all Reader briefs + Researcher + Scout + Thinker into a unified reading report
-   - Complete the Initial-analysis persistence checkpoint before presenting the report
-   - Present the report in Chinese (reading-intensive)
+## Source verification and reflection writeback
 
-3. **Discussion — Phase 3 (interact):**
-   - Enter interactive discussion mode
-   - User and orchestrator discuss the article, guided by the multi-lens analysis
-   - Dispatch additional Reader instances with specific lenses if the user wants to go deeper on an aspect
+Every mode checks quotations and attributed claims against the source and
+distinguishes the author's claims from the reader's analysis. Verify external
+claims with appropriate sources or leave them explicitly unverified. If the
+source cannot be accessed, state the limitation instead of reconstructing it.
 
-4. **Quality gate — Phase 4 (review + challenge):**
-   - Before saving, dispatch **Reviewer** + **Challenger** in parallel:
-     - Reviewer checks: citation accuracy, grounding, honesty
-     - Challenger checks: are we asking the right questions? What did we miss?
-   - Fix any issues they surface before writing the reflection file
+Reading review: add one independent review for substantive, uncertain, or
+consequential claims, a significant disputed interpretation, or when the user asks. Dispatch
+the targeted **Reviewer** in Session Review mode and resolve findings before writeback.
+An ordinary reading reflection does not require a Reviewer/Challenger pair.
 
-5. **Save — Phase 5 (local reflection file):**
-   - Write the reflection file to `<paths.reflections>/YYYY-MM-DD-reading-<slug>.md`
-   - Include the complete source text under `### Full Text` when the source is
-     user-supplied or locally retained and redistribution rights are not in
-     question. For third-party copyrighted sources, store a source locator and
-     bounded excerpts instead.
-   - No write-back to daily notes. The reflection file is the durable output.
-
-6. **Backup to Readwise — Phase 6 (source preservation):**
-   - Run the Backup to Readwise step above.
-   - Skip if the input was already a Readwise source or a local `[[Note Title]]`.
+Present the proposed reflection and obtain explicit user approval before
+writing `<paths.reflections>/YYYY-MM-DD-reading-<slug>.md`. Discussion alone
+does not require a reflection file. Never write reading conclusions to daily
+notes. Include full source text only when supplied or locally retained with
+redistribution rights; otherwise preserve a source locator and bounded
+excerpts. After an approved reflection is saved, apply Backup to Readwise's
+separate authority and skip conditions above.

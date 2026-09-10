@@ -16,9 +16,6 @@ from datetime import date
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS = REPO_ROOT / "scripts"
-if str(SCRIPTS) not in sys.path:
-    sys.path.insert(0, str(SCRIPTS))
 
 import retrospect as rx  # noqa: E402
 
@@ -72,6 +69,14 @@ class DrawTests(unittest.TestCase):
         first = rx.draw(self.vault, count=1, today=TODAY, seed=1)
         again = rx.draw(self.vault, count=10, today=TODAY, seed=1)
         self.assertIn(first[0]["path"], {p["path"] for p in again})
+
+    def test_malformed_cooldown_does_not_permanently_hide_a_note(self):
+        target = "reflections/2025-01-02-old-thought.md"
+        valid = "daily-notes/2025-03-03.md"
+        (self.vault / rx.STATE_RELPATH).write_text(json.dumps({target: "unknown", valid: TODAY.isoformat()}))
+        paths = {row["path"] for row in rx.draw(self.vault, count=50, today=TODAY, seed=1)}
+        self.assertIn(target, paths)
+        self.assertNotIn(valid, paths)
 
     def test_an_empty_pool_is_a_reportable_state_not_a_crash(self):
         with tempfile.TemporaryDirectory() as tmp:

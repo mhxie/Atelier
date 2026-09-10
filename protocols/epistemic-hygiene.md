@@ -38,7 +38,9 @@ Applies to: periodic (monthly or quarterly) free-writes the user does deliberate
 
 Search includes notes regardless of `#ai-reflection` or `#ai-generated` tags. These tags are alloy markers, not exclusion criteria. Reflection write-backs are alloy by default and are citable like any other note.
 
-Trust scores from `scripts/trust.py`, not tag-based filtering, weight what comes back from search. Wiki entries with high trust rank above alloy notes; alloy notes with no contradicting evidence remain visible and weighted accordingly.
+QMD ranks search results; `sources/semantic.md` owns that retrieval contract.
+Readers weigh evidence using validation depth and `scripts/trust.py` scores
+when available. Trust scores do not modify retrieval ranking or hide alloy notes.
 
 ## The Failure Modes the Design is Bounded By
 
@@ -97,7 +99,7 @@ This is distinct from normal iterative thinking. It bites specifically when:
 
 **Why this rule exists.** A strategic refinement arc has the same risk profile as an AI-confirmation loop, just at a higher level. Instead of the orchestrator echoing the user's words, the orchestrator echoes the *direction* of the user's refinements. Each step feels like progress because it is monotonically endorsed, but progress-by-endorsement is not progress-by-friction. Friction comes from independent adversarial evaluation (the Challenger's role); the orchestrator's own voice cannot substitute.
 
-The corresponding orchestrator trigger ("User refines a strategic/directional claim 2+ times") lives in `protocols/collaboration-matrix.md` Collaboration Triggers; this hygiene rule is its semantic basis.
+The corresponding orchestrator trigger is "user refines a strategic or directional claim 2+ times"; this hygiene rule is its semantic basis.
 
 ## The Sacred Zone
 
@@ -109,5 +111,4 @@ This is fine. The taxonomy is honest about it. The point of `#solo-flight` is no
 
 - **Tag taxonomy** lives here. The wiki schema (`wiki-schema.md`) defines the structure for files under `<paths.wiki>/`. The trust engine (`scripts/trust.py`) reads only the `<paths.wiki>/` subtree.
 - **Knowledge tiers (L1–L5)** are defined in `local-first-architecture.md` and describe *where* a note lives. They are orthogonal to the validation-depth categories above. Wiki entries live at L4 (`<paths.wiki>/`). Alloy notes live anywhere from L1 to L3 (daily notes, session reflections, the rest of the vault, curated receipts). `#solo-flight` notes are usually captured in the L2 daily-note layer. To avoid confusion: the L1–L5 axis is "knowledge storage / certification level," the alloy / wiki entry / `#solo-flight` axis is "validation depth."
-- **Search behavior** changes: no exclusion rule based on `#ai-reflection`. Use trust scores (when available) or recency + relevance (when not).
 - **Curator and Researcher** behavior: Curator drafts wiki entries to `<paths.wiki>/`; Researcher routes wiki queries to the local layer.

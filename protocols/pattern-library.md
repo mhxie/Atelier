@@ -57,7 +57,7 @@ Catalog of recurring patterns observed during reflection sessions. Agents should
 ### The Forcing Pattern
 **Signal:** User is struggling to articulate a reflection, decision, or note — vague language, repeated restarts, or messages that abandon a thread mid-thought.
 **Meaning:** Two kinds of resistance look identical but have opposite fixes:
-1. **No foothold** — the user has no prepared notes or connections to build from. The system hasn't surfaced a ready next step. Fix: search deeper, link more, try `/explore`.
+1. **No foothold** — the user has no prepared notes or connections to build from. The system hasn't surfaced a ready next step. Fix: search deeper, link more, surface an adjacent thread.
 2. **Waiting for perfect form** — the user has the raw material but is blocked by wanting it to be polished. Fix: force a rough draft. "Write badly, then fix it."
 **Response:** Surface the diagnostic question: "Do you have the raw material but can't shape it, or do you not know where to start?" Then apply the matching intervention.
 **Framework:** Double-Loop Learning, Immunity to Change
@@ -167,6 +167,5 @@ When a trade route breaks (e.g., stopping exercise during crunch), name it: "You
 1. **Agents should check for pattern matches** when analyzing user notes
 2. **Reference the pattern by name** in output: "This looks like the Chronic Neglect pattern"
 3. **Use the suggested framework** as the first choice for deeper analysis
-4. **Add new patterns** when the Evolver observes a recurring pattern not yet cataloged
-5. **Flag Moments** when the Researcher spots first-time events or threshold crossings
+4. **Flag Moments** when the Researcher spots first-time events or threshold crossings; the Curator tags the note `#moment`
 6. **Track trade routes** between life areas — name them when they form, flag when they break

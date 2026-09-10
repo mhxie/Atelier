@@ -1,321 +1,179 @@
 ---
-description: Daily reflection procedure — coaching flow grounded in profile, recent notes, and open TODOs. Routed via /hi or invoked directly.
+description: Daily reflection with on-demand energy and open-exploration branches, grounded in notes and goals.
 ---
-# Daily Reflection
+# Reflection
 
-Run a reflection session grounded in your notes and goals.
+Help the user understand a day, an energy pattern, or an open thread. Select
+one branch; do not run all three or turn a focused conversation into a checklist.
 
-## Prerequisites
+## Select the branch
 
-1. Check if `profile/identity.md` exists. If not, tell the user: "No profile found. Run `/introspect` first to build your self-model." and stop.
-2. Read only the `Last built:` line from `profile/identity.md`. If older than 7 days, warn: "Your profile is stale (built on [date]). Consider running `/introspect` to refresh. Continuing with current profile." The bounded context projection below loads the declared profile content.
+Use the intent selected by `/hi`; a direct `/daily-reflection` defaults to
+`reflection` unless the user explicitly requests one of the topical branches.
 
-**Protocols used in this session:** `protocols/session-continuity.md` (connecting sessions), `protocols/epistemic-hygiene.md` (write-first nudge in warm-up, provenance tagging in write-back).
-
-## Context Loading
-
-1. Determine the **effective date**: if current local time is before 03:00,
-   use yesterday's date; otherwise use today's. This is the user's day
-   boundary.
-2. If `$hi` did not already provide a current `reflection` projection, build
-   the selected workflow context:
-
-   ```bash
-   uv run scripts/context_bundle.py \
-     --intent reflection \
-     --component profile \
-     --component session \
-     --component reflections \
-     --component daily \
-     --effective-date YYYY-MM-DD \
-     --byte-budget 49152 \
-     --format json
-   ```
-
-   Reuse an existing current projection instead of running the helper twice.
-   This is the only preload. It includes the intent-declared profile files,
-   bounded reflection excerpts, the latest session's continuity sections, and
-   the explicitly requested current-capture component. If an omission is
-   relevant, retrieve that source or section deliberately.
-3. For recent activity related to the active themes, run
-   `Bash: uv run scripts/semantic.py query "<theme>" --after "<7 days ago, YYYY-MM-DD>" --top 5 --context --format json`.
-   For structural follow-up such as exact strings, known tags, or dates, use
-   `Grep` against the relevant paths.
-
-4. **Load open TODO state (silent, orchestrator working memory):**
-   - `Bash: uv run scripts/todos.py list --json` — parse and hold the open list throughout the session. Source files (`source` field) are needed at session end for closure write-back.
-   - Don't display this output to the user. It's context for the orchestrator's decisions in Step 0 (digest), mid-conversation (topic matching), and Step 7 (resurface vs generate).
-   - **Fallback:** if the command exits non-zero, fails to parse as JSON, or returns `[]`, proceed with empty TODO context for this session and note "TODO context unavailable" under Anomalies in the wrap-up. The TODO Awareness rules below all degrade silently to no-op when the queue is empty.
-
-## Coaching Session
-
-Based on the loaded context, run an interactive reflection.
-
-**Cross-cutting rule: TODO Awareness.** The orchestrator holds the open TODO list loaded in Context Loading step 4 for the entire session.
-
-- **Mid-conversation soft surfacing (max 1 per session):** if the user mentions a topic that strongly matches an open TODO not yet mentioned this session, do **one** soft callback: "顺便,你 [date] 写过 [item] 还 open — 要不要本周 commit?" Confidence threshold is high (phrase or strong-token overlap); do not reach for tenuous matches. If user confirms commitment → mark for closure-pending or promotion at wrap-up. If user declines → do not surface again this session.
-- **No proactive list dump.** The TODO list is for *matching*, not narration. Never volunteer "btw here are N open TODOs" outside Step 0 digest or explicit user request.
-- **Closure write-back at wrap-up.** When the user explicitly confirms in conversation that a TODO is done or killed (Step 0 closure / stale prompt or mid-session), accumulate the closure into the **pending Scribe operations** list (see "Pre-Output: Raw Capture" below). Do NOT do direct `Edit` from the orchestrator: that bypasses the Scribe cost-partition contract and creates duplicate write paths. Two paths, two source types — both dispatched as Scribe `gtd_entry` operations at wrap-up:
-  - **Done path (user completed the item):**
-    - GTD-source (`source` under `<paths.gtd>/`): pending op `gtd_entry` with `operation_kind: toggle_done`, `target_file: <source>`, `line_no: <line>`, `expected_text: <bullet text from list --json>`.
-    - Reflection-source (`source` under `<paths.reflections>/`): pending op `gtd_entry` with `operation_kind: prefix_line`, `target_file: <source>`, `line_no: <line>`, `expected_text: <bullet text>`, `prefix: "DONE <effective-date>: "`.
-  - **Kill path (user abandons the item):**
-    - GTD-source: pending op `gtd_entry` with `operation_kind: toggle_killed`. `[~]` is the killed marker per `todos.py` STATE_MAP; preserves the audit distinction from `[x]` (done). Orchestrator passes the marker glyph as a parameter.
-    - Reflection-source: pending op `gtd_entry` with `operation_kind: prefix_line`, `prefix: "KILLED <effective-date>: "`. The scanner excludes both `DONE ` and `KILLED ` prefixes from open scans.
-  - **Line-drift guard:** the Scribe re-reads the source line at the recorded `line_no` at dispatch time and verifies `expected_text` matches. If it does not match (the user manually edited mid-session), the Scribe aborts that operation with a "line drifted" error; the orchestrator notes the skipped closure under Anomalies in the wrap-up. The orchestrator does NOT do this verification itself.
-  - Dispatch all accumulated closures at the Pre-Output stage, not mid-conversation — keeps the dialogue uninterrupted and routes mechanical writes through the cheap tier.
-
-### 0. Continuity Check (if not the first session)
-
-Run `Bash: uv run scripts/todos.py digest` to fetch:
-- Last reflection's open Next Actions
-- Closure candidates (TODOs mentioned with "已完成 X" / 等 closure language in recent daily notes)
-- Top stale items (≥30d, kill-or-promote prompts)
-
-Present **at most one item per category**, woven into the conversation per `protocols/session-continuity.md`. Do not dump the whole digest:
-
-- **Last Next Action callback** (most recent prior session's first item, if from a different day): "Last time, you intended to [action]. How did that go?" Accept any answer without judgment — missed actions are data points, not failures.
-- **Closure candidate** (if any): "I noticed you mentioned [X] in [date] — does that mean [TODO Y] is done?" If user confirms → add to closure-pending list (write-back at wrap-up).
-- **Stale prompt** (if any): "[Item] has been open ~Nd with no movement. Kill, or promote to GTD with a real deadline?" If user picks "kill" → add to kill-path closures (per the write-back rules above). If "promote" → ask for due date and area, then accumulate a pending Scribe op: `gtd_entry` with `operation_kind: add`, `target_file: <active GTD file>`, `text: <item>`, structured fields `due: <date>`, `area: <#tag>`. The active GTD file is the most recently modified `.md` file in `<paths.gtd>/` (`Bash: ls -t "$OV"/gtd/*.md | head -1`); resolve at accumulation time and pass as `target_file`. Dispatch happens at Pre-Output. Do NOT append directly from the orchestrator.
-
-Skip rules:
-- Previous session was **today**: skip the Next Action callback.
-- Previous session had no Next Action: skip that part.
-- No closure candidates: skip silently.
-- No stale items: skip silently.
-- First session ever: skip everything; introduce the system briefly.
-
-### 1. Warm-Up: Adaptive Opening
-Choose opening style based on what you find in the daily note:
-
-| What you find | Opening style |
-|---|---|
-| User wrote something specific today | Reflect it back: "I see you wrote about [X]..." |
-| User had a big day (many entries) | Acknowledge the energy: "Busy day — what stood out most?" |
-| User wrote very little or nothing | Go to yesterday or last session: "Last time we talked about [X]. How has that been sitting?" |
-| A contradiction with a past note | Lead with curiosity: "Something interesting — in [[Old Note]] you said X, but today..." |
-| A neglected goal is relevant | Gentle nudge: "I notice [[Goal]] hasn't come up recently..." |
-
-Don't ask a question yet in the warm-up — just ground the conversation.
-
-### 2. Reflective Questions (2-3, one at a time)
-Use the Challenger's question taxonomy for depth:
-
-| Question | Purpose |
-|----------|---------|
-| First question | **Mirror/Surface** — clarify what's on their mind |
-| Second question | **Structural** — examine an assumption or connect to a goal |
-| Third question | **Paradigmatic/Generative** — open new possibility or challenge a belief |
-
-Each question should:
-- Reference a specific note or goal by title in [[brackets]]
-- Connect current activity to longer-term patterns or goals
-- Be open-ended (not yes/no)
-- Match the user's language (Chinese for Chinese goals)
-
-### 3. Forgotten Connection (Semantic Discovery)
-Use `Bash: uv run scripts/semantic.py query "<concept>" --before "<3 months ago, YYYY-MM-DD>" --top 10 --context --format json` to find a semantically related note the user may have forgotten. Reframe and retry if thin.
-- Search with a concept from the conversation, not just keywords
-- Go back at least 3 months for genuine surprise
-- Present as a provocation, not a summary:
-  "This reminds me of something you wrote in [[old note title]] — '[brief quote]'. Do you see a connection?"
-
-### 4. Framework Application (Optional — delegate to Thinker)
-If a clear pattern emerged during the conversation, dispatch to the **Thinker** agent:
-- The Thinker selects and applies a framework from `frameworks/` using its decision tree
-- Present the Thinker's insight as an "orient" perspective: "Looking at this through [framework]..."
-- This is the Orient phase — contextualizing raw observations against mental models
-
-### 5. Support System Pulse (brief, every session)
-A lightweight check-in on the user's interpersonal interactions and support system health. Not a deep conversation topic; a structured micro-review logged for longitudinal tracking.
-
-**Data gathering:** Scan today's daily note for people mentioned and interaction types. If the user brought up relationships during the session, use that context too.
-
-**Ask one question** (rotate across sessions):
-- "今天和谁有过有意义的互动？是哪种类型的？"（mapping interactions）
-- "这周有没有在核心圈之外和谁有过连接？"（weak tie check）
-- "最近有没有某段关系让你觉得能量被消耗？"（boundary check）
-
-**Observe and log** (silently, for the output file):
-
-| Indicator | What to track |
-|-----------|---------------|
-| Interactions today | Names, relationship type, Dunbar layer (DL0-DL5, per PRM template) |
-| Support type exchanged | Emotional / Instrumental / Informational / Appraisal (House model) |
-| Diversity flags | All same domain? Any cross-industry/cross-generational? Any new connections this week? |
-| Concentration warning | Multiple support types pointing to same person? |
-| Energy direction | Net giver or receiver today? Any draining interactions? |
-
-**Offer one observation or suggestion** based on patterns:
-- If interactions are concentrated: note it without judgment, suggest one low-cost diversification action
-- If a new connection appeared: acknowledge it
-- If no meaningful interactions logged: flag gently as a data point, not a problem
-- Compare against prior sessions' logs if available for trend detection
-
-Keep this step under 2 minutes of conversation time. The value is in the longitudinal record, not the daily depth.
-
-### 6. Nutrition Review and Dining Pulse (brief, every session)
-
-#### Daily nutrition review
-
-Review the day's reported food using `profile/diet.md § Daily recap nutrition
-review`. Use the daily note and session context first. If meal details are absent,
-ask once: "今天三餐、零食和饮料大致吃了什么?" Do not infer missing meals.
-
-Return a brief `on track` / `mixed` / `heavy` verdict, the observed health flags,
-the rolling 7-day high-load gathering count when known, and exactly one practical
-adjustment for tomorrow. A restaurant meal whose observed flags are all ones that
-`profile/diet.md` says do not count toward the high-load limit is not a high-load gathering. Never recommend fasting, skipping meals,
-or punitive exercise as compensation.
-
-#### Dining Pulse
-
-Lightweight capture of dining experiences for personal preference learning + future `/dine` recommendations. Skip silently if user has nothing to share.
-
-**Trigger question** (one shot, only if dining didn't already come up in conversation):
-
-> "今天有没有去新餐厅打卡, 或重访旧餐厅? 如有, 体验如何?"
-
-**If user has dining to share, capture quickly** (do not deep-dive):
-- 餐厅名 (中/英文均可)
-- 评分 1-10 (8+ = top, 6-7 = good, 4-5 = ok, ≤3 = avoid)
-- 再去? (Y / N / Maybe) — ask only when `profile/diet.md` ("Capture tiers") still requires it; a settled restaurant takes a dash
-- **健康 flags** (per-visit, 依赖所点菜): use the taxonomy enumerated in `profile/diet.md` ("Full health-flag taxonomy" section). Multiple flags joined by `·`, blank = unobserved. Restaurant ordering 是健康管理重要部分, 不能省
-- 人数 / 总额 (如可得); 人均由总额 ÷ 人数计算, 不凭同行名单或价位推断金额
-- 1-2 句话: 必点菜, 服务/ambiance, 同行
-- 推断 from context (else 1-line confirm): City / 类型 / booking platform / payment benefit used
-
-**Route the capture:**
-- If the user explicitly associates the visit with a named trip or a same-session explicit `current trip → exact existing trip-note path/title` mapping, route it directly to `/dine` Intent C and its confirmation gate. Do not accumulate a `dining_row` Scribe operation.
-- Otherwise, accumulate a pending `dining_row` Scribe operation with `target_file` resolved from `profile/diet.md § Catalog files`, structured row fields (date, restaurant, city, type, score, 再去, health flags, party size, total, per-person, platform, credit), and `raw_content` for the 必点·备注 free-text column. Required capture fields follow the tier table in `profile/diet.md` ("Capture tiers"); dash placeholder only for missing data the user can't recall. Dispatch happens at Pre-Output. The Scribe reads the file's schema header at dispatch time and formats the row to match exactly.
-
-**Cross-doc sync triggers** (silent unless flagged for user):
-- If 评分 ≥ 8 AND 再去 = Y AND restaurant NOT in the regional catalog rotation → flag user: "Add to rotation?"
-- If Credit maps to a benefit cycle configured in the private profile → also flag: "Update benefits tracker cycle subtotal?"
-- If restaurant on the credit-perks catalog → mark ✅ + date in Cycle Tracking
-
-**If user has nothing to share**: respond "记下了, 没新餐厅" and move to Close. Don't push.
-
-**Output to reflection file** (new "Dining" section, see Output template below).
-
-Keep this step under 60s of conversation time. Goal is consistent capture, not depth.
-
-### 7. Close with Concrete Prompt
-
-One specific, actionable next step tied to a goal. **Resurface before generating new** — the open queue is the first place to look:
-
-1. Scan the loaded open-TODO list (Context Loading step 4) for items relevant to what was discussed this session — matching topic, area, or framework.
-2. **If 1+ items match**: surface the most relevant as the next action. "Already on your list: [item] ([source]:[line]). Make it this week's commitment?" No need to invent.
-3. **If no match AND fewer than 5 active items (P0/P1) in the queue**: generate a new concrete next action. The new action goes in the reflection file's `## Next Action` section as a single bullet line (`- <action>` or `1. <action>`). Plain prose under that header is invisible to `todos.py` and will not be resurfaced next session.
-4. **If no match AND queue is bloated (≥5 active P0/P1)**: do not add. Say "Open queue is already at [N] active items. Today doesn't need to add — pick one from the list to commit to this week instead?" Surface 2-3 candidates, let user choose.
-
-Not generic advice — something the user can do today or this week. Match user's language (Chinese for Chinese topics).
-
-## Pre-Output: Raw Capture (Cloud-Native Mode)
-
-Before writing the reflection file, dispatch the Scribe agent for every accumulated capture operation from this session. Under the cloud-native architecture, chat is the user's authoring surface; the orchestrator must record raw input rather than only synthesizing it into the reflection. Do this work via the Scribe, not yourself: transcribing chat input on deep-cognition voices is a known cost antipattern.
-
-The orchestrator accumulates pending Scribe operations during the session (it does NOT write directly). Sources of accumulated ops:
-
-| Source step | Scribe operation | When to accumulate |
+| Intent | Focus | Result suffix and session-log type |
 |---|---|---|
-| Step 0 closure write-back (TODO Awareness rule) | `gtd_entry` (`toggle_done` / `toggle_killed` / `prefix_line`) | User confirmed a TODO done or killed (GTD-source toggle; reflection-source prefix) |
-| Step 0 stale prompt → promote | `gtd_entry` (`add`) | User picked "promote" with due date and area |
-| Step 6 Dining Pulse, ordinary meal | `dining_row` | User shared a restaurant visit without an explicit trip association |
-| Step 6 Dining Pulse, explicitly trip-associated meal | `/dine` Intent C | Route immediately to Intent C's confirmation gate; do not accumulate a Scribe operation |
-| Any step where user dictates a daily-note-style narrative for a date | `daily_note` | Narrative covers events for a date whose daily-note file is missing or lacks the new content |
-| Any step where a person is mentioned with bio context AND no person note exists | `people_stub` | Verify with `uv run scripts/people.py "<name>"` before adding; only accumulate if no match returned |
-| User explicitly says "save this" / "记一下" with no typed slot fit | `generic` | Orchestrator picks a `<paths.wip>/` path and confirms with user before adding to pending list |
+| `reflection` | A named day; recent goals and open actions | `reflection` |
+| `energy-audit` | Physical, mental, emotional, and social energy over 14 days | `energy-audit` |
+| `explore` | Forgotten threads, cross-domain connections, changes in thinking | `exploration` |
 
-**Skip condition (per op):** the corresponding file already captures the content, or the user provided only reflection-mode input (questions, feelings, abstract discussion) for that surface. Do not invent content.
-
-**Dispatch all accumulated Scribe ops at this stage.** For each pending op, call the Scribe with the operation-specific fields documented in `.claude/agents/scribe.md` ("Operations" section). Do NOT pre-rewrite user text before passing it; the Scribe applies verbatim + light-format rules. Trip-associated Dining Pulse captures have already routed to `/dine` Intent C and are not pending Scribe work.
-
-Where pending ops target independent files, dispatch the Scribe calls in parallel (single message, multiple `Agent` tool calls) for latency.
-
-If the Scribe returns a clarification request (missing schema reference, line drift on a closure, ambiguous target file), resolve it: ask the user if needed and re-dispatch, or note the skipped op under Anomalies in the reflection's Session Meta. Do not silently fall back to direct orchestrator writes.
-
-After all Scribes return, proceed to Output.
-
-## Output
-
-After the interactive session, write a reflection file:
-
-**File:** `<paths.reflections>/YYYY-MM-DD-reflection.md`
-```markdown
-# Reflection — YYYY-MM-DD
+Energy and exploration are available through `/hi energy audit` and
+`/hi explore`, or the same choices in its menu. Keep their distinct intent
+names when loading context; sharing this procedure does not make them daily reviews.
 
 ## Context
-[Brief summary of what was discussed, with note citations]
 
-## Key Insights
-[Bullet points of insights from the conversation]
+1. Determine the effective date: before 03:00 local, use yesterday. Reuse the
+   selected intent's current Repomix artifact; otherwise run
+   `uv run scripts/context_bundle.py --intent <intent> --effective-date YYYY-MM-DD`.
+   Only daily reflection adds its named daily note with
+   `--source daily-notes/YYYY/MM/YYYY-MM-DD.md`. Follow the helper's missing-profile
+   refusal and selected-profile staleness warnings; do not preload other profiles.
+2. Use the packed continuity and bounded QMD candidates, then read the source
+   sections needed for the chosen topic. Missing evidence stays unknown.
+   `protocols/session-continuity.md` owns continuity; load
+   `protocols/epistemic-hygiene.md` for the write-first nudge and attribution rules.
+3. For daily reflection, or an explicit TODO update in either topical branch,
+   run `uv run scripts/todos.py list --json`. Hold source paths, line numbers,
+   and text for matching and guarded closure. An empty queue is a no-op;
+   unavailable or malformed output is an anomaly, not a reason to block discussion.
 
-## Connections Made
-[Notes or themes that were connected during the session]
+## Daily reflection
 
-## Next Action
-[The concrete prompt or action suggested]
+Run `uv run scripts/todos.py digest` for prior Next Actions, possible closures,
+and stale items. Surface at most one relevant item per category, not the list:
 
-## Notes Referenced
-[List of all notes cited during this session, as [[Note Title]] links]
+- Ask about the prior action only if its session was a different day.
+- Confirm a possible completion before recording it. Missed actions are data,
+  not failures; absence of a mention is not completion or abandonment.
+- For a stale item, offer keep, kill, or promotion with a real deadline and area.
+  Accumulate confirmed changes for Capture below; do not write mid-conversation.
 
-## Support System Log
-| Person | Dunbar Layer | Support Type | Domain | Direction |
-|--------|-------------|-------------|--------|-----------|
-| [Name] | DL0-DL5 | emotional/instrumental/informational/appraisal | work/family/friend/community | gave/received/mutual |
+Ground the opening in today's note, a previous thread, or a relevant goal.
+Ask a few questions one at a time: first clarify the user's concern, then
+examine an assumption or goal, then open a useful alternative. Cite the actual
+note behind a callback. Do not require three questions when one has answered the need.
 
-- Diversity score: [how many distinct domains represented today]
-- Concentration flag: [any person carrying 3+ support types?]
-- New connection this week: yes / no
-- Observation: [one-line pattern note for longitudinal tracking]
+Look for one forgotten connection using a conversation concept and an ISO date
+at least three months before the effective day:
+`uv run scripts/semantic.py query "<concept>" --before YYYY-MM-DD --top 10 --format json`.
+Reframe if thin, read a promising source, and offer the connection as a question.
+An empty search is not a license to invent a connection. If a clear pattern would
+benefit from a framework, optionally dispatch Thinker; do not make it a routine step.
 
-## Nutrition
-- Verdict: on track / mixed / heavy
-- Observed flags: [flags from profile/diet.md, or unobserved]
-- Rolling 7-day high-load gatherings: [N, or unknown]
-- Tomorrow's adjustment: [exactly one practical action]
+During discussion, make at most one additional high-confidence callback to a
+matching open TODO. Do not resurface it after the user declines.
 
-## Dining
-| Restaurant | Score (/10) | 再去 | 健康 flags | 人数 | 总额 | 人均 | 必点·备注 |
-|---|---|---|---|---:|---:|---:|---|
-| [Name] | [1-10] | Y/N/Maybe | [flag(s) per profile/diet.md taxonomy] | [N/—] | [$N/—] | [$N/—] | [必点 + 1 line] |
+Close by resurfacing a relevant existing action before creating a new one.
+If none fits and fewer than five P0/P1 items are active, suggest one concrete
+next action. At five or more, help choose from the queue instead of adding work.
+Use a bullet under `## Next Action`; prose there is invisible to `todos.py`.
 
-- Captured to: the meal-history tracker (count of new rows appended)
-- Cross-doc updates triggered: [regional rotation add? benefits tracker update? benefit-program ✓?]
-- 健康 trend: [if multiple recent entries flag the heavy-load flags from `profile/diet.md` → surface as health observation in Next Action]
-- (omit table entirely if no dining captured)
+## Energy branch
 
-## Session Meta
-- User engagement: high / medium / low
-- Questions that landed: [which questions got thoughtful responses]
-- Surprise factor: yes / no [did we surface something genuinely new?]
-```
+Search the last 14 days with
+`uv run scripts/semantic.py query "physical mental emotional social energy patterns" --path daily-notes --after YYYY-MM-DD --top 10 --format json`.
+Read 3 to 5 relevant source sections, or fewer when evidence is sparse; use
+targeted follow-up searches for an unresolved pattern rather than reading every day.
 
-## Session Log
+Assess four dimensions from reported evidence:
 
-After writing the reflection file, emit a session log. Two steps:
+- Physical: sleep, movement, nutrition, physical complaints.
+- Mental: focus, context-switching, learning, creative versus routine work.
+- Emotional: stress, joy, conflicts, energizing or draining interactions.
+- Social: connection, community, isolation, and the user's social battery.
 
-**Step 1: Create skeleton.**
-```
-Bash: uv run scripts/session_log.py --type reflection --duration <minutes>
-```
-The script prints the file path (e.g., `<paths.sessions>/2026-04-11-reflection.md`). It handles the late-sleep date rule and collision auto-increment.
+Summarize each as sources, drains, and net trend, with unknowns explicit.
+Ask which depleted dimension matters now, what drain could change, and what
+source deserves protection. Tie any adjustment to the user's constraints;
+do not infer health facts or force a decision. Retain this four-dimensional
+view in the result rather than substituting a generic daily reflection.
 
-**Step 2: Fill the skeleton.**
-Use `Edit` to populate each section of the skeleton from data you accumulated during the session:
+## Exploration branch
 
-- **Agents Dispatched:** One row per agent you dispatched. Include agent name, task summary, success/failure, and approximate turns.
-- **Search Log:** Every `semantic.py query` and notable `Grep` you or agents issued. Mark whether results were useful (yes/no).
-- **Questions & Engagement:** Each question you asked the user. Note depth level (surface/structural/paradigmatic) and whether it landed (got substantive response).
-- **Frameworks Applied:** Any framework the Thinker applied. Include fit score if available.
-- **Continuity:** Which previous session you referenced (from step 0), and the seed/next-action from step 5.
-- **Decisions & Branches:** Non-obvious routing decisions (e.g., "skipped framework; user in a rush").
-- **Anomalies:** empty searches, user course corrections, degraded mode (e.g., TODO context unavailable).
-- **Harness Assumptions Exercised:** Any assumption from `protocols/harness-assumptions.md` that was load-bearing (e.g., "Profile stale >7d warning triggered").
+Start semantically, not with synonym grep. Try a few distinct routes: a recent
+theme, an underexplored tag, a related note from 6 to 12 months ago, and a
+cross-domain connection. Use bounded `semantic.py query` results; exact tags,
+dates, and paths can narrow a named thread after discovery.
 
-If a section has no data, leave the table headers but add no rows. Do not invent data. If the write fails, warn and continue; session logs never block a session.
+Read the selected sources and offer up to four grounded sparks: a forgotten
+thread, an unexpected connection, a change in belief, or an evidence gap.
+Not writing about something does not establish avoidance. Let the user choose
+the thread, retrieve more only for that thread, and ask deepening questions.
+Use a framework only when it helps. Preserve useful open questions without
+forcing an action or inventing surprise.
 
-## Wrap Up
+## Relevant life context
 
-The reflection file in `<paths.reflections>/` is the durable session output. No write-back to daily notes — the user's daily note is their capture stream, read-only from the system's perspective. Tell the user the reflection has been saved and where to find it.
+Relationship, food, dining, and interest check-ins run only when the user brings
+them up or current evidence makes them relevant to the chosen topic. Do not
+ask every category, backfill unrelated life areas, or generate empty tracking rows.
+
+- **Relationships:** ask one useful question and note observed interactions,
+  support exchanged, or a concentration/drain pattern. Distinguish missing data
+  from isolation; use known relationship classifications, never guessed ones.
+- **Nutrition:** when relevant, use `profile/diet.md` → Daily recap nutrition
+  review. If essential meal details are missing, ask once; never infer meals.
+  Give the brief verdict, observed flags, known rolling 7-day high-load count,
+  and one practical adjustment. Apply that profile's exclusions when counting
+  high-load gatherings. Never recommend fasting, skipped meals, or punitive
+  exercise as compensation.
+- **Dining:** use `profile/diet.md` → Capture tiers, Full health-flag taxonomy,
+  and Catalog files. Preserve required fields and the actual visit date; compute
+  per-person cost only from sourced party size and total. Never guess amounts.
+  An explicitly trip-associated meal follows `/dine` Intent C and
+  `protocols/dining-capture.md`, including its confirmation gate, not a Scribe row.
+  For an ordinary visit, queue `dining_row` with the sourced fields and raw remarks;
+  Scribe reads the target schema. Offer relevant rotation or benefit-tracker updates
+  separately; recording a visit does not authorize those additional writes.
+- **Interests:** for consumption, a changed interest, or an upcoming event the
+  user discusses, follow `protocols/interest-discovery.md`. Record only supported
+  events; silence is not a decline. Do not run an interest questionnaire or its
+  ingestion solely because a reflection happened.
+
+## Capture
+
+Before saving the result, finish any authorized raw capture. Use
+`protocols/intent-capture.md` and the selected operation in
+`.claude/agents/scribe.md`; do not turn analytical questions or feelings into
+daily-note facts. Skip content already recorded. Dispatch independent target
+files in parallel; do not substitute a parent write for a refused Scribe operation.
+
+For a confirmed TODO change, pass its exact source, `line_no`, `expected_text`,
+and marker glyphs from `todos.py`'s `STATE_MAP` (done `[x]`, killed `[~]`):
+
+| Source | Done | Killed |
+|---|---|---|
+| GTD | `gtd_entry`, `toggle_done` | `gtd_entry`, `toggle_killed` |
+| Reflection | `gtd_entry`, `prefix_line`, `DONE <effective-date>: ` | `gtd_entry`, `prefix_line`, `KILLED <effective-date>: ` |
+
+Scribe re-reads the line and refuses drift. For promotion, obtain a due date
+and area, resolve the most recently modified Markdown file directly under
+`<paths.gtd>/`, then queue `gtd_entry` with `add`; ask if no target exists.
+Record refusals or skipped closures in the compact log; never silently retry
+against another line or treat a failed capture as completed.
+
+Dictated daily narratives, ordinary dining rows, verified missing people stubs,
+and explicitly requested generic captures retain their typed Scribe routes.
+Check `scripts/people.py "<name>"` before proposing a missing-person stub.
+Trip-associated dining is handled by Intent C, not pending Scribe work.
+Resolve ambiguous targets with the user before writing.
+
+## Result and continuity
+
+Draft `<paths.reflections>/YYYY-MM-DD-<result suffix>.md` for the selected branch.
+Keep the useful evidence, insights, source links, and an agreed next action or
+open question. Add the energy matrix or exploration sparks when that is the
+branch; add life-context findings only when discussed. Do not require empty
+sections, engagement scores, or a second copy of captured tracker rows.
+
+Present the draft and obtain approval before saving it. Daily notes remain
+user-authored and read-only except authorized verbatim Scribe capture.
+Report the actual save/capture outcome and its location.
+
+Use `uv run scripts/session_log.py --type <session-log type> --duration <minutes>`
+and fill the compact format in `protocols/session-log.md`: Continuity, Anomalies,
+and Operations. Keep the continuation seed even if the result note was not saved;
+record that refusal as an operation outcome, not as an approved note.
+Logs do not contain a substitute reflection or full user narrative. A logging
+failure is disclosed but never blocks the conversation.

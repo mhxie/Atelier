@@ -1,35 +1,9 @@
 #!/usr/bin/env python3
-"""
-people.py: Look up person notes by name fragment.
+"""Look up person notes without whitespace-sensitive shell pipelines.
 
-Why this exists: $OV/people/ contains many files named with
-embedded spaces (e.g., "Pinyin Pinyin.md"). Ad-hoc `find ... | xargs grep`
-silently splits filenames on whitespace and returns false negatives, so
-"the vault has no note for X" assertions made through that pipeline are
-unreliable. This script is the canonical lookup tool: it walks the
-people directory directly with pathlib (no xargs), matches the query
-against the filename stem, and optionally against a body field whose
-label the user configures via env var.
-
-Body matching is opt-in. The person-note schema (which field holds the
-non-English name) is user-private and not committed. Set
-`ATELIER_PEOPLE_NAME_FIELD` to the literal label that precedes the
-non-English name in the user's notes (e.g., a label like `Name (lang)`)
-to enable body matching. Without it, only filename matching runs and
-queries written in non-English script will simply not match unless the
-filename itself contains them.
-
-Usage:
-    scripts/people.py "fragment"            # match by filename stem
-    scripts/people.py "fragment" --json     # JSON output
-
-    # Enable body match for non-English queries:
-    ATELIER_PEOPLE_NAME_FIELD='<label>' scripts/people.py "fragment"
-
-Exit codes:
-    0  one or more matches printed
-    1  no matches found
-    2  invalid args or setup error
+Filename matching is always available. ``ATELIER_PEOPLE_NAME_FIELD`` may name
+a private body-field label for opt-in non-English matching. Exit status
+distinguishes matches, no matches, and invalid setup.
 """
 from __future__ import annotations
 
@@ -38,6 +12,7 @@ import json
 import os
 import re
 import sys
+from itertools import islice
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -69,7 +44,8 @@ def scan(query: str) -> list[dict]:
             match_src = "filename"
         elif _BODY_NAME_RE is not None:
             try:
-                head = path.read_text(encoding="utf-8").splitlines()[:HEAD_LINES]
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    head = list(islice(handle, HEAD_LINES))
             except OSError:
                 continue
             for line in head:

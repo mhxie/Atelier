@@ -103,13 +103,14 @@ def _replace_durably(path: Path, content: str) -> None:
         raise
 
 
-def _insert_at_anchor(section: str, anchor: str, position: str, reference: str) -> str | None:
+def _insert_at_anchor(section: str, anchor: str, position: str, reference: str, ending: str) -> str | None:
     lines = section.splitlines(keepends=True)
     matches = [index for index, line in enumerate(lines) if line.rstrip("\r\n") == anchor]
     if len(matches) != 1:
         return None
     insert_at = matches[0] if position == "before" else matches[0] + 1
-    ending = "\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+    if insert_at and not lines[insert_at - 1].endswith(("\r", "\n")):
+        lines[insert_at - 1] += ending
     lines.insert(insert_at, f"{reference}{ending}")
     return "".join(lines)
 
@@ -135,18 +136,20 @@ def insert_trip_reference(
             return {"status": "error", "reason": "anchor must be one line"}
 
         with _advisory_lock(lock_file_for(resolved)):
-            text = resolved.read_text(encoding="utf-8")
+            with resolved.open(encoding="utf-8", newline="") as handle:
+                text = handle.read()
             bounds = _section_bounds(text, section_heading)
             if bounds is None:
                 return {"status": "drift", "reason": "section missing"}
             start, end, _ = bounds
             section = text[start:end]
-            if reference in section:
+            if reference in section.splitlines():
                 return {"status": "already_present"}
             actual_hash = hashlib.sha256(section.encode("utf-8")).hexdigest()
             if actual_hash != expected_section_sha256:
                 return {"status": "drift", "reason": "section hash changed"}
-            updated_section = _insert_at_anchor(section, anchor, position, reference)
+            ending = "\r\n" if "\r\n" in text else "\n"
+            updated_section = _insert_at_anchor(section, anchor, position, reference, ending)
             if updated_section is None:
                 return {"status": "anchor_missing"}
             _replace_durably(resolved, f"{text[:start]}{updated_section}{text[end:]}")

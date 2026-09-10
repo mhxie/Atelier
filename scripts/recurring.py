@@ -1,40 +1,10 @@
 #!/usr/bin/env python3
-"""recurring.py: Manage recurring obligations (re-emerging tasks).
+"""Manage recurring obligations in ``$OV/gtd/recurring.md``.
 
-Recurring tasks are evergreen obligations that complete and re-emerge on a
-frequency (洗牙 every 6mo, HVAC filter every 3mo, annual physical, etc.),
-distinct from one-shot GTD tasks which terminate at `[x]`.
-
-Source of truth: `$OV/gtd/recurring.md`.
-
-Schema (one item per line, no `[ ]` checkbox so todos.py scan ignores it):
-
-    - <slug>  every:<N><unit>  last-done:<YYYY-MM-DD>  area:#<tag>
-        - optional sub-bullet notes (vendor, model, link, etc.)
-
-Section headers (`## Health`, `## Home`, etc.) group items visually; area
-tag still wins over section for filtering.
-
-Units: d (days), w (weeks, 7d), mo (months, ~30d), y (years, ~365d).
-Approximation is intentional: recurring cadences don't need exact calendar
-arithmetic. Use literal `Nd` for precision.
-
-Computed states (not stored):
-    overdue       today > last-done + every
-    due-soon      0 <= (last-done + every) - today <= 7
-    satisfied     (last-done + every) - today > 7
-
-Subcommands:
-    list                        show overdue + due-soon, grouped by section
-    list --all                  also show satisfied
-    list --area #health         filter
-    list --json                 structured output
-    done <slug>                 update last-done to today
-    done <slug> <date>          update last-done to a specific date
-    next <slug>                 print computed next-due date
-
-Exit codes: 0 always, even when items are overdue. The cue layer in
-`cues.py` is the surfacing mechanism, not the exit code.
+Rows declare ``every``, ``last-done``, and an optional area without a checkbox,
+so the one-shot TODO scanner ignores them. Day, week, month, and year units use
+fixed day counts by design. Overdue state is reportable rather than an error;
+the cue layer decides when to surface it.
 """
 
 from __future__ import annotations
@@ -48,9 +18,9 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, tier  # type: ignore[import-not-found]  # noqa: E402
 
-RECURRING_FILE_RELATIVE = "recurring.md"  # under gtd/
+RECURRING_FILE_RELATIVE = "recurring.md"
 
 ITEM_RE = re.compile(
     r"^- ([a-z0-9][\w-]*)"
@@ -68,8 +38,8 @@ UNIT_DAYS = {"d": 1, "w": 7, "mo": 30, "y": 365}
 class Recurring:
     slug: str
     every_n: int
-    every_unit: str  # "d" | "w" | "mo" | "y"
-    last_done: str  # YYYY-MM-DD
+    every_unit: str
+    last_done: str
     area: str | None
     section: str | None
     line: int
@@ -102,7 +72,7 @@ def recurring_path() -> Path:
     return tier("gtd") / RECURRING_FILE_RELATIVE
 
 
-def parse_file() -> list[Recurring]:
+def parse_file(errors: list[str] | None = None) -> list[Recurring]:
     path = recurring_path()
     if not path.is_file():
         return []
@@ -117,17 +87,19 @@ def parse_file() -> list[Recurring]:
         if not m:
             continue
         slug, n, unit, last_done, area = m.groups()
-        items.append(
-            Recurring(
-                slug=slug,
-                every_n=int(n),
-                every_unit=unit,
-                last_done=last_done,
-                area=area,
-                section=current_section,
-                line=i,
-            )
-        )
+        try:
+            item = Recurring(slug, int(n), unit, last_done, area, current_section, i)
+            if item.every_n < 1:
+                raise ValueError("interval must be positive")
+            item.next_due()
+        except (ValueError, OverflowError) as exc:
+            warning = f"invalid recurring row {i} ({slug}): {exc}"
+            if errors is None:
+                print(warning, file=sys.stderr)
+            else:
+                errors.append(warning)
+            continue
+        items.append(item)
     return items
 
 
@@ -148,6 +120,12 @@ def update_last_done(slug: str, new_date: str) -> bool:
         m = ITEM_RE.match(line)
         if not m or m.group(1) != slug:
             continue
+        completed = date.fromisoformat(new_date)
+        interval = int(m.group(2)) * UNIT_DAYS[m.group(3)]
+        if interval < 1:
+            raise ValueError("interval must be positive")
+        completed + timedelta(days=interval)
+        new_date = completed.isoformat()
         lines[i] = re.sub(
             r"last-done:\d{4}-\d{2}-\d{2}",
             f"last-done:{new_date}",
@@ -157,11 +135,8 @@ def update_last_done(slug: str, new_date: str) -> bool:
         changed = True
         break
     if changed:
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        atomic_write(path, "\n".join(lines) + "\n")
     return changed
-
-
-# --- subcommands ----------------------------------------------------------
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -217,21 +192,20 @@ def cmd_list(args: argparse.Namespace) -> int:
 def cmd_done(args: argparse.Namespace) -> int:
     new_date = args.date or date.today().isoformat()
     try:
-        date.fromisoformat(new_date)
+        new_date = date.fromisoformat(new_date).isoformat()
     except ValueError:
         print(f"ERROR: invalid date '{new_date}', expected YYYY-MM-DD", file=sys.stderr)
         return 2
-    item = find_by_slug(args.slug)
-    if not item:
-        print(f"ERROR: no recurring item with slug '{args.slug}'", file=sys.stderr)
+    try:
+        changed = update_last_done(args.slug, new_date)
+    except (ValueError, OverflowError) as exc:
+        print(f"ERROR: invalid completion or next due date: {exc}", file=sys.stderr)
         return 2
-    if not update_last_done(args.slug, new_date):
-        print(f"ERROR: failed to update '{args.slug}'", file=sys.stderr)
+    item = find_by_slug(args.slug) if changed else None
+    if item is None:
+        print(f"ERROR: no recurring item with slug '{args.slug}' after completion", file=sys.stderr)
         return 2
-    updated = find_by_slug(args.slug)
-    assert updated is not None
-    next_due = updated.next_due().isoformat()
-    print(f"✓ {args.slug}  last-done:{new_date}  next:{next_due}")
+    print(f"✓ {args.slug}  last-done:{new_date}  next:{item.next_due().isoformat()}")
     return 0
 
 
@@ -243,26 +217,6 @@ def cmd_next(args: argparse.Namespace) -> int:
     today = date.today()
     d = item.days_until_due(today)
     print(f"{args.slug}: next due {item.next_due().isoformat()} ({d:+d}d)")
-    return 0
-
-
-def cmd_overdue_count(_args: argparse.Namespace) -> int:
-    """Internal: for cue integration. Prints count of overdue + due-soon items."""
-    today = date.today()
-    items = parse_file()
-    overdue = [i for i in items if i.status(today) == "overdue"]
-    due_soon = [i for i in items if i.status(today) == "due-soon"]
-    payload = {
-        "overdue": [
-            {"slug": i.slug, "days_overdue": -i.days_until_due(today)}
-            for i in sorted(overdue, key=lambda x: x.days_until_due(today))
-        ],
-        "due_soon": [
-            {"slug": i.slug, "days_until_due": i.days_until_due(today)}
-            for i in sorted(due_soon, key=lambda x: x.days_until_due(today))
-        ],
-    }
-    print(json.dumps(payload, ensure_ascii=False))
     return 0
 
 
@@ -287,11 +241,6 @@ def main(argv: list[str] | None = None) -> int:
     p_next = sub.add_parser("next", help="Print next-due date for a slug.")
     p_next.add_argument("slug")
     p_next.set_defaults(func=cmd_next)
-
-    p_cue = sub.add_parser(
-        "overdue-json", help="Internal: emit overdue + due-soon as JSON (for cues.py)."
-    )
-    p_cue.set_defaults(func=cmd_overdue_count)
 
     args = parser.parse_args(argv)
     return args.func(args)

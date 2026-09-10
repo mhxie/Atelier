@@ -1,5 +1,0 @@
-# Copy to `~/.config/atelier/session-replay.toml` to persist replay capture for
-# Codex and Claude Code hooks across Atelier checkouts on this machine.
-
-[session_replay]
-enabled = false

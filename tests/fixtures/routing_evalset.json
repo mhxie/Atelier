@@ -25,6 +25,7 @@
     {"input": "earnings report for the quarter dropped", "expected": "finance-analysis"},
     {"input": "watch this podcast episode with me", "expected": "talk"},
     {"input": "tell me something interesting about typography", "expected": "general"},
-    {"input": "帮我查一下这个概念", "expected": "general"}
+    {"input": "帮我查一下这个概念", "expected": "general"},
+    {"input": "prepare the routine digest report", "expected": "digest"}
   ]
 }

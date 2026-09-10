@@ -1,20 +1,5 @@
 #!/usr/bin/env python3
-"""
-session_log.py: Create a session log skeleton from CLI args.
-
-Called by the orchestrator at session end. Generates the markdown file
-with header fields pre-filled. The orchestrator appends section content
-via the Write or Edit tool after this script creates the skeleton.
-
-Usage:
-    scripts/session_log.py --type reflection --duration 25
-    scripts/session_log.py --type decision --duration 40 --model <model-id>
-
-Creates: $OV/sessions/YYYY-MM-DD-<type>.md (auto-increments on collision).
-Prints the created file path to stdout for the orchestrator to use.
-
-Exit code: 0 on success, 1 on error.
-"""
+"""Create a uniquely named session-log skeleton for the orchestrator to fill."""
 
 from __future__ import annotations
 
@@ -40,11 +25,10 @@ VALID_TYPES = {
     "introspect",
     "meeting",
     "deep-dive",
-    "system-review",
     "prm",
 }
 
-SKELETON = """\
+HEADER = """\
 ---session-log---
 session_id: {session_id}
 date: {date}
@@ -53,6 +37,9 @@ duration_estimate: {duration}
 model: {model}
 ---end-session-log-header---
 
+"""
+
+FULL_SECTIONS = """\
 ## Agents Dispatched
 | Agent | Task | Result | Turns Used |
 |-------|------|--------|------------|
@@ -85,6 +72,26 @@ model: {model}
 ## Harness Assumptions Exercised
 """
 
+COMPACT_SECTIONS = """\
+## Continuity
+- (none)
+
+## Anomalies
+- (none)
+
+## Operations
+- (none)
+"""
+
+COMPACT_TYPES = {
+    "reflection",
+    "weekly",
+    "review",
+    "decision",
+    "energy-audit",
+    "exploration",
+}
+
 
 def _write_next_log(
     session_type: str,
@@ -99,13 +106,13 @@ def _write_next_log(
     while True:
         session_id = base_id if sequence == 1 else f"{base_id}-{sequence}"
         path = SESSIONS_DIR / f"{session_id}.md"
-        content = SKELETON.format(
+        content = HEADER.format(
             session_id=session_id,
             date=today.isoformat(),
             session_type=session_type,
             duration=duration,
             model=model,
-        )
+        ) + (COMPACT_SECTIONS if session_type in COMPACT_TYPES else FULL_SECTIONS)
         try:
             with path.open("x", encoding="utf-8") as handle:
                 handle.write(content)

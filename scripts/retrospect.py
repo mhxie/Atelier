@@ -1,31 +1,9 @@
 #!/usr/bin/env python3
-"""retrospect.py: Surface something old from the vault, on purpose and at random.
+"""Surface old vault notes through a recency-biased random draw.
 
-Why this exists: the vault accumulates faster than it is revisited. Notes from
-six months ago are functionally deleted, not because they are wrong but because
-nothing ever puts them in front of anyone again. Search does not fix this: you
-have to already suspect a thing exists to search for it.
-
-So this samples. It is deliberately not semantic search. Relevance ranking would
-return what you are already thinking about, which is the opposite of the point;
-the value of a random retrospective is precisely that it is not responsive to
-today's context. What ranking there is only biases *away* from the recent, so
-the draw skews toward material old enough to have been forgotten.
-
-Stdlib-only, because it runs inside the routine sandbox where the semantic index
-(torch, lancedb) is unavailable and `uv` cannot write its cache.
-
-Repetition is the failure mode that would kill this fastest: the same three
-notes every morning teaches the reader to skip the section. A small state file
-records what has been drawn and excludes it for a cooldown window.
-
-Usage:
-    uv run scripts/retrospect.py --json
-    uv run scripts/retrospect.py --count 2 --json --out picks.json
-    uv run scripts/retrospect.py --no-record        # do not consume a draw
-
-Exit codes: 0 always, including an empty draw. An empty vault is a reportable
-state, not a failure.
+This intentionally avoids relevance ranking and heavy semantic dependencies.
+A bounded state file enforces a cooldown so repetition does not dominate the
+feed. Empty draws are reportable rather than errors.
 """
 
 from __future__ import annotations
@@ -42,7 +20,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _paths import PathsError, atomic_write, fmt, vault_root  # noqa: E402
+from _paths import PathsError, atomic_write, date_in_text, fmt, vault_root  # noqa: E402
 
 STATE_RELPATH = "_meta/retrospect_state.json"
 VERDICTS_RELPATH = "_meta/retrospect_verdicts.json"
@@ -66,7 +44,6 @@ COOLDOWN_DAYS = 120
 EXCERPT_CHARS = 700
 MAX_STATE_ENTRIES = 400
 
-_DATE_IN_NAME = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 _H1 = re.compile(r"^#\s+(.+?)\s*$", re.MULTILINE)
 _ANY_HEADING = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 _FRONTMATTER = re.compile(r"^---\n.*?\n---\n?", re.DOTALL)
@@ -140,7 +117,13 @@ def load_state(ov: Path) -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {str(k): str(v) for k, v in data.items() if isinstance(v, str)}
+    state = {}
+    for key, value in data.items():
+        try:
+            state[str(key)] = date.fromisoformat(value).isoformat()
+        except (TypeError, ValueError):
+            print(f"warning: ignoring invalid retrospect cooldown for {key!r}", file=sys.stderr)
+    return state
 
 
 def save_state(ov: Path, state: dict[str, str]) -> None:
@@ -163,13 +146,9 @@ def note_age_days(path: Path, today: date) -> int:
     Same rule the digest uses: a re-synced vault rewrites mtimes wholesale, so a
     date in the name is the more trustworthy signal when one exists.
     """
-    match = _DATE_IN_NAME.search(path.name)
-    if match:
-        try:
-            when = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            return (today - when).days
-        except ValueError:
-            pass
+    when = date_in_text(path.name)
+    if when is not None:
+        return (today - when).days
     try:
         return (today - date.fromtimestamp(path.stat().st_mtime)).days
     except OSError:

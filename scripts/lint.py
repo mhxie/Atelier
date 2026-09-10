@@ -1,50 +1,15 @@
 #!/usr/bin/env python3
-"""
-lint.py: Corpus-level structural lints over zk/wiki/.
+"""Run corpus-level structural checks over the wiki.
 
-trust.py enforces per-note structural integrity (items 1-10 of
-protocols/wiki-schema.md). lint.py layers on checks that are only visible
-at the corpus level — things no single-note parser can see:
-
-  1. Per-note parse errors (pass-through from trust.py).
-  2. Duplicate titles across wiki entries (breaks @cite title resolution,
-     which is how trust.py's edge builder finds targets).
-  3. Slug / title alignment (file stem should match the slugified H1 so
-     cross-note @cite target resolution stays stable across renames).
-  4. Graph topology (inspired by llm_wiki's graph-insights):
-       a. Orphan entry (WARN) — wiki entry with 0 inbound @cite edges
-          from other entries, meaning no trust propagates to it.
-       b. No outbound cite (INFO) — entry that @cites nothing, meaning
-          it does not propagate trust to any other entry.
-       c. Shared anchor, no cite (INFO) — two entries reference the same
-          @anchor source but have no @cite edge between them: a candidate
-          cross-reference that the trust graph is missing.
-
-Cross-note anchor date consistency is intentionally NOT checked: per
-protocols/wiki-schema.md, `valid_at` records the date the marker was
-added to its home note, so the same paper being anchored from two notes
-on different days is the normal case, not a smell.
-
-Output: human table by default, `--json` for machine consumption.
-Exit code: 0 if no errors, 1 if any ERROR-level finding, 2 on CLI/IO error.
-WARN and INFO findings do not affect the exit code.
-
-CLI:
-    scripts/lint.py                 human report over zk/wiki/
-    scripts/lint.py --json          structured output
-
-Paths are project-relative. Run from the repo root.
-
-See also:
-    scripts/trust.py               per-note parser + TrustRank scoring
-    .claude/commands/lint.md       orchestrator flow
-    protocols/wiki-schema.md       schema enforced per-note by trust.py
+This complements ``trust.py``'s per-note validation with duplicate-title,
+slug, graph-topology, vocabulary, shadow, and evidence checks. Anchor dates
+are note-local creation dates, so cross-note date differences are valid.
+Only ERROR findings make the command fail.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import re
 import sys
 from datetime import date
@@ -52,6 +17,8 @@ from pathlib import Path
 
 # trust.py lives next to this file and is importable as a library.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _findings  # noqa: E402
+from _findings import Finding  # noqa: E402
 from _paths import wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
 from trust import (  # noqa: E402
     BARE_CITE_RE,
@@ -67,18 +34,8 @@ VOCABULARY_PATH = Path(__file__).resolve().parent / "wiki_vocabulary.txt"
 
 
 def localized_shadow_dirs() -> list[Path]:
-    """Return all localized shadow-wiki directories (primary `wiki` excluded).
-
-    Thin wrapper over `_paths.wiki_dirs()` which is the canonical registry
-    reader for both canonical (`harness/paths.toml`) and per-user
-    (`harness/paths.local.toml`) layers. The primary wiki is dropped so the
-    caller only iterates shadow targets; OSS users with no shadows
-    configured get an empty list and `check_shadow_drift` becomes a no-op.
-    """
-    all_dirs = wiki_dirs()
-    if len(all_dirs) <= 1:
-        return []
-    return all_dirs[1:]
+    """Return registry-backed localized wikis, excluding the primary wiki."""
+    return wiki_dirs()[1:]
 
 SEVERITY_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 
@@ -94,29 +51,7 @@ CAMELCASE_RE = re.compile(r"\b([A-Z][a-z]+(?:[A-Z][a-z0-9]*)+)\b")
 # Backtick-wrapped terms, e.g. `take_rows()`, `RecordBatch`
 BACKTICK_RE = re.compile(r"`([^`]+)`")
 
-class Finding:
-    __slots__ = ("severity", "code", "where", "message")
 
-    def __init__(self, severity: str, code: str, where: str, message: str):
-        self.severity = severity
-        self.code = code
-        self.where = where
-        self.message = message
-
-    def to_dict(self) -> dict:
-        return {
-            "severity": self.severity,
-            "code": self.code,
-            "where": self.where,
-            "message": self.message,
-        }
-
-
-def title_to_stem(title: str) -> str:
-    """Wiki filenames use the H1 title verbatim as the file stem (title-case
-    with spaces).  This function is the identity transform, but exists as a
-    named contract so the slug-alignment check documents its expectation."""
-    return title
 
 
 def check_parse_errors(notes: list[WikiNote]) -> list[Finding]:
@@ -161,7 +96,7 @@ def check_slug_alignment(notes: list[WikiNote]) -> list[Finding]:
     for note in notes:
         if not note.title:
             continue
-        expected = title_to_stem(note.title)
+        expected = note.title
         actual = note.path.stem
         if actual != expected:
             findings.append(
@@ -187,12 +122,8 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
     ok_notes = [n for n in notes if n.integrity_ok() and n.title]
 
     if len(ok_notes) < 2:
-        # With fewer than 2 entries the graph topology checks are vacuous.
         return findings
 
-    # Build cite edge sets (note-level, not claim-level).
-    # inbound[path] = set of paths that cite this note
-    # outbound[path] = set of paths this note cites
     title_to_path: dict[str, Path] = {}
     for n in ok_notes:
         if n.title is not None:
@@ -209,7 +140,6 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                     outbound[note.path].add(target_path)
                     inbound[target_path].add(note.path)
 
-    # 1. orphan-entry: no inbound @cite edges from any other note.
     for note in ok_notes:
         if not inbound[note.path]:
             findings.append(
@@ -222,7 +152,6 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                 )
             )
 
-    # 2. no-outbound-cite: entry cites nothing.
     for note in ok_notes:
         if not outbound[note.path]:
             findings.append(
@@ -234,9 +163,6 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                 )
             )
 
-    # 3. shared-anchor-no-cite: two entries share an @anchor source but
-    #    have no @cite edge between them (in either direction).
-    #    This is the "surprising connection" signal from llm_wiki.
     anchor_to_notes: dict[str, set[Path]] = {}
     for note in ok_notes:
         for claim in note.claims:
@@ -255,7 +181,6 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                 pair_key = (pa.as_posix(), pb.as_posix())
                 if pair_key in reported_pairs:
                     continue
-                # Check if there's a cite edge in either direction.
                 if pb in outbound[pa] or pa in outbound[pb]:
                     continue
                 reported_pairs.add(pair_key)
@@ -356,7 +281,6 @@ def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
         )
         return findings
 
-    # Build a set of wiki entry titles (lowercased) for cross-reference
     wiki_titles_lower: set[str] = set()
     for note in notes:
         if note.title:
@@ -365,24 +289,19 @@ def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
     ok_notes = [n for n in notes if n.integrity_ok() and n.title]
 
     for note in ok_notes:
-        # Collect all prose lines from claims (excluding anchors/cites)
         prose_lines: list[str] = []
         for claim in note.claims:
             prose_lines.extend(_strip_anchors_and_cites(claim.body_lines))
-            # Also include claim title text (after the [Cn] prefix)
             prose_lines.append(claim.title)
 
         prose_text = "\n".join(prose_lines)
 
-        # Extract candidate terms
         candidates: dict[str, str] = {}  # lowered -> original form
 
-        # 1. ALL-CAPS acronyms (2+ chars)
         for m in ACRONYM_RE.finditer(prose_text):
             raw = m.group(1)
             candidates.setdefault(raw.lower(), raw)
 
-        # 2. CamelCase words
         for m in CAMELCASE_RE.finditer(prose_text):
             raw = m.group(1)
             candidates.setdefault(raw.lower(), raw)
@@ -394,11 +313,8 @@ def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
         #    they name concepts (classes, protocols) that may need explanation.
         for m in BACKTICK_RE.finditer(prose_text):
             raw = m.group(1).strip()
-            # Strip trailing () or (...) for calls like RecordBatch() or DataLoader(shuffle=True)
             name = re.sub(r"\(.*\)$", "", raw)
-            # Only interested in CamelCase terms from backtick context
             if not CAMELCASE_RE.match(name):
-                # Also check dotted paths for CamelCase final component
                 if "." in name:
                     parts = name.split(".")
                     final = parts[-1]
@@ -407,42 +323,32 @@ def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
                 continue
             candidates.setdefault(name.lower(), name)
 
-        # Check each candidate
         unfounded: list[str] = []
         for term_lower, term_orig in sorted(candidates.items()):
-            # (a) In vocabulary allowlist?
             if term_lower in vocab:
                 continue
 
-            # (b) Matches a wiki entry title? (case-insensitive substring)
             if any(term_lower in wt for wt in wiki_titles_lower):
                 continue
 
-            # Also check if any wiki title is a substring of the term
             if any(wt in term_lower for wt in wiki_titles_lower):
                 continue
 
-            # (c) Explained inline with parenthetical definition?
             if _has_inline_explanation(prose_text, term_orig):
                 continue
 
-            # Skip schema marker names (@anchor, @cite, etc.)
             if term_orig.startswith("@"):
                 continue
 
-            # Skip HTTP header names (e.g. If-Match, If-None-Match)
             if term_orig.startswith("If-"):
                 continue
 
-            # Skip very short terms (single char, or 2-char that might be
-            # a column name, variable, etc.)
             if len(term_orig) <= 2:
                 continue
 
             unfounded.append(term_orig)
 
         if unfounded:
-            # Group into a single finding per note to avoid noise
             term_list = ", ".join(sorted(unfounded))
             findings.append(
                 Finding(
@@ -466,7 +372,6 @@ def check_readwise_backfill(notes: list[WikiNote]) -> list[Finding]:
     field is recommended (not required) on url: and gist: anchors.  Its
     absence means the evidence is harder to retrieve if the URL goes down.
     """
-    # Load skip prefixes from file (private repo URLs where git is the evidence)
     skip_prefixes: list[str] = []
     if READWISE_SKIP_FILE.exists():
         for line in READWISE_SKIP_FILE.read_text(encoding="utf-8").splitlines():
@@ -496,18 +401,9 @@ def check_readwise_backfill(notes: list[WikiNote]) -> list[Finding]:
 
 
 def check_shadow_drift(notes: list[WikiNote]) -> list[Finding]:
-    """WARN when a localized shadow wiki entry is missing or older than
-    its English source.
+    """Warn on missing/stale localized wiki shadows; no configured shadows is a no-op.
 
-    Iterates over every shadow directory in `[paths.wiki_localized]`
-    (canonical + per-user, via `localized_shadow_dirs()`). For OSS users
-    with no configured shadows the table is empty and the check is a
-    no-op. Shadows are generated by /promote Phase 4; when the English
-    source is edited, the shadow becomes stale. This check surfaces
-    drift so the shadow can be regenerated.
-
-    Tolerance: a 60-second grace period accounts for normal filesystem
-    timestamp jitter when both files are written in the same workflow.
+    A 60-second grace period tolerates same-workflow filesystem timestamp jitter.
     """
     findings: list[Finding] = []
     GRACE_SECONDS = 60
@@ -565,37 +461,16 @@ def run_lints(notes: list[WikiNote]) -> list[Finding]:
 
 
 def format_table(findings: list[Finding]) -> str:
-    if not findings:
-        return "lint: clean (no findings)\n"
-
-    counts = {"ERROR": 0, "WARN": 0, "INFO": 0}
-    for f in findings:
-        counts[f.severity] = counts.get(f.severity, 0) + 1
-
-    lines = []
-    lines.append(
-        f"lint report — {counts['ERROR']} error, {counts['WARN']} warn, {counts['INFO']} info"
+    return _findings.format_table(
+        findings,
+        empty="lint: clean (no findings)\n",
+        label="lint report",
+        separator=" — ",
     )
-    lines.append("")
-    for f in findings:
-        lines.append(f"[{f.severity:5s}] {f.code}")
-        lines.append(f"    where:   {f.where}")
-        lines.append(f"    message: {f.message}")
-        lines.append("")
-    return "\n".join(lines)
 
 
 def format_json(findings: list[Finding]) -> str:
-    payload = {
-        "wiki_dir": WIKI_DIR.as_posix(),
-        "counts": {
-            "error": sum(1 for f in findings if f.severity == "ERROR"),
-            "warn": sum(1 for f in findings if f.severity == "WARN"),
-            "info": sum(1 for f in findings if f.severity == "INFO"),
-        },
-        "findings": [f.to_dict() for f in findings],
-    }
-    return json.dumps(payload, indent=2) + "\n"
+    return _findings.format_json(findings, wiki_dir=WIKI_DIR.as_posix())
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -54,7 +54,7 @@ uv run scripts/autoevo_pending.py list --status pending > "$SCRATCH/autoevo.json
 uv run scripts/routine_digest.py collect --mode weekly --unacked --max-files 1 --json --out "$SCRATCH/routines.json" > "$SCRATCH/routines.out" 2> "$SCRATCH/routines.err"
 uv run scripts/recurring.py list --json > "$SCRATCH/recurring.json" 2> "$SCRATCH/recurring.err"
 uv run scripts/aggregate_freshness.py --discover --stale-only --json > "$SCRATCH/aggregates.json" 2> "$SCRATCH/aggregates.err"
-uv run scripts/routine_audit.py health --json > "$SCRATCH/health.json" 2> "$SCRATCH/health.err"
+uv run scripts/routine_status.py --hours=168 --limit=200 --json > "$SCRATCH/health.json" 2> "$SCRATCH/health.err"
 uv run scripts/intent_coverage.py intent-misses --propose --json > "$SCRATCH/intents.json" 2> "$SCRATCH/intents.err"
 ```
 
@@ -69,14 +69,14 @@ work.
 | Routine reports | `routine_digest.py` | one unacked source file | `health.review_debt` (files; the cue counts routines) |
 | Recurring obligations | `recurring.py` | one overdue/due-soon obligation | entries with `status` overdue or due-soon |
 | Aggregate freshness | `aggregate_freshness.py` | one stale aggregate | `stale_count` |
-| Routine health | `routine_audit.py` plus fired routine cues | one anomaly, failed cycle, or unloaded launchd job | `counts.with_failure_diagnostic` + `counts.no_recovery` + `counts.schedule_disagreements` + `counts.not_loaded` |
+| Routine health | `routine_status.py` plus fired routine cues | one latest failed, crashed, or cancelled Prefect run per routine | latest run per routine whose `state` is `FAILED`, `CRASHED`, or `CANCELLED` |
 | Intent coverage | `intent_coverage.py` | one recurring unrouted request | `len(proposals)` (`phrases` are observe) |
 
 Dashboard columns: lane, cue severity, actionable count, oldest item or latest
 failure, and the next safe action. Distinguish `actionable`, `observe`, and
 `unavailable`. For intent coverage, raw misses are `observe`; only recurring
-proposals count as actionable. For routine health, a recovered historical
-failure is `observe`, not a retry candidate.
+proposals count as actionable. For routine health, an earlier failure
+superseded by a later completed run is `observe`, not a retry candidate.
 
 After the dashboard, ask for a lane and optional batch size. Default to the
 highest-severity actionable lane and five items only when the user's reply is
@@ -151,14 +151,14 @@ the orchestrator. Re-run the freshness probe after approved edits.
 
 ### Routine health
 
-Re-run `uv run scripts/routine_audit.py health --json` and inspect at most
-`BATCH_SIZE` current anomalies. Diagnosis is read-only. A failed,
-completion-uncertain, retry-approved, or stale-running cycle follows
+Re-run `uv run scripts/routine_status.py --hours=168 --limit=200 --json`, keep
+only the latest run per routine, and inspect at most `BATCH_SIZE` failed,
+crashed, or cancelled runs. Diagnosis is read-only. Follow
 `scripts/launchd/README.md` and `protocols/remote-routines.md`: confirm the
-original process stopped, review external effects, show the exact recovery
-command, and require explicit confirmation before any
-`routine_lock.py recover ... --confirm-effects-reviewed` call. A deferred
-claim with a scheduled retry is observation unless the user asks to intervene.
+original process stopped and review external effects before proposing any
+manual deployment run. A pending or failed domain receipt blocks same-cycle
+execution. Do not modify or delete a receipt from triage; escalate the recovery
+decision explicitly.
 
 ### Intent coverage
 

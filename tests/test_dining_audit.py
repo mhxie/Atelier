@@ -7,13 +7,10 @@ cannot already answer it: a 正餐 row with fewer than 2 prior logged visits.
 
 from __future__ import annotations
 
-import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 import dining_audit  # noqa: E402
 

@@ -20,18 +20,18 @@ procedure.
 
 - Daily Reflection: `.claude/commands/daily-reflection.md`
 - Weekly Review: `.claude/commands/weekly.md`
-- Explore: `.claude/commands/explore.md`
+- Explore: `.claude/commands/daily-reflection.md`, intent `explore`, Exploration branch only
 
 ### Plan
 
 - Goal Review: `.claude/commands/review.md`
 - Decision Journal: `.claude/commands/decision.md`
-- Energy Audit: `.claude/commands/energy-audit.md`
+- Energy Audit: `.claude/commands/daily-reflection.md`, intent `energy-audit`, Energy branch only
 - PRM Audit: `.claude/commands/prm.md`
 
 ### Analyze
 
-- Finance Analysis: `protocols/analysis-signals.md`
+- Finance Analysis: `protocols/finance-analysis.md`
 
 ### Act
 

@@ -81,26 +81,6 @@ class ProposalJsonTest(unittest.TestCase):
             self.assertEqual(payload["routed_events"], 1, payload)
             self.assertEqual(payload["proposals"], [], payload)
             self.assertEqual(payload["log_dir"], str(routes))
-            # The eval metric reads the default ledger location; it must see
-            # the same single event, not the three retired-router lines.
-            proc = subprocess.run(
-                [
-                    sys.executable,
-                    "-c",
-                    "import json, sys\nsys.path.insert(0, 'scripts')\nimport eval_run\n"
-                    "from datetime import date\n"
-                    "print(json.dumps(eval_run.eval_routing(today=date(2099, 1, 2))))",
-                ],
-                cwd=REPO_ROOT,
-                env={**os.environ, "OV": str(vault)},
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            routing = json.loads(proc.stdout.strip().splitlines()[-1])
-            self.assertEqual(routing["cases"], 1, routing)
-            self.assertEqual(routing["score"], 1.0, routing)
 
 
 if __name__ == "__main__":

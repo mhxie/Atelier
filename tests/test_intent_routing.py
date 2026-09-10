@@ -44,11 +44,44 @@ class IntentCatalogTest(unittest.TestCase):
             self.assertNotIn(key, seen, f"{name} duplicates {seen.get(key)}")
             seen[key] = name
 
-    def test_evalset_names_only_real_rows(self) -> None:
+    def test_reading_intents_start_one_worker_without_parallel_fanout(self) -> None:
+        for name in ("reading", "talk"):
+            with self.subTest(intent=name):
+                row = self.intents[name]
+                self.assertEqual(row["agents"], ["reader"])
+                self.assertEqual(row["expected_subagent_count"], 1)
+                self.assertFalse(row["parallel"])
+
+    def test_reading_backup_preserves_separate_external_authority(self) -> None:
+        text = (REPO_ROOT / ".claude/commands/read.md").read_text()
+        backup = text.split("## Backup to Readwise", 1)[1].split("## Initial-analysis", 1)[0]
+        self.assertIn("Approval to save the local reflection does not authorize this external write", backup)
+        self.assertIn("The user has not explicitly authorized this Readwise backup", backup)
+        self.assertIn("Input was a Readwise URL or `document_id`", backup)
+        self.assertIn("Reading review", text)
+
+    def test_handoff_schema_requires_completion_metadata(self) -> None:
+        contract = (REPO_ROOT / "protocols/agent-handoff.md").read_text()
+        envelope, _ = contract.split("\n---handoff---\n", 1)[1].split("\n---end-handoff---", 1)
+        fields = {line.partition(":")[0] for line in envelope.splitlines()}
+        self.assertTrue({"from", "to", "type", "confidence", "completion_status",
+                         "remaining_work", "gaps"} <= fields)
+
+    def test_dashboard_framework_is_private_configuration(self) -> None:
+        text = (REPO_ROOT / ".claude/commands/civ.md").read_text()
+        self.assertIn("## Private Framework", text)
+        self.assertIn("private source referenced by", text)
+        self.assertIn("Missing configuration remains\nunknown", text)
+        for key in ("[resource_id]", "[value_id]", "[civ_id]", "[configured dependency sequence]"):
+            self.assertIn(key, text)
+
+    def test_evalset_covers_every_public_row_and_names_only_real_rows(self) -> None:
         cases = json.loads(FIXTURE.read_text(encoding="utf-8"))["cases"]
         self.assertGreaterEqual(len(cases), 20)
         unknown = sorted({c["expected"] for c in cases} - set(self.intents))
         self.assertFalse(unknown, f"evalset expects rows that do not exist: {unknown}")
+        missing = sorted(set(self.intents) - {c["expected"] for c in cases})
+        self.assertFalse(missing, f"evalset has no case for public rows: {missing}")
 
     def test_catalog_subcommand_renders_every_row(self) -> None:
         proc = subprocess.run(

@@ -119,7 +119,7 @@ Use `<paths.health>/README.md` and `<paths.housing>/README.md` as the templates.
 ## Privacy boundaries
 
 - `$OV/` is gitignored. Personal data (landlord names, MRNs, addresses, lease amounts, IDs) lives in `$OV` safely. The committed repo never sees it.
-- Protocols / committed files (this file included) describe the **structure** generically. No personal names, addresses, employer names, or preference policy. `scripts/privacy_check.py` checks discovered private titles, gitignored exact terms, and staged blobs during `/lint` and `/system-review`; semantic review remains responsible for contextual disclosure.
+- Protocols / committed files (this file included) describe the **structure** generically. No personal names, addresses, employer names, or preference policy. `scripts/privacy_check.py` checks discovered private titles, gitignored exact terms, and staged blobs during `/lint` and `/push`; semantic review remains responsible for contextual disclosure.
 - Encrypted vaults (1Password, etc.) are **out of scope**: never extract credentials from there into `$OV` plain text.
 - Non-self entities (companion's medical, foster pets, etc.) get their own subdirectory under the domain (e.g., `<paths.health>/pet/`). Same protocol applies internally; cross-links from main self-line note "see also" but don't merge data.
 

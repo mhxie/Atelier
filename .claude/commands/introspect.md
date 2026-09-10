@@ -1,5 +1,5 @@
 ---
-description: Build or refresh profile files from local notes and reading patterns.
+description: Build or refresh profile files from local notes and attributable reading feedback.
 ---
 # Introspect
 
@@ -9,7 +9,7 @@ description: Build or refresh profile files from local notes and reading pattern
 
 Build or refresh your self-model by examining your local notes, session history, and reading patterns. Produces three profile files that the rest of the system consults.
 
-Unlike `/index` (mechanical extraction), `/introspect` discovers patterns: what you're drawn to, how your taste is shifting, where your curiosity is orbiting before you've named it as a goal.
+`/introspect` discovers patterns rather than extracting fields mechanically: what you're drawn to, how your taste is shifting, where your curiosity is orbiting before you've named it as a goal.
 
 ## Prerequisites
 
@@ -24,7 +24,7 @@ profile/
 └── expertise.md     — domain knowledge, research taste, known biases
 ```
 
-`profile/reader_persona.md` is a raw input signal, not a profile output. Built separately by `/build-persona` from Readwise data.
+`profile/reader_persona.md` is a raw input signal derived from Readwise data, not an output of this command.
 
 ## Pipeline
 
@@ -59,13 +59,17 @@ For the top ~30-40 most relevant notes, `Read` the file paths returned by Step 1
 - Recent daily notes (critical for identity.md — taste and curiosity signals)
 - Top career/learning notes
 
-### Step 3: Discover Taste & Curiosity (NEW — not in old /index)
+### Step 3: Discover Taste & Curiosity
 
 This step goes beyond mechanical extraction. Look for:
 
 **Intellectual taste** (what you engage deeply with vs. skim):
 - Topics that recur across daily notes without being declared goals
-- Articles/papers you chose to deep-read vs. archive (check triage files in `<paths.cache>/triage-*.md`)
+- Explicit item decisions and usefulness reasons from
+  `uv run scripts/decisions.py reading-evidence`. Consumption is a weaker,
+  separate signal. Triage caches record agent proposals; they establish no
+  user choice or taste. Use `protocols/decision-ledger.md` → Reading feedback
+  loop for attribution and unknown states.
 - Discussion tangents that repeatedly surface in reflection sessions
 - Aesthetic preferences in how you evaluate ideas (from research-profile patterns)
 
@@ -143,13 +147,13 @@ Before writing profile files, dispatch **Reviewer** + **Challenger** in parallel
   - Are cited [[Note Titles]] real and accurately represented?
   - Do "Intellectual Taste" claims have evidence in the notes, or are they fabricated?
   - Are goal statuses (progressing/stale) consistent with note edit dates?
-  - Score using Session Review rubric (Citation Accuracy + Honesty dimensions only)
+  - Assess using Session Review dimensions (Citation Accuracy + Honesty only)
 - **Challenger** probes the profile for blind spots:
   - Are curiosity vectors genuinely emerging, or just noise from 1-2 notes?
   - Does the profile overweight recent notes and miss long-term patterns?
   - Are there important life areas absent from the profile entirely?
 
-If Reviewer scores < 7 on either dimension, fix the specific issues before writing. Present the validated profile to the user before saving — the user confirms or corrects.
+If the Reviewer returns `NEEDS_REVISION` or `REJECTED`, fix the specific findings before writing. Present the validated profile to the user before saving — the user confirms or corrects.
 
 ### Step 6: Check for Divergences
 
