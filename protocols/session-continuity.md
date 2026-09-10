@@ -8,40 +8,41 @@ Each session should feel like a chapter in an ongoing conversation, not a standa
 
 ### Reading the Thread
 
-Route the request before loading continuity context. Then build a bounded
-projection for the selected intent:
+Route the request before loading continuity context. Then build the selected
+intent's Repomix artifact:
+
+Install Node >=22 in a system or Homebrew prefix and run `npm ci` once.
+The adapter does not resolve Node from the caller's `PATH`.
 
 ```bash
-uv run scripts/context_bundle.py --intent "<intent>" --format json
+uv run scripts/context_bundle.py --intent "<intent>"
 ```
 
-The default projection contains only:
+The artifact contains only:
 
 1. Profile files named by the intent's `profile_reads` row in
    `harness/intents.toml`.
 2. The latest session log's `## Anomalies` and `## Continuity` sections.
-3. Headings and high-signal closing sections from up to three recent
-   reflection or review files.
 
-Add `--component daily` only when the selected workflow explicitly needs
-current capture. Add route-specific sources with `--component sources
---source "<vault-relative-path>[#Section]"`. Generic startup, capture, lint,
-sync, promotion, and meeting routes do not load a daily note by default.
+Add a current daily note or another route-specific source only with
+`--source "<vault-relative-path>[#Section]"`. Generic startup, capture, lint,
+sync, promotion, and meeting routes do not load one by default. Recent
+reflection discovery uses bounded QMD candidates followed by direct reads of
+the selected source sections; it is not generic startup context.
 
-The complete serialized projection uses the selected intent's
-`context_budget_bytes` from `harness/intents.toml`: 32 KB when the row
-preloads profile files, 8 KB for continuity-only rows. Declared sections land
-whole, in priority order, until the ceiling; a workflow may raise
-`--byte-budget` to at most 64 KB. Anything omitted is reported and retrieved
-deliberately after routing. The projection is a "previously on..." anchor,
-not a substitute for reading the sources a workflow actually needs.
+Repomix uses the selected intent's `context_budget_tokens` from
+`harness/intents.toml`, counted with `o200k_base`. The ceiling is a hard guard:
+an over-budget artifact fails and is discarded rather than ranked or trimmed.
+The artifact header reports selected current sources, sections, profile
+freshness, and optional omissions. It is a "previously on..." anchor, not a
+substitute for reading the sources a workflow actually needs.
 
 ### Reading recovery
 
-For a reading or transcript/talk route, the projection also includes the most recent Reading
-Capsule from a reading session log. This is the bounded recovery path for a
-reading whose first analysis completed but whose discussion or reflection did
-not. Other routes never preload it.
+For a reading or transcript/talk route, the artifact also includes the most
+recent non-empty Reading Capsule from a reading session log. This is the
+bounded recovery path for a reading whose first analysis completed but whose
+discussion or reflection did not. Other routes never preload it.
 
 ### Connecting Back
 
@@ -67,9 +68,9 @@ Sessions leave artifacts that future sessions can read:
 | `<paths.reflections>/YYYY-MM-DD-review.md` | Goal progress | Next review session |
 | `<paths.reflections>/YYYY-MM-DD-weekly.md` | Weekly patterns | Next weekly session |
 | `<paths.gtd>/decisions/*.md` | Stable decision records; dated changes live inside each file | Future decision/review sessions |
-| `<paths.reflections>/YYYY-MM-DD-exploration.md` | Open threads | Next explore session |
-| `<paths.reflections>/YYYY-MM-DD-energy-audit.md` | Energy patterns | Next energy audit |
-| `<paths.sessions>/YYYY-MM-DD-<type>.md` | Session process log | Meta-reflection, Evolver, next session (excerpts) |
+| `<paths.reflections>/YYYY-MM-DD-exploration.md` | Open threads | Reflection's exploration branch |
+| `<paths.reflections>/YYYY-MM-DD-energy-audit.md` | Energy patterns | Reflection's energy branch |
+| `<paths.sessions>/YYYY-MM-DD-<type>.md` | Compact continuity/outcomes or full process log, per `protocols/session-log.md` | Explicit workflow review, next session (excerpts) |
 | `profile/identity.md` | User profile | Intents that declare it in `profile_reads` |
 | `profile/directions.md` | Goals | Goal-related intents that declare it in `profile_reads` |
 
@@ -81,8 +82,8 @@ Sessions leave artifacts that future sessions can read:
 | `/project:weekly` | Weekly (Sunday or Monday) | Energy and attention patterns need a week of data |
 | `/project:review` | Quarterly (full) / Monthly (light pulse via `/weekly`) | Full review is quarterly; light pulse is monthly. Cadence specifics live in `.claude/commands/review.md`. |
 | `/project:decision` | As needed | When facing a real decision |
-| `/project:explore` | Weekly or when feeling stuck | Keeps serendipity alive |
-| `/project:energy-audit` | Monthly or after high-stress periods | Energy patterns are slow-moving |
+| `/hi explore` | When seeking open threads or feeling stuck | On-demand exploration branch |
+| `/hi energy audit` | When energy patterns warrant a closer look | On-demand energy branch |
 | `/introspect` | Monthly or after major life change | Profile needs fresh data when context shifts significantly |
 
 ## Focus Lock
@@ -111,7 +112,7 @@ Policies are swappable reflection habits — small commitments that can change w
 
 ## Continuity Anti-Patterns
 
-1. **Groundhog Day**: Every session starts from zero with no reference to previous sessions. Fix: Load the route-specific continuity projection.
+1. **Groundhog Day**: Every session starts from zero with no reference to previous sessions. Fix: Load the route-specific context artifact.
 2. **Nostalgia Trap**: Spending too long on what was discussed before and not enough on what's new. Fix: One callback, then move forward.
 3. **Orphaned Intentions**: Setting "next actions" that never get checked. Fix: Explicitly check last session's intention at the start.
 4. **Overloaded Sessions**: Trying to do reflect + review + weekly all at once. Fix: One command per session.

@@ -1,6 +1,4 @@
 """routine_digest_core.py: registries, date windows, markdown parsing, and manifest helpers shared by the digest pipeline.
-
-Split out of routine_digest.py; routine_digest.py re-exports every name so callers and tests are unchanged.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ MANIFEST_SCHEMA = 1
 
 # Public harness routine whose output is maintenance bookkeeping, not intel.
 # Named here (not in the private vault registry) because the name is already
-# public in scripts/launchd/ and .claude/commands/.
+# public in the Prefect service documentation and .claude/commands/.
 MAINTENANCE_ROUTINES = {"autoevo-nightly"}
 
 DEFAULT_EXCERPT_CHARS = 800
@@ -31,6 +29,9 @@ DEFAULT_EXCERPT_CHARS = 800
 DEFAULT_MAX_ITEMS = 15
 
 DEFAULT_MAX_FILES = 200
+
+MAX_CONTEXT_SOURCES = 8
+_CONTEXT_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 
 # Gmail clips a message past roughly 102 KB and hides the rest behind a "View
 # entire message" link. That is a warning, not a failure: the document is
@@ -52,10 +53,6 @@ LANE_BY_SEGMENT = {
 
 RESEARCH_LANE = "Research"
 
-_CARD = "#ffffff"
-
-_S_ITEM = "margin:0 0 6px;line-height:1.5;"
-
 # Default attention budget, in lines of the digest's own summary. A routine
 # earns space by being worth reading, not by being verbose: an unbounded report
 # lets one chatty collector crowd out five terse ones. Per-routine overrides live
@@ -71,11 +68,13 @@ class Routine:
     lane: str
     include: bool
     cron: str = ""
+    execution: str = "remote"
     max_lines: int = DEFAULT_ROUTINE_LINES
     # True only when the row itself says `include = false`; the default
     # exclusion of maintenance routines does not count. `write` uses this to
     # find the digest's own row when no --routine is given.
     excluded_explicitly: bool = False
+    context: str | None = None
 
 def load_routines(ov: Path) -> list[Routine]:
     """Parse $OV/_meta/routine_watch.toml into Routine rows.
@@ -91,6 +90,7 @@ def load_routines(ov: Path) -> list[Routine]:
         raise SystemExit(f"routine registry unreadable: {exc!r}") from exc
 
     routines: list[Routine] = []
+    context_keys: set[str] = set()
     for row in config.get("routine", []):
         output_dir = row.get("output_dir")
         if not output_dir:
@@ -99,6 +99,15 @@ def load_routines(ov: Path) -> list[Routine]:
         digest_cfg = row.get("digest") or {}
         if not isinstance(digest_cfg, dict):
             digest_cfg = {}
+        context = digest_cfg.get("context")
+        if context is not None:
+            if not isinstance(context, str) or not _CONTEXT_KEY.fullmatch(context):
+                raise SystemExit(f"{name}: digest.context must be a safe lowercase identifier")
+            if context in context_keys:
+                raise SystemExit(f"duplicate digest.context: {context}")
+            context_keys.add(context)
+            if len(context_keys) > MAX_CONTEXT_SOURCES:
+                raise SystemExit(f"at most {MAX_CONTEXT_SOURCES} digest contexts may be declared")
         include = digest_cfg.get("include")
         if include is None:
             include = name not in MAINTENANCE_ROUTINES
@@ -117,8 +126,10 @@ def load_routines(ov: Path) -> list[Routine]:
                 lane=str(lane),
                 include=bool(include),
                 cron=str(row.get("cron") or ""),
+                execution=str(row.get("execution") or "remote"),
                 max_lines=max_lines,
                 excluded_explicitly=digest_cfg.get("include") is False,
+                context=context,
             )
         )
     return routines
@@ -189,13 +200,6 @@ def deep_read_lane_gap(deep_read: Any, manifest: dict[str, Any]) -> str | None:
         f"情报精选没有 Research 条目, 但本窗口有 {len(research)} 个 Research 来源; "
         "deep_read 至少留一条给研究方向 (entry.lane = \"Research\")"
     )
-
-# Depth budget. 45 minutes is the middle of the agreed 30-60, and the byte
-# ceiling keeps the same render under Gmail's ~102 KB clip so the artifact and
-# the mail stay byte-identical: one render reaching two destinations is what
-# makes the mail a presentation of the source of truth rather than a second
-# document.
-DEEP_TARGET_MINUTES = 45
 
 def artifact_name(manifest: dict[str, Any]) -> str:
     window = manifest.get("window", {})

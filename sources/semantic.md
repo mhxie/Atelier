@@ -1,255 +1,141 @@
-# Local Semantic Search (`scripts/semantic.py`)
+# Local QMD Search
 
-Teaching doc for the `semantic.py` CLI. Agents and command files call this script to find notes by meaning rather than exact string match.
+`scripts/semantic.py` is the Atelier boundary around the pinned QMD SDK.
+QMD owns scanning, Markdown chunking, incremental updates and deletions,
+embeddings, keyword/vector fusion, and model reranking. The Python adapter
+owns source scopes, local-only model readiness, bounded output, and callers.
+The canonical vault is never modified by indexing or querying.
 
-**This doc describes the contract, not the implementation.** The backend swaps across three stages (stub, BGE-M3, corpus-tuned local model) without changing anything below.
+## Setup and hardware
 
-## Modes
+Install Node >=22 in a system or Homebrew prefix, run `npm ci`, and set `OV` to
+the canonical vault. The adapter does not resolve Node from the caller's `PATH`.
+Copy `semantic.toml.example` to the gitignored `semantic.toml` if overrides
+are needed. Presets live in `harness/retrieval.toml`.
 
-**Stub mode** (lexical fallback): active when `~/.cache/atelier/lance/` does not exist. Uses the same corpus policy and scopes as real mode, but ranks with lexical token matching. Prints a warning to stderr on every invocation so callers never mistake "empty result" for "no conceptual neighbor exists."
+| Profile | Embedding model | Parallel contexts | Batch documents | Embed / rerank context |
+|---|---|---:|---:|---:|
+| `m3-16gb` (default) | Qwen3-Embedding 0.6B Q8 | 1 | 4 | 2048 / 4096 |
+| `m5-64gb` (future, not hardware-validated) | Qwen3-Embedding 4B Q8 | 2 | 16 | 4096 / 8192 |
 
-**Real mode** (embedding-backed): active when `~/.cache/atelier/lance/` exists (sentinel). Current stack: dense embedder (BGE-M3 default, Qwen3-Embedding-0.6B / 4B / 8B opt-in via `SEMANTIC_EMBEDDER`) + LanceDB (embedded columnar store, cosine distance) + BM25 sparse retrieval fused via Reciprocal Rank Fusion + optional BGE-reranker-v2-m3 cross-encoder rerank. Documents are chunked at markdown heading boundaries (~2K chars per chunk). Index is machine-local per embedder (`~/.cache/atelier/lance/`, `~/.cache/atelier/lance-qwen3-0.6b/`, ...); rebuild with `uv run scripts/semantic.py index` (~10 min on MPS for 5K-file vault with BGE-M3 / Qwen3-0.6B, ~60 min for Qwen3-4B). No caller code changes across the swap.
-
-Model loading is cache-first. When the Hugging Face cache contains a snapshot
-with both the model config and Sentence Transformers modules manifest, the
-backend passes that local snapshot directory directly to Sentence Transformers
-with `local_files_only=True`. This avoids remote metadata and background model
-conversion requests. An uncached model may still download during interactive
-setup. `HF_HUB_OFFLINE=1` or `TRANSFORMERS_OFFLINE=1` forces local-only loading
-even when no complete snapshot can be resolved.
-
-## CLI
-
-```
-scripts/semantic.py query "<text>" [OPTIONS]
-scripts/semantic.py status [--format text|json]
-scripts/semantic.py corpus [--format text|json]
-scripts/semantic.py index [--rebuild | --if-stale]
-scripts/semantic.py --help
-```
-
-### `query` options
-
-| Flag | Meaning | Default |
-|---|---|---|
-| `--path DIR` | Restrict to a subdirectory (repeatable). | `$OV/` |
-| `--after YYYY-MM-DD` | Files with mtime >= date. | none |
-| `--before YYYY-MM-DD` | Files with mtime <= date. | none |
-| `--top N` | Max results. | 10 |
-| `--lang {zh,en,auto}` | Query language hint. No-op in stub mode. | `auto` |
-| `--format {tsv,json}` | Output format. | `tsv` |
-| `--scope {active,raw,archive,inbox,process,all}` | Select the indexed knowledge zone. `active` includes compact raw locator cards, not raw file contents. | `active` |
-| `--context` | With JSON output, return bounded section capsules with heading, snippet, tier, scope, and representation. | off |
-| `--sources LIST` | Comma-separated sources: `local`, `readwise`. Readwise is opt-in and uses its CLI in real mode; stub mode remains local-only. | `local` |
-
-`--context` requires `--format json`. It keeps only the best chunk per file,
-caps raw locators at two in the default scope, and limits each snippet to 600
-characters. Without `--context`, a single-source query preserves the legacy
-chunk-ranked output. Multi-source queries deduplicate paths after merging.
-In real mode, default `active` and explicit `raw` queries also search the
-small raw-locator view lexically. This recovers exact filename and cluster
-terms without materializing full-corpus BM25 on every query. `--hybrid`
-remains the opt-in full dense plus BM25 path. A strong lexical locator match
-is a one-slot tail backfill, not a relevance competitor: authored results and
-any configured reranker keep their order ahead of the generated navigation
-card. The same backfill remains enabled with `--hybrid`, so exact raw filename
-lookup does not regress when full BM25 is selected.
-
-### Corpus policy
-
-`scripts/semantic_corpus.py` is the single policy used by stub search, real
-indexing, freshness checks, audits, and smoke tests.
-
-| Scope | Contents |
-|---|---|
-| `active` | Current authored Markdown plus compact generated raw locator cards. This is the default. |
-| `raw` | Readable text under a `raw/` path plus the raw locator cards. |
-| `archive` | Parked authored notes under `archive/`. |
-| `inbox` | Pending captures under `inbox/`. |
-| `process` | Session-process records under `sessions/`. |
-| `all` | Union of the indexed scopes. |
-
-The corpus always excludes any nested `cache/`, `_meta/`, `_routine_prompts/`,
-`.trash/`, or `_tools/` directory; `archive/orphan-stubs/`; hidden operational
-directories; dependency trees such as `node_modules/`; and empty or
-whitespace-only files. Any non-archived, non-process directory segment named
-`inbox` maps to explicit `inbox` scope rather than default `active`.
-
-Binary raw assets are discoverable without OCR. The policy groups files by raw
-cluster and generates an in-memory locator card containing safe path terms,
-file-type counts, date range, asset count, and nearby digest paths. Locator
-cards are indexed but never written into the vault. Readable
-Markdown/text/CSV/HTML raw files are additionally available in `raw` scope.
-
-### Freshness and indexing
-
-| Call | Meaning |
-|---|---|
-| `semantic.py status --format json` | Compare the current corpus manifest, policy version, raw-locator fingerprints, and index schema with the stored index without loading the embedding model. |
-| `semantic.py corpus --format json` | Audit scope classification, hard exclusions, raw locator coverage, exact duplicates, and estimated chunks without loading an embedding model. |
-| `semantic.py index` | Incrementally update changed records and remove deleted records. A schema or corpus-policy migration forces one derived-cache rebuild. |
-| `semantic.py index --if-stale` | Run the lightweight freshness check first; load the embedding model only when drift exists. Used by scheduled maintenance. |
-| `semantic.py index --rebuild` | Clear and rebuild the complete index. Keep this manual. |
-
-Every invocation that actually changes the index emits one JSON object on
-stdout under `search_efficiency`. It reports update counts and duration, total
-chunks, default-scope corpus reduction, raw coverage, three representative
-query latencies, result deduplication, and average capsule bytes. A fresh
-`index --if-stale` no-op does not rerun probes or emit a report.
-
-### Output
-
-TSV (default): one result per line. Column 3 differs by mode:
-
-```
-<path>\t<score>\t<matched_tokens>   # stub mode
-<path>\t<score>\t<source>           # real mode
-```
-
-- `path` is relative to the vault root (`$OV`) for local results; readwise results use a `readwise://<document_id>` URI.
-- `score` is in `[0.0, 1.0]`. Higher is better. Stable sort direction across stub and real modes.
-  - **Stub:** `min(total_token_hits, 10) / 10`.
-  - **Real:** cosine similarity between query embedding and file embedding.
-- `matched_tokens` (stub only) is a comma-separated token list. `source` (real only) is the source label: `local` or `readwise`.
-
-JSON (`--format json`): real mode returns objects with `path`, `score`,
-`source`, and `matched_tokens`; stub mode preserves its legacy `path`,
-`score`, and `matched_tokens` shape. Add `--context` for bounded capsules with
-`heading`, `snippet`, `tier`, `scope`, `representation`, and truncation state.
-Default local queries preserve chunk-ranked results. Context and multi-source
-queries collapse to the best chunk per path. Every active-scope result set caps
-raw locator cards so provenance does not crowd out authored notes.
-
-### Exit codes
-
-- `0` — success (including zero results).
-- `0` — `status` completed, whether the index is fresh or stale.
-- `0` — `corpus` completed its read-only audit.
-- `2` — usage error (bad flag, unparseable date).
-- `2` — `status` could not inspect an existing index.
-
-### Streams
-
-- **stdout:** query results or command-specific reports. Query output remains parseable by `xargs`, `awk`, etc. A real index update returns `{"search_efficiency": {...}}`.
-- **stderr:** mode banner, warnings, diagnostics. Always emitted; callers should not silence stderr.
-
-## When to call this script
-
-| Situation | Call |
-|---|---|
-| Searching for a specific keyword or title | Use `Grep`, not this script. |
-| Searching for a concept that might be phrased many ways | `semantic.py query "<concept>" --context --format json` |
-| Locating receipts, exports, or other raw provenance | Start in `active`; use `--scope raw` when full readable raw text is needed. |
-| Inspecting parked history or process traces | Use explicit `--scope archive` or `--scope process`. |
-| Auditing what can enter the index | `semantic.py corpus --format json` |
-| `/explore` — surfacing forgotten connections | `semantic.py query` with a broad concept from today's context |
-| `/introspect` — finding curiosity vectors that aren't named as goals | `semantic.py query` after lexical grep passes |
-| `/hi` forgotten-connection step | `semantic.py query` with a concept from the current conversation |
-| `/energy-audit` — searching for affective states | `semantic.py query "tired exhausted drained"` |
-| `/decision` — adjacent prior thinking | `semantic.py query` alongside lexical grep |
-
-## Stub-mode caveats
-
-- **Lexical-only.** Queries that require understanding paraphrase, synonymy, or conceptual adjacency will underperform. A query for "what am I avoiding?" returns nothing useful in stub mode.
-- **Case-insensitive.** Matching is lowercased.
-- **CJK-tolerant.** Chinese characters are preserved through tokenization, so queries like `"目标 精力"` work for exact-phrase matches but not conceptual ones.
-- **No ranking beyond token frequency.** A daily note that mentions the query word five times in passing will outrank a wiki entry that discusses the concept in depth using different words. Real mode fixes this.
-
-To exit stub mode, run `uv run python scripts/semantic.py index` to build the lance index.
-
-## Examples
-
-Basic query:
-```
-scripts/semantic.py query "curiosity vectors"
-```
-
-Restricted to reflections in the last 30 days, JSON output:
-```
-scripts/semantic.py query "energy drain" \
-    --path "$OV"/reflections \
-    --after 2026-03-07 \
-    --scope active \
-    --context \
-    --format json
-```
-
-Multiple paths, top 20 hits:
-```
-scripts/semantic.py query "研究 方向" \
-    --path "$OV"/daily-notes \
-    --path "$OV"/reflections \
-    --top 20
-```
-
-Reading only authored files returned by a bounded agent query:
-```
-scripts/semantic.py query "contradiction" --top 5 --context --format json | \
-    jq -r '.[] | select(.source == "local" and .representation == "authored") | .path' | \
-    while read path; do sed -n '1,220p' "$OV/$path"; done
-```
-
-Raw locator paths begin with `@raw-locator/`; they are generated records, not
-filesystem paths. Use the locator's cluster terms to narrow an explicit
-`--scope raw` query before reading a source file.
-
-## Design principles (frozen)
-
-1. **Contract-first.** The CLI flags and output schema will not change when the backend swaps.
-2. **Transparent degradation.** Stub mode always warns on stderr. Callers treat the stream as authoritative.
-3. **Unix-composable.** stdout for data, stderr for meta, exit codes for control flow.
-4. **Sentinel mode detection.** `~/.cache/atelier/lance/` present → real mode. Absent → stub. Nothing else.
-5. **Encoder-agnostic interface.** BGE, local model encoder, or any future backend all produce `(path, score)` pairs with the same semantics.
-6. **Stdlib-only in stub mode.** No dependencies shipped with the interface commit. Real mode deps managed via `pyproject.toml` + `uv`.
-
-## Setup
+The larger preset is a configurable starting point, not a memory-usage guarantee
+or measured quality/speed improvement. Both retain the 0.6B reranker.
+QMD may further limit resources. Prefect still runs one local job at a time.
+Changing embedding model or embedding context selects a separate index, so
+different vector dimensions never share a database. Old derived indexes are
+retained for rollback; no cache cleanup is implicit.
 
 ```bash
-uv sync                                    # install deps (venv at ~/.cache/atelier/.venv)
-uv run python scripts/semantic.py index    # build index (~5K files, ~10 min on MPS)
-uv run python scripts/semantic.py query "curiosity vectors"  # search
+python3 scripts/semantic.py init --download-models
+python3 scripts/semantic.py index
+python3 scripts/semantic.py status --format json
+python3 scripts/semantic.py query "how should I handle rate limits?"
 ```
 
-On the active local-routine owner, `com.atelier.semantic-index` runs at 07:30
-and 19:30 local time plus `RunAtLoad`. Its deterministic runner is
-owner-gated, offline, and invokes `index --if-stale`; no model is loaded when
-the corpus is already current. A writer lock prevents overlapping refreshes,
-and `caffeinate` plus an epoch timeout bound a real rebuild across macOS sleep.
-The index remains a machine-local derived cache.
+Only `init --download-models` downloads GGUF models. Queries and normal index
+updates require existing local model files. The model pool and per-vault
+indexes live under `~/.cache/atelier/qmd/` (respecting `XDG_CACHE_HOME`);
+`ATELIER_QMD_HOME` can select another machine-local cache outside the vault
+and repository. For the future machine, set `profile = "m5-64gb"` in
+`semantic.toml`, then repeat initialization and indexing.
+`ATELIER_QMD_PROFILE` is a one-process profile override.
 
-When a scheduled run updates the index, its `search_efficiency` JSON is
-retained in `/tmp/com.atelier.semantic-index.out`. Diagnostics go to the
-matching `.err` file.
+The local Prefect `semantic-index` deployment runs at 07:30 and 19:30 in the
+machine's IANA timezone, with a bounded timeout and one retry for this
+retry-safe derived-cache job. Prefect serializes its deployments and records
+state and logs. Provision the pinned Node dependencies and selected model
+cache before enabling it. These source declarations do not activate a service.
 
-## Quality stack
+Inference uses only installed native bindings; it never downloads or compiles
+a backend. Metal needs host GPU access: a restricted sandbox can reject its
+command queue even when normal host execution succeeds. Report that failure
+or explicitly use lexical mode; do not silently substitute empty results.
 
-`semantic.py` exposes three orthogonal quality knobs on top of the dense retrieval base. They can be combined; the eval harness (`scripts/semantic_eval.py`) measures Recall@5/10, MRR@10, nDCG@10 against a link-graph-derived gold set.
+## Commands
 
-| Layer | Flag / env | When it helps | Cost |
-|---|---|---|---|
-| Dense embedder | `SEMANTIC_EMBEDDER=bge-m3` (default), `qwen3-0.6b`, `qwen3-4b`, `qwen3-8b` | Qwen3 narrowly beats BGE-M3 on multilingual link-graph queries; 0.6B is the sweet spot | Each variant gets its own lance dir; rebuild needed when switching |
-| BM25 hybrid | `--hybrid` (CLI) | Named-entity / partial-title queries that the dense vector under-ranks | Adds ~5-10s/query for first-call BM25 build; negligible thereafter |
-| Cross-encoder rerank | `--rerank ce` or env `SEMANTIC_RERANK_CE=1` | Biggest single nDCG lift across stacks; biggest cost too | ~5-10s/query on MPS; first call downloads ~568M-param model |
-| Tier+recency rerank | on by default in `_build_retriever` | UX heuristic: prefers wiki and fresh notes. Hurts pure retrieval metrics by ~3-5pt nDCG when the gold set spans older L2/L3 content | Free |
+| Command | Meaning |
+|---|---|
+| `init [--download-models]` | Write the derived QMD collection config; model download is opt-in. |
+| `index` | QMD incrementally reconciles source files and embeddings. Skipped files or embedding errors fail the command. |
+| `index --lexical-only` | Update text without loading a model. This does not claim vector readiness. |
+| `status [--format json\|text]` | Native QMD counts, pending embeddings, local model presence and `ready`; no corpus freshness scan. |
+| `query TEXT` | Hybrid keyword + vector retrieval and reranking, with bounded JSON results. |
+| `query TEXT --mode lexical` | Explicit model-free keyword search; never an automatic fallback. |
+| `query TEXT --mode vector` | Embedding retrieval without keyword fusion or reranking. |
 
-The eval harness lives at `scripts/semantic_eval.py`:
+Query options: `--top 1..100`, `--scope`, repeatable `--path`, `--after`,
+`--before`, `--format json|tsv`, `--no-rerank`, and `--expand`.
+By default the same text is supplied as typed lexical and vector queries,
+without automatic rewriting. `--expand` explicitly enables QMD's local
+query-expansion model. Test Chinese, English and mixed-language framing
+against relevant source documents; a synthetic fixture is not a vault benchmark.
+
+Path and file-mtime date filters apply to at most 200 retrieved candidates.
+They never broaden source access, but can return fewer results than requested
+or miss a match outside that candidate set. Use scoped `rg` for exhaustive
+path/date inspection or to establish that an exact document is absent.
+
+## Source scopes
+
+`active` is the default collection of current authored Markdown.
+`raw` contains readable Markdown/text/CSV/HTML under a raw directory;
+`archive`, `inbox`, and `process` select parked notes, pending captures,
+and session traces. `all` is the union, not a privacy override.
+Root archive/process/meta paths respect the path registry.
+
+All collections exclude operational directories (cache, metadata, routine
+prompts, private tools, hidden directories and dependency trees) and orphan
+stubs. QMD does not follow symlinks; the adapter also rejects replaced
+symlinks, out-of-vault paths, deleted sources, and scope-mismatched results.
+Read the original source before quoting. Scope is provenance, not certification.
+
+Readwise uses its own explicit connector/CLI. Binary raw locator generation,
+custom trust/recency score adjustment, stub fallback, corpus auditing,
+old backend options, and legacy context capsules have been retired.
+
+## Results and failures
+
+JSON is always a list of bounded result objects: `path`, `scope`, `title`,
+`line`, `snippet` (up to 600 characters), `score`, `source: local`,
+`backend: qmd`, `score_kind`, and `representation`. `score_kind` names the
+pipeline that produced the score, so `--mode hybrid --no-rerank` reports
+`hybrid-no-rerank` rather than `hybrid`.
+Paths are vault-relative; one row per source file.
+TSV contains path, score and scope. Output goes to stdout; diagnostics to stderr.
+
+A score ranks this retrieval mode's candidates. It is not confidence, a
+probability, or interchangeable with old similarity thresholds.
+Redundancy retrieval produces candidates for content review; QMD findings
+route to human review, never the legacy score-based automatic merge band.
+
+Exit 0 means the requested operation succeeded, including an honest empty
+search. Exit 2 means invalid arguments, missing/incompatible state or models,
+child failure, invalid output, or incomplete indexing. A missing index does
+not get created by `query` or `status`. Status reports `freshness: unchecked`:
+run `index` on schedule to reconcile sources, not a homemade manifest scan.
+`ready` checks stored vectors and model files, not a live inference probe.
+
+## Verification and rollout
+
+`tests/test_qmd.py` covers adapter failure and source boundaries, including
+real QMD keyword indexing/update/delete when npm dependencies are installed.
+The independent paper-cache extraction checks remain in `tests/test_paper_cache.py`.
+The pinned QMD 2.8.3 bridge shares the SDK and tokenizer model instance (matching
+QMD's CLI), forwards the index deadline to its embed session, and rejects
+null/partial embeddings and unavailable requested reranking.
+Recheck these adapter guards when upgrading the dependency.
 
 ```bash
-uv run scripts/semantic_eval.py build                  # rebuild gold set from vault wikilinks/md-links
-uv run scripts/semantic_eval.py run                    # current default active scope
-uv run scripts/semantic_eval.py run --scope all        # historical all-scope comparison
-uv run scripts/semantic_eval.py run --hybrid           # +BM25 RRF
-uv run scripts/semantic_eval.py run --cross-encoder    # +BGE-reranker-v2-m3
-uv run scripts/semantic_eval.py run --no-rerank        # disable TierRecency
-SEMANTIC_EMBEDDER=qwen3-0.6b uv run scripts/semantic_eval.py run --hybrid --cross-encoder
+OV="$PWD/tests/fixtures/qmd" python3 scripts/semantic.py index
+OV="$PWD/tests/fixtures/qmd" python3 scripts/semantic_eval.py run \
+  --gold tests/fixtures/qmd/quality.json
 ```
 
-The gold set is built only from active authored notes. Evaluation therefore
-supports `active` and `all`; deeper single scopes need their own gold-set
-contract before they can produce meaningful metrics.
+The evaluator consumes explicit query/target pairs and reports retrieval
+metrics. It no longer generates gold questions from vault links.
+`scripts/_evalset.json` remains an optional gitignored per-vault input.
 
-## References
-
-- Backend implementations: `scripts/semantic_backends.py`
-- Local-first architecture: `protocols/local-first-architecture.md`
-- Sibling teaching docs: `sources/scholar.md`, `sources/local-papers.md`, `sources/readwise.md`
+A source patch does not activate a scheduler or migrate a live vault.
+Review it, provision the intended machine's model cache, build the new index,
+and validate representative queries before switching active callers.
+The prior Lance caches are left untouched.

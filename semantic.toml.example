@@ -1,19 +1,16 @@
-# Device-dependent parameters for semantic search.
-# Copy to semantic.toml and adjust for your hardware.
-# If semantic.toml is missing, safe defaults are used (16GB-class machine).
+# Copy to semantic.toml (gitignored). Current hardware: compact model pool.
+profile = "m3-16gb"
 
-[embedding]
-# max_tokens: Token limit per chunk. Higher = better accuracy, more memory.
-#   16GB RAM: 512   (safe)
-#   32GB RAM: 768   (balanced)
-#   64GB RAM: 1024  (recommended)
-#   128GB+:   2048  (high quality)
-max_tokens = 512
+# After moving to a 64GB machine, change the profile to "m5-64gb", then run:
+#   python3 scripts/semantic.py init --download-models
+#   python3 scripts/semantic.py index
+# The 4B embedding model gets a separate derived index; the old one is retained.
+# Presets and shared model URIs live in harness/retrieval.toml.
 
-# encode_batch_size: Texts per encoding call. Higher = faster, more memory.
-#   16GB RAM: 4
-#   64GB RAM: 8
-encode_batch_size = 4
-
-# device: "auto" detects mps > cuda > cpu. Override if needed.
-device = "auto"
+# Optional per-machine overrides, merged over the selected preset:
+# [runtime]
+# parallelism = 1
+# candidate_limit = 20
+# gpu = "auto"  # "metal" or "cpu" may be selected explicitly for diagnostics
+# [models]
+# embed = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"

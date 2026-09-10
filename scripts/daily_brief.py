@@ -1,56 +1,10 @@
 #!/usr/bin/env python3
-"""daily_brief.py: Assemble the action surface that goes above the fold.
+"""Assemble the capped daily action surface.
 
-Why this exists: the daily digest's first screen is the only part read before the
-day's deep work, so it is the scarcest real estate in the system. Everything
-that competes for it already has an engine -- `deadlines.py` (expiring perks,
-open windows), `recurring.py` (obligations), `todos.py` (dated TODOs),
-`cues.py` (review debt), and optionally a private feature's derived cache
-(episode and ticket reminders). None of them decides what gets cut. That
-decision is what this script owns.
-
-The triage rule, in priority order:
-
-  1. Forfeitable, inside its own lead time -> itemized. Missing it destroys value,
-     and each row declares how early it needs the attention.
-  1b. Milestone, inside its own lead time   -> itemized under 本季主线. Nothing is
-     forfeited, but this is the quarter's main line, and a screen that only
-     ever pulls toward "don't lose money" never pulls toward it. Two or three
-     rows, never folded, so the first screen always names what the quarter is for.
-  1c. Dated TODO overdue or due by tomorrow -> itemized at tier 1. It slips
-     rather than forfeits, but "slips" here means the day it was for has
-     arrived; folding it behind a count line is how a dated TODO went unseen
-     for several mornings while far-off milestones held the screen.
-  2. Dated and due within a week           -> itemized. Slips gracefully, still needs a slot.
-  3. Everything else                       -> folded into a count line.
-  3b. Health observability                 -> one count line, always: days since
-     the newest weight row. A lapsed measurement is the failure nothing else fires on.
-
-The rule that matters most is #3, and specifically this: **an overdue
-recurring item is not urgent.** A rotation task hundreds of days overdue is not
-an emergency, it is a mis-specified task. Listing nine overdue recurring items
-individually would train the reader to skip the whole screen, so overdue
-recurring items fold to a count and only the ones that came due around now get
-their own bullet. Dated TODOs are the exception (1c): the date was written for
-that one task, so the day arriving is news, and an overdue one stays itemized.
-
-A hard line cap enforces the same discipline structurally: when the assembled
-screen exceeds it, groups fold from the bottom up rather than the screen growing.
-
-Every input degrades independently. A missing deadline index, an unreadable
-cache, or a raising cue check produces a warning line and an otherwise complete
-brief; it never blanks the screen. Stale inputs are reported as stale rather
-than presented as current, because a confidently wrong date above the fold is
-worse than an admitted gap.
-
-Usage:
-    uv run scripts/daily_brief.py                     # terminal view
-    uv run scripts/daily_brief.py --json              # for routine_digest render
-    uv run scripts/daily_brief.py --cap 8 --today 2099-01-31
-    uv run scripts/daily_brief.py --skip-cues         # fast path, no vault walk
-
-Exit codes: 0 even when every input is missing. The brief's job is to report the
-state of the day, and "nothing is known" is a reportable state.
+Forfeitable deadlines, milestones, and due dated TODOs stay itemized; far-off
+work and recurring debt fold into counts. Groups fold from the bottom when the
+line cap is exceeded. Inputs degrade independently, with stale or unreadable
+sources reported as warnings instead of blanking the brief.
 """
 
 from __future__ import annotations
@@ -186,9 +140,9 @@ def clean_todo_text(text: str) -> str:
     except ImportError:  # pragma: no cover - import guard
         pass
     try:
-        import routine_digest
+        import routine_collect
 
-        text = routine_digest.strip_inline_markup(text)
+        text = routine_collect.strip_inline_markup(text)
     except ImportError:  # pragma: no cover - import guard
         pass
     text = " ".join(text.split())
@@ -552,7 +506,7 @@ def load_recurring(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         warnings.append(f"recurring.py unavailable: {exc!r}")
         return []
     try:
-        rows = recurring.parse_file()
+        rows = recurring.parse_file(errors=warnings)
     except Exception as exc:
         warnings.append(f"recurring scan failed: {exc!r}")
         return []
@@ -666,7 +620,8 @@ def tracking_cache_path(ov: Path) -> Path | None:
         raw = tomllib.loads(config.read_text(encoding="utf-8"))
     except (tomllib.TOMLDecodeError, OSError):
         return None
-    relative = (raw.get("tracking") or {}).get("cache")
+    tracking = raw.get("tracking")
+    relative = tracking.get("cache") if isinstance(tracking, dict) else None
     if not isinstance(relative, str) or not relative.strip():
         return None
     candidate = (ov / relative.strip()).resolve()
@@ -1046,7 +1001,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Assemble the daily action surface (the digest's first screen).",
     )
-    parser.add_argument("--json", action="store_true", help="JSON for routine_digest render.")
+    parser.add_argument("--json", action="store_true", help="JSON for routine_digest write.")
     parser.add_argument("--cap", type=int, default=DEFAULT_CAP, help="Hard rendered-line cap.")
     parser.add_argument("--today", help="Override today (YYYY-MM-DD) for testing.")
     parser.add_argument(

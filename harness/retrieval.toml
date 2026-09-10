@@ -1,0 +1,37 @@
+# QMD hardware presets. These are resource limits, not measured speed claims.
+# Select a profile in the gitignored semantic.toml; no machine detection magic.
+default_profile = "m3-16gb"
+
+[models]
+embed = "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"
+rerank = "hf:ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/qwen3-reranker-0.6b-q8_0.gguf"
+generate = "hf:tobil/qmd-query-expansion-1.7B-gguf/qmd-query-expansion-1.7B-q4_k_m.gguf"
+
+[profiles.m3-16gb]
+parallelism = 1
+max_docs_per_batch = 4
+max_batch_mb = 4
+embed_context_tokens = 2048
+rerank_context_tokens = 4096
+expansion_context_tokens = 2048
+candidate_limit = 20
+query_timeout_seconds = 180
+index_timeout_seconds = 3600
+gpu = "auto"
+
+# Future preset, unverified on M5 hardware. Switching embedding model/context
+# selects a separate derived index; it never opens the old vector dimensions.
+[profiles.m5-64gb]
+parallelism = 2
+max_docs_per_batch = 16
+max_batch_mb = 16
+embed_context_tokens = 4096
+rerank_context_tokens = 8192
+expansion_context_tokens = 4096
+candidate_limit = 60
+query_timeout_seconds = 180
+index_timeout_seconds = 3600
+gpu = "auto"
+
+[profiles.m5-64gb.models]
+embed = "hf:Qwen/Qwen3-Embedding-4B-GGUF/Qwen3-Embedding-4B-Q8_0.gguf"

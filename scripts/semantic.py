@@ -1,1555 +1,533 @@
 #!/usr/bin/env python3
-"""
-semantic.py: local semantic search interface for the zk/ vault.
-
-STUB MODE:
-    Lexical fallback using tokenized substring matching over the local
-    Markdown corpus. Returns path, score, matched-token rows.
-    Active when the index directory does NOT exist.
-
-REAL MODE:
-    Embedding-backed search using pluggable Embedder + Store backends.
-    Day-one stack: BGE-M3 (sentence-transformers) + LanceDB.
-    Active when a lance directory exists. Reads prefer
-    ~/.cache/atelier/lance/; if absent, fall back to legacy
-    ~/.cache/reflectl/lance/ (existing installs migrate on next index).
-
-The CLI contract is encoder-agnostic and frozen. Swapping the backend from
-stub to real will NOT change caller code in command files or agents.
-
-See also:
-    sources/semantic.md                          (teaching doc, stable)
-    scripts/semantic_backends.py                 (backend implementations)
-
-Usage:
-    scripts/semantic.py query "<text>" [OPTIONS]
-    scripts/semantic.py status [--format text|json]
-    scripts/semantic.py corpus [--format text|json]
-    scripts/semantic.py index [--rebuild | --if-stale]
-    scripts/semantic.py --help
-
-Stdlib only in stub mode. Real mode requires: sentence-transformers, lancedb.
-"""
-
+"""Local QMD search. The vault is read-only; all derived state is machine-local."""
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
 import json
-import re
+import math
+import os
+import shutil
+import stat
+import subprocess
 import sys
-import time
-from dataclasses import dataclass, replace
-from datetime import datetime
-from pathlib import Path
-from typing import Any, Iterator, List, Optional, Sequence, Tuple
+import tempfile
+import tomllib
+from datetime import date, datetime, time as daytime
+from pathlib import Path, PurePosixPath
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from _paths import parse_iso_date, vault_root  # type: ignore[import-not-found]  # noqa: E402
-from semantic_corpus import (  # type: ignore[import-not-found]  # noqa: E402
-    ACTIVE_SCOPE,
-    corpus_metadata_fingerprint,  # noqa: F401  (re-export; harness_smoke calls semantic.corpus_metadata_fingerprint)
-    ALL_SCOPE,
-    POLICY_FINGERPRINT,
-    RAW_LOCATOR_REPRESENTATION,
-    RAW_SCOPE,
-    VALID_SCOPES,
-    CorpusRecord,
-    audit_corpus,
-    build_raw_locator_records,
-    iter_corpus_records,
-    iter_file_decisions,
-    path_prefix_matches,
-    physical_manifest_fingerprint,
-)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _paths import tier_segments, vault_root  # noqa: E402
+import _node  # noqa: E402
 
-# Lance index is machine-local (rebuild is ~7s on MPS, not worth syncing binaries).
-# Per-embedder subdirs keep indices from different models isolated by dimension
-# and vocabulary; the default (bge-m3) keeps the legacy path for backwards-
-# compat with installs that already have a built index.
-_EMBEDDER_SUBDIR = {
-    "bge-m3": "lance",
-    "qwen3-0.6b": "lance-qwen3-0.6b",
-    "qwen3-4b": "lance-qwen3-4b",
-    "qwen3-8b": "lance-qwen3-8b",
-}
-
-# Mirror of make_embedder()'s alias map in semantic_backends.py. Keep these
-# two tables in sync: if make_embedder accepts a short alias, this map must
-# normalize it to the canonical key used in _EMBEDDER_SUBDIR or the lance
-# dir will mismatch the embedding model and reads will return garbage.
-_EMBEDDER_ALIAS = {
-    "bgem3": "bge-m3",
-    "": "bge-m3",
-    "qwen3": "qwen3-0.6b",
-    "qwen-0.6b": "qwen3-0.6b",
-    "qwen-4b": "qwen3-4b",
-    "qwen-8b": "qwen3-8b",
-}
+ROOT = Path(__file__).resolve().parent.parent
+SCOPES = ("active", "raw", "archive", "inbox", "process")
+CONFIG_PATH = ROOT / "semantic.toml"
+HARD_DIRS = ("cache", "_meta", "_routine_prompts", "_tools", "node_modules", ".venv", "__pycache__")
+STAGED_MODEL_DIRECTORY_ENV = "ATELIER_QMD_MODEL_DIRECTORY"
+_QUERY_STATE_FILES = ("index.sqlite", "index.yml")
+_QUERY_SIDECARS = ("index.sqlite-wal", "index.sqlite-shm")
 
 
-def _active_embedder_key() -> str:
-    import os
-
-    raw = (os.environ.get("SEMANTIC_EMBEDDER") or "bge-m3").lower()
-    return _EMBEDDER_ALIAS.get(raw, raw)
+class SearchError(RuntimeError):
+    """An unavailable or invalid retrieval result, never a successful empty query."""
 
 
-def _lance_root_for(key: str) -> Path:
-    return Path.home() / ".cache" / "atelier" / _EMBEDDER_SUBDIR.get(key, "lance")
+def settings() -> dict:
+    with (ROOT / "harness/retrieval.toml").open("rb") as handle:
+        defaults = tomllib.load(handle)
+    local = tomllib.loads(CONFIG_PATH.read_text(encoding="utf-8")) if CONFIG_PATH.is_file() else {}
+    if "embedding" in local:
+        raise SearchError("legacy semantic.toml [embedding] settings are unsupported; use semantic.toml.example")
+    if set(local) - {"profile", "runtime", "models"}:
+        raise SearchError("unknown semantic.toml setting; use semantic.toml.example")
+    name = os.environ.get("ATELIER_QMD_PROFILE", local.get("profile", defaults["default_profile"]))
+    if not isinstance(name, str) or name not in defaults["profiles"]:
+        raise SearchError(f"unknown QMD hardware profile: {name}")
+    preset = defaults["profiles"][name]
+    if not isinstance(local.get("runtime", {}), dict) or not isinstance(local.get("models", {}), dict):
+        raise SearchError("QMD runtime and models must be TOML tables")
+    if set(local.get("runtime", {})) - (set(preset) - {"models"}) or set(local.get("models", {})) - set(defaults["models"]):
+        raise SearchError("unknown QMD runtime or model setting")
+    runtime = {**{key: value for key, value in preset.items() if key != "models"}, **local.get("runtime", {})}
+    for key, value in runtime.items():
+        if key == "gpu":
+            if value not in ("auto", "metal", "cpu"):
+                raise SearchError("QMD gpu must be auto, metal, or cpu")
+        elif type(value) is not int or value < 1:
+            raise SearchError(f"QMD {key} must be a positive integer")
+    if not 1 <= runtime["parallelism"] <= 8 or not 1 <= runtime["candidate_limit"] <= 200:
+        raise SearchError("QMD parallelism must be 1..8 and candidate_limit must be 1..200")
+    models = {**defaults["models"], **preset.get("models", {}), **local.get("models", {})}
+    if any(not isinstance(value, str) or not value.startswith("hf:") or not value.endswith(".gguf")
+           for value in models.values()):
+        raise SearchError("QMD model configuration needs explicit hf: GGUF URIs")
+    return {"profile": name, "runtime": runtime, "models": models}
 
 
-_LANCE_NEW = _lance_root_for(_active_embedder_key())
-# Reads fall back to the pre-rename location so existing installs keep
-# semantic search without a forced rebuild. Writes always go to _LANCE_NEW.
-_LANCE_OLD = Path.home() / ".cache" / "reflectl" / "lance"
+def cache_root() -> Path:
+    base = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+    return Path(os.environ.get("ATELIER_QMD_HOME", str(base / "atelier" / "qmd"))).expanduser().resolve()
 
 
-def _resolve_lance_dir(prefer_new: bool = False) -> Path:
-    """Resolve the active lance index directory for the active embedder."""
-    if prefer_new:
-        return _LANCE_NEW
-    if _LANCE_NEW.exists():
-        return _LANCE_NEW
-    if _active_embedder_key() == "bge-m3" and _LANCE_OLD.exists():
-        return _LANCE_OLD
-    return _LANCE_NEW
+def state_dir(vault: Path) -> Path:
+    cache = cache_root()
+    if cache.is_relative_to(vault) or cache.is_relative_to(ROOT):
+        raise SearchError("QMD cache must be outside both the canonical vault and the public repository")
+    if any((cache / name).is_symlink() for name in ("assets", "assets/qmd", "assets/qmd/models")):
+        raise SearchError("QMD model cache must not contain symlinked directories")
+    cfg = settings()
+    identity = [str(vault), cfg["models"]["embed"], cfg["runtime"]["embed_context_tokens"]]
+    directory = cache / hashlib.sha256(json.dumps(identity).encode()).hexdigest()[:16]
+    derived = ("index.sqlite", "index.sqlite-wal", "index.sqlite-shm", "index.yml", "index.yml.pending")
+    if directory.is_symlink() or any((directory / name).is_symlink() for name in derived):
+        raise SearchError("QMD derived state must not contain symlinks")
+    return directory
 
 
-# Module-level binding kept for backwards-compat with callers that read it
-# directly (e.g. db_path string interpolation). For read-side code paths.
-LANCE_DIR = _resolve_lance_dir()
-# Default scan root is the vault ($OV). Resolved lazily at use sites
-# via vault_root() so `--help` and other no-vault probes work without
-# $OV set; only commands that actually walk the vault (query, index)
-# require $OV.
-DEFAULT_PATH: str | None = None
+def relative_path(value: str, vault: Path) -> str:
+    path = Path(value).expanduser()
+    absolute = (vault / path).resolve() if not path.is_absolute() else path.resolve()
+    if not absolute.is_relative_to(vault):
+        raise SearchError("path must remain inside the canonical vault")
+    return absolute.relative_to(vault).as_posix()
 
 
-@dataclass
-class QueryHit:
-    path: str
-    score: float
-    chunk_id: int = 0
-    chunk_text: str = ""
-    tier: str = ""
-    mtime: float = 0.0
-    source: str = "local"
-    scope: str = ACTIVE_SCOPE
-    representation: str = "authored"
-    matched_tokens: tuple[str, ...] = ()
+def zones(vault: Path) -> dict[str, str]:
+    registry = tier_segments()
+    names = {"archive": "archive", "process": "sessions", "meta": "_meta",
+             "routine_prompts": "_routine_prompts", "private_features": "_tools/features"}
+    return {name: relative_path(registry.get(name if name != "process" else "sessions", default), vault)
+            for name, default in names.items()}
 
 
-def in_real_mode() -> bool:
-    """Sentinel check: real mode is active iff the lance directory exists."""
-    return LANCE_DIR.exists()
+def scope_for(path: str, vault: Path) -> str | None:
+    parts = PurePosixPath(path).parts
+    if not parts or ".." in parts or PurePosixPath(path).is_absolute():
+        return None
+    zone = zones(vault)
+    if any(part.startswith(".") or part in HARD_DIRS for part in parts):
+        return None
+    if any(path == zone[key] or path.startswith(zone[key] + "/")
+           for key in ("meta", "routine_prompts", "private_features")):
+        return None
+    if path.startswith(zone["archive"] + "/orphan-stubs/"):
+        return None
+    if "raw" in parts[:-1]:
+        return "raw"
+    if path.startswith(zone["archive"] + "/"):
+        return "archive"
+    if path.startswith(zone["process"] + "/"):
+        return "process"
+    if "inbox" in parts[:-1]:
+        return "inbox"
+    return "active"
 
 
-def mode_label() -> str:
-    return "real" if in_real_mode() else "stub"
+def collection_config(vault: Path) -> dict:
+    zone = zones(vault)
+    hard = [f"**/{name}/**" for name in HARD_DIRS]
+    hard += ["**/.*", "**/.*/**", zone["archive"] + "/orphan-stubs/**"]
+    hard += [zone[name] + "/**" for name in ("meta", "routine_prompts", "private_features")]
+    archive, process = zone["archive"] + "/**", zone["process"] + "/**"
+    patterns = {
+        "active": ("**/*.md", ["**/raw/**", "**/inbox/**", archive, process]),
+        "raw": ("**/raw/**/*.{md,txt,text,csv,html,htm}", []),
+        "archive": (zone["archive"] + "/**/*.md", ["**/raw/**"]),
+        "inbox": ("**/inbox/**/*.md", ["**/raw/**", archive, process]),
+        "process": (zone["process"] + "/**/*.md", ["**/raw/**"]),
+    }
+    return {
+        "models": settings()["models"],
+        "collections": {name: {
+            "path": str(vault), "pattern": pattern, "ignore": hard + exclusions,
+            "includeByDefault": name == "active",
+        } for name, (pattern, exclusions) in patterns.items()},
+    }
 
 
-def warn(msg: str) -> None:
-    """Emit a warning to stderr. Never to stdout (which carries results)."""
-    print(f"[semantic.py] {msg}", file=sys.stderr)
+def prepare(vault: Path) -> Path:
+    if not vault.is_dir():
+        raise SearchError("canonical vault directory does not exist")
+    directory = state_dir(vault)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # JSON is a YAML subset; the official QMD CLI can use this same config.
+    config = directory / "index.yml"
+    pending = directory / "index.yml.pending"
+    pending.write_text(json.dumps(collection_config(vault), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    pending.replace(config)
+    return directory
+
+
+def require_index(vault: Path) -> Path:
+    directory = state_dir(vault)
+    if not (directory / "index.sqlite").is_file():
+        raise SearchError("QMD index is absent; run semantic.py init --download-models, then semantic.py index")
+    try:
+        saved = json.loads((directory / "index.yml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SearchError("QMD collection configuration is unreadable; run semantic.py index") from exc
+    if saved != collection_config(vault):
+        raise SearchError("QMD source policy changed; run semantic.py index before querying")
+    return directory
+
+
+def _regular_file_snapshot(path: Path) -> tuple[int, int, int, int, int, int, str]:
+    """Return stable identity and content for one source file without following links."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise SearchError(f"QMD query source is unreadable or not a regular file: {path.name}") from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise SearchError(f"QMD query source is not a regular file: {path.name}")
+        digest = hashlib.sha256()
+        while block := os.read(descriptor, 1024 * 1024):
+            digest.update(block)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    def metadata(value):
+        return (value.st_dev, value.st_ino, value.st_mode, value.st_size,
+                value.st_mtime_ns, value.st_ctime_ns)
+    if metadata(before) != metadata(after):
+        raise SearchError(f"QMD query source changed while it was being read: {path.name}")
+    return (*metadata(after), digest.hexdigest())
+
+
+def _copy_verified_file(source: Path, target: Path, expected: tuple[int, int, int, int, int, int, str]) -> None:
+    """Copy one previously inspected regular file and verify both ends."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        source_descriptor = os.open(source, flags)
+    except OSError as exc:
+        raise SearchError(f"QMD query source became unreadable: {source.name}") from exc
+    target_descriptor = -1
+    digest = hashlib.sha256()
+    try:
+        source_before = os.fstat(source_descriptor)
+        source_metadata = (source_before.st_dev, source_before.st_ino, source_before.st_mode,
+                           source_before.st_size, source_before.st_mtime_ns, source_before.st_ctime_ns)
+        if not stat.S_ISREG(source_before.st_mode) or source_metadata != expected[:-1]:
+            raise SearchError(f"QMD query source changed before it could be copied: {source.name}")
+        target_descriptor = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        while block := os.read(source_descriptor, 1024 * 1024):
+            digest.update(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(target_descriptor, view)
+                if written <= 0:
+                    raise OSError(f"short write while copying {source.name}")
+                view = view[written:]
+        os.fsync(target_descriptor)
+        source_after = os.fstat(source_descriptor)
+        source_after_metadata = (source_after.st_dev, source_after.st_ino, source_after.st_mode,
+                                 source_after.st_size, source_after.st_mtime_ns, source_after.st_ctime_ns)
+        if source_after_metadata != expected[:-1] or digest.hexdigest() != expected[-1]:
+            raise SearchError(f"QMD query source changed while it was copied: {source.name}")
+    finally:
+        if target_descriptor >= 0:
+            os.close(target_descriptor)
+        os.close(source_descriptor)
+    copied = _regular_file_snapshot(target)
+    if copied[3] != expected[3] or copied[-1] != expected[-1]:
+        raise SearchError(f"QMD query copy failed verification: {source.name}")
+
+
+def _require_no_query_sidecars(directory: Path) -> None:
+    present = [name for name in _QUERY_SIDECARS if os.path.lexists(directory / name)]
+    if present:
+        raise SearchError("QMD index is active or uncheckpointed; retry after these files disappear: "
+                          + ", ".join(present))
+
+
+def _regular_model_directory(source_root: Path) -> Path:
+    models = source_root / "assets" / "qmd" / "models"
+    try:
+        info = models.lstat()
+    except OSError as exc:
+        raise SearchError("QMD model directory is absent or unreadable; run semantic.py init --download-models") from exc
+    if models.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise SearchError("QMD model directory must be a real directory, not a symlink")
+    return models.resolve(strict=True)
+
+
+def prepare_query_copy(vault: Path, destination: Path, *, require_models: bool = True) -> dict[str, str]:
+    """Stage a verified quiescent QMD query copy without copying model weights."""
+    if STAGED_MODEL_DIRECTORY_ENV in os.environ:
+        raise SearchError("cannot prepare a QMD query copy from an already staged environment")
+    if not vault.is_dir():
+        raise SearchError("canonical vault directory does not exist")
+    source_root = cache_root()
+    source_directory = state_dir(vault)
+    if not os.path.lexists(source_directory / "index.sqlite"):
+        raise SearchError("QMD index is absent; run semantic.py init --download-models, then semantic.py index")
+    parent = destination.expanduser().absolute().parent.resolve(strict=True)
+    if not parent.is_dir():
+        raise SearchError("QMD query-copy destination parent is not a directory")
+    destination = parent / destination.name
+    if os.path.lexists(destination):
+        raise SearchError("QMD query-copy destination must not already exist")
+    if (destination.is_relative_to(source_root) or destination.is_relative_to(vault.resolve())
+            or destination.is_relative_to(ROOT.resolve())):
+        raise SearchError("QMD query-copy destination must be isolated from the source, vault, and repository")
+
+    _require_no_query_sidecars(source_directory)
+    snapshots = {name: _regular_file_snapshot(source_directory / name) for name in _QUERY_STATE_FILES}
+    try:
+        saved = json.loads((source_directory / "index.yml").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise SearchError("QMD collection configuration is unreadable; run semantic.py index") from exc
+    if saved != collection_config(vault):
+        raise SearchError("QMD source policy changed; run semantic.py index before querying")
+    # Parsing is a second read, so re-check that the validated source stayed fixed.
+    if _regular_file_snapshot(source_directory / "index.yml") != snapshots["index.yml"]:
+        raise SearchError("QMD query source changed while its configuration was validated: index.yml")
+    model_directory = source_root / "assets/qmd/models"
+    if require_models or os.path.lexists(model_directory):
+        model_directory = _regular_model_directory(source_root)
+    else:
+        model_directory = destination / "assets/qmd/models"
+
+    pending = Path(tempfile.mkdtemp(prefix=f".{destination.name}.pending-", dir=parent))
+    try:
+        if model_directory.is_relative_to(destination):
+            (pending / "assets/qmd/models").mkdir(parents=True)
+        target_directory = pending / source_directory.name
+        target_directory.mkdir(mode=0o700)
+        for name in _QUERY_STATE_FILES:
+            _copy_verified_file(source_directory / name, target_directory / name, snapshots[name])
+        _require_no_query_sidecars(source_directory)
+        for name in _QUERY_STATE_FILES:
+            if _regular_file_snapshot(source_directory / name) != snapshots[name]:
+                raise SearchError(f"QMD query source changed while the copy was prepared: {name}")
+        _require_no_query_sidecars(source_directory)
+        os.replace(pending, destination)
+    except BaseException:
+        shutil.rmtree(pending, ignore_errors=True)
+        raise
+    return {
+        "ATELIER_QMD_HOME": str(destination),
+        STAGED_MODEL_DIRECTORY_ENV: str(model_directory),
+    }
+
+
+def _model_directory(command: str) -> Path:
+    staged = os.environ.get(STAGED_MODEL_DIRECTORY_ENV)
+    if staged is None:
+        return cache_root() / "assets" / "qmd" / "models"
+    if command not in {"query", "status"}:
+        raise SearchError("staged QMD state is read-only input and cannot be used for init or index")
+    if not staged.strip():
+        raise SearchError("staged QMD model directory is empty")
+    path = Path(staged).expanduser()
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise SearchError("staged QMD model directory is absent or unreadable") from exc
+    if path.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise SearchError("staged QMD model directory must be a real directory, not a symlink")
+    return path.resolve(strict=True)
 
 
 @contextlib.contextmanager
-def _exclusive_index_lock() -> Iterator[bool]:
-    """Prevent scheduled and interactive writers from mutating one index together."""
+def _staged_environment(overrides: dict[str, str]):
+    previous = {key: os.environ.get(key) for key in overrides}
+    os.environ.update(overrides)
     try:
-        import fcntl
-    except ImportError:
-        yield True
-        return
-
-    lock_dir = Path.home() / ".cache" / "atelier"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / f"semantic-{_active_embedder_key()}.lock"
-    with lock_path.open("a+", encoding="utf-8") as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
-def _corpus_snapshot(
-    vault: Path,
-) -> tuple[tuple[Any, ...], list[Path], tuple[CorpusRecord, ...]]:
-    """Classify one consistent physical snapshot and derive locator records."""
-    decisions = tuple(iter_file_decisions(vault))
-    physical_files = [
-        item.absolute_path
-        for item in decisions
-        if item.included and item.absolute_path is not None
-    ]
-    locators = build_raw_locator_records(vault, files=decisions)
-    return decisions, physical_files, locators
+def child_environment() -> dict[str, str]:
+    # Node startup hooks and ambient QMD overrides must not run before our bridge.
+    return _node.system_env(
+        passthrough=("HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "LC_CTYPE", "SystemRoot")
+    )
 
 
-def _current_corpus_manifest(
-    vault: Path,
-) -> tuple[dict[str, dict[str, Any]], int, tuple[CorpusRecord, ...], list[str]]:
-    decisions, _, locators = _corpus_snapshot(vault)
-    manifest: dict[str, dict[str, Any]] = {}
-    unreadable: list[str] = []
-    physical_count = 0
-    for item in decisions:
-        if item.included:
-            physical_count += 1
-            assert item.scope is not None and item.representation is not None
-            manifest[item.relative_path] = {
-                "mtime": item.mtime,
-                "manifest_fingerprint": physical_manifest_fingerprint(
-                    item.scope,
-                    item.representation,
-                    item.mtime,
-                ),
-            }
-        elif item.exclusion_reason == "unreadable":
-            unreadable.append(item.relative_path)
-    for record in locators:
-        manifest[record.path] = {
-            "mtime": record.mtime,
-            "manifest_fingerprint": record.manifest_fingerprint,
-        }
-    return manifest, physical_count, locators, sorted(unreadable)
-
-
-def _freshness_from_manifest(
-    current: dict[str, dict[str, Any]],
-    indexed: dict[str, dict[str, Any]],
-    *,
-    physical_count: int,
-    unreadable: Sequence[str] = (),
-) -> dict[str, Any]:
-    """Compare physical and generated corpus records with the stored manifest."""
-    current_paths = set(current)
-    indexed_paths = set(indexed)
-    new_paths = sorted(current_paths - indexed_paths)
-    removed_paths = sorted(indexed_paths - current_paths)
-    modified_paths: list[str] = []
-    for path in sorted(current_paths & indexed_paths):
-        current_row = current[path]
-        indexed_row = indexed[path]
-        mtime_changed = (
-            abs(
-                float(current_row.get("mtime", 0.0))
-                - float(indexed_row.get("mtime", 0.0))
-            )
-            > 1.0
+def bridge(vault: Path, command: str, *, roles: list[str] | None = None, **options):
+    directory = state_dir(vault)
+    model_directory = _model_directory(command)
+    if not (ROOT / "node_modules" / "@tobilu" / "qmd" / "package.json").is_file():
+        raise SearchError("QMD dependency unavailable; install Node >=22 and run npm ci in the repository")
+    config = collection_config(vault)
+    runtime = settings()["runtime"]
+    request = {"command": command, "database": str(directory / "index.sqlite"), "config": config,
+               "runtime": runtime, "roles": roles or [],
+               "modelDirectory": str(model_directory), **options}
+    env = dict(child_environment(), XDG_CACHE_HOME=str(cache_root() / "assets"),
+               GGML_METAL_NO_RESIDENCY="1", LLAMA_LOG_LEVEL="error", GGML_LOG_LEVEL="error")
+    env.update(QMD_EMBED_PARALLELISM=str(runtime["parallelism"]),
+               QMD_EMBED_CONTEXT_SIZE=str(runtime["embed_context_tokens"]),
+               QMD_RERANK_CONTEXT_SIZE=str(runtime["rerank_context_tokens"]),
+               QMD_EXPAND_CONTEXT_SIZE=str(runtime["expansion_context_tokens"]),
+               QMD_LLAMA_GPU="false" if runtime["gpu"] == "cpu" else "" if runtime["gpu"] == "auto" else runtime["gpu"],
+               QMD_FORCE_CPU="1" if runtime["gpu"] == "cpu" else "0")
+    try:
+        result = _node.run(
+            [ROOT / "scripts" / "qmd.mjs"], input=json.dumps(request), cwd=ROOT, env=env,
+            timeout=runtime["index_timeout_seconds"] if command == "index" else runtime["query_timeout_seconds"],
         )
-        fingerprint = str(current_row.get("manifest_fingerprint", "") or "")
-        indexed_fingerprint = str(indexed_row.get("manifest_fingerprint", "") or "")
-        fingerprint_changed = bool(fingerprint) and fingerprint != indexed_fingerprint
-        if mtime_changed or fingerprint_changed:
-            modified_paths.append(path)
-
-    unreadable_paths = sorted(unreadable)
-    return {
-        "fresh": not (new_paths or modified_paths or removed_paths or unreadable_paths),
-        "current_files": physical_count,
-        "current_records": len(current),
-        "indexed_files": len(indexed),
-        "indexed_records": len(indexed),
-        "new": len(new_paths),
-        "modified": len(modified_paths),
-        "removed": len(removed_paths),
-        "unreadable": len(unreadable_paths),
-        "samples": {
-            "new": new_paths[:20],
-            "modified": modified_paths[:20],
-            "removed": removed_paths[:20],
-            "unreadable": unreadable_paths[:20],
-        },
-    }
+    except _node.NodeError as exc:
+        raise SearchError(f"QMD {command} failed: {exc}") from exc
+    if result.stderr:
+        print(result.stderr.rstrip(), file=sys.stderr)
+    if result.returncode:
+        raise SearchError(f"QMD {command} exited {result.returncode}")
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise SearchError("QMD emitted invalid JSON") from exc
 
 
-def inspect_index_freshness(
-    *,
-    vault: Optional[Path] = None,
-    index_dir: Optional[Path] = None,
-) -> dict[str, Any]:
-    """Inspect index drift without loading the embedding model."""
-    from semantic_backends import (
-        LanceStore,
-        read_lance_index_manifest,
-        read_lance_index_schema_columns,
-    )
-
-    active_vault = vault or vault_root()
-    active_index = index_dir or LANCE_DIR
-    current_manifest, physical_count, locators, unreadable = _current_corpus_manifest(
-        active_vault
-    )
-
-    indexed_manifest: dict[str, dict[str, Any]] = {}
-    index_present = False
-    schema_current = False
-    error: Optional[str] = None
-    if active_index.exists():
-        try:
-            stored = read_lance_index_manifest(str(active_index))
-            if stored is not None:
-                indexed_manifest = stored
-                index_present = True
-                columns = read_lance_index_schema_columns(str(active_index)) or set()
-                schema_current = LanceStore.CORPUS_METADATA_COLUMNS.issubset(columns)
-        except Exception as exc:
-            error = f"{type(exc).__name__}: {exc}"
-
-    result = _freshness_from_manifest(
-        current_manifest,
-        indexed_manifest,
-        physical_count=physical_count,
-        unreadable=unreadable,
-    )
-    result.update(
-        {
-            "index_path": str(active_index),
-            "index_present": index_present,
-            "schema_current": schema_current,
-            "policy_current": _manifest_uses_current_policy(indexed_manifest),
-            "corpus_policy": POLICY_FINGERPRINT,
-            "raw_locator_records": len(locators),
-            "error": error,
-        }
-    )
-    if (
-        not index_present
-        or not schema_current
-        or not result["policy_current"]
-        or error is not None
-    ):
-        result["fresh"] = False
+def query(args: argparse.Namespace) -> list[dict]:
+    vault = vault_root()
+    require_index(vault)
+    requested = list(SCOPES) if args.scope == "all" else [args.scope]
+    prefixes = [relative_path(path, vault) for path in (args.path or [])]
+    after = datetime.combine(date.fromisoformat(args.after), daytime.min).timestamp() if args.after else None
+    before = datetime.combine(date.fromisoformat(args.before), daytime.max).timestamp() if args.before else None
+    if after is not None and before is not None and after > before:
+        raise SearchError("--after must not be later than --before")
+    roles = [] if args.mode == "lexical" else ["embed"]
+    if args.mode == "hybrid" and not args.no_rerank:
+        roles.append("rerank")
+    if args.expand and args.mode != "hybrid":
+        raise SearchError("--expand requires --mode hybrid")
+    if args.expand:
+        roles.append("generate")
+    # Label the pipeline that produced the score, not the one requested: a
+    # hybrid row skipping the reranker carries an RRF fusion score instead.
+    score_kind = f"{args.mode}-no-rerank" if args.mode == "hybrid" and args.no_rerank else args.mode
+    limit = min(200, max(settings()["runtime"]["candidate_limit"], args.top * (4 if prefixes or after or before else 1)))
+    rows = bridge(vault, "query", roles=roles, query=args.query, mode=args.mode,
+                  collections=requested, limit=limit, rerank=not args.no_rerank, expand=args.expand)
+    if not isinstance(rows, list):
+        raise SearchError("QMD query did not return a result list")
+    result, seen = [], set()
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            raise SearchError("QMD returned a malformed result")
+        path = row["path"]
+        actual_scope = scope_for(path, vault)
+        if actual_scope not in requested or row.get("scope") != actual_scope:
+            continue
+        source = vault / path
+        if source.is_symlink() or not source.is_file() or source.resolve() != source.absolute():
+            continue
+        if source.suffix.lower() != ".md" and actual_scope != "raw":
+            continue
+        if prefixes and not any(prefix == "." or path == prefix or path.startswith(prefix + "/") for prefix in prefixes):
+            continue
+        mtime = source.stat().st_mtime
+        if after is not None and mtime < after or before is not None and mtime > before:
+            continue
+        if path in seen:
+            continue
+        score = row.get("score")
+        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+            raise SearchError("QMD returned an invalid score")
+        seen.add(path)
+        result.append({**row, "source": "local", "backend": "qmd", "score_kind": score_kind,
+                       "representation": "raw_text" if actual_scope == "raw" else "authored"})
+        if len(result) == args.top:
+            break
     return result
 
 
-def _freshness_summary(result: dict[str, Any]) -> str:
-    state = "fresh" if result["fresh"] else "stale"
-    summary = (
-        f"{state}: current_files={result['current_files']}, "
-        f"current_records={result.get('current_records', result['current_files'])}, "
-        f"indexed_records={result.get('indexed_records', result['indexed_files'])}, "
-        f"new={result['new']}, "
-        f"modified={result['modified']}, removed={result['removed']}, "
-        f"unreadable={result['unreadable']}"
-    )
-    if result.get("schema_current") is False:
-        summary += ", schema=migration-required"
-    if result.get("policy_current") is False:
-        summary += ", policy=migration-required"
-    if result.get("error"):
-        summary += f", error={result['error']}"
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# Stub mode (lexical fallback) -- unchanged from original
-# ---------------------------------------------------------------------------
-
-_TOKEN_SPLIT = re.compile(r"[\s,./;:!?()\[\]{}\"'`\u2014\u2013-]+")
-
-
-def tokenize(query: str) -> List[str]:
-    return [t.lower() for t in _TOKEN_SPLIT.split(query.strip()) if t]
-
-
-def parse_date(s: Optional[str], flag_name: str) -> Optional[datetime]:
-    if s is None:
-        return None
-    parsed = parse_iso_date(s) if len(s.strip()) == 10 else None
-    if parsed is None:
-        warn(f"invalid {flag_name} value (expected YYYY-MM-DD): {s}")
-        sys.exit(2)
-    return datetime(parsed.year, parsed.month, parsed.day)
-
-
-def lexical_score_text(text: str, tokens: List[str]) -> Tuple[float, List[str]]:
-    text = text.lower()
-    matched: List[str] = []
-    total = 0
-    for tok in tokens:
-        n = text.count(tok)
-        if n > 0:
-            matched.append(tok)
-            total += n
-    if not matched:
-        return 0.0, []
-    return min(1.0, total / 10.0), matched
-
-
-def _derive_hit_tier(path: str, representation: str) -> str:
-    if representation in {"raw_text", RAW_LOCATOR_REPRESENTATION}:
-        return "L1"
-    top = path.split("/", 1)[0]
-    try:
-        from _paths import tier_segments, wiki_dirs
-
-        if any(
-            str(directory.relative_to(vault_root())).split("/", 1)[0] == top
-            for directory in wiki_dirs()
-        ):
-            return "L4"
-        segments = tier_segments()
-        if top in {
-            segments.get("papers", "papers").split("/", 1)[0],
-            segments.get("preprints", "preprints").split("/", 1)[0],
-        }:
-            return "L3"
-        if top in {
-            segments.get("cache", "cache").split("/", 1)[0],
-            segments.get("inbox", "inbox").split("/", 1)[0],
-        }:
-            return "L1"
-    except Exception:
-        if top == "wiki":
-            return "L4"
-        if top in {"papers", "preprints"}:
-            return "L3"
-        if top in {"cache", "inbox"}:
-            return "L1"
-    return "L2"
-
-
-def _normalize_path_prefix(value: str, vault: Path) -> Optional[str]:
-    path = Path(value)
-    if path.is_absolute():
-        try:
-            return path.resolve().relative_to(vault).as_posix()
-        except ValueError:
-            warn(f"--path {value} is outside the vault ({vault}); ignoring")
-            return None
-    return value.strip("/")
-
-
-def _path_matches(path: str, prefixes: Sequence[str]) -> bool:
-    return any(path_prefix_matches(path, prefix) for prefix in prefixes)
-
-
-def _hit_sort_key(
-    hit: QueryHit,
-    requested_scope: str,
-) -> tuple[int, float, str, int]:
-    """Keep generated locator cards behind authored results in active search."""
-    locator_tail = int(
-        requested_scope == ACTIVE_SCOPE
-        and hit.representation == RAW_LOCATOR_REPRESENTATION
-    )
-    return (locator_tail, -hit.score, hit.path, hit.chunk_id)
-
-
-def _calibrate_active_locator_tail(
-    hits: Sequence[QueryHit],
-    requested_scope: str,
-) -> list[QueryHit]:
-    """Make displayed scores agree with the active authored-first ordering."""
-    if requested_scope != ACTIVE_SCOPE:
-        return list(hits)
-    calibrated: list[QueryHit] = []
-    for hit in hits:
-        if (
-            calibrated
-            and hit.representation == RAW_LOCATOR_REPRESENTATION
-            and hit.score >= calibrated[-1].score
-        ):
-            hit = replace(
-                hit,
-                score=round(max(0.0, calibrated[-1].score - 0.0001), 4),
-            )
-        calibrated.append(hit)
-    return calibrated
-
-
-def _collapse_hits(
-    hits: Sequence[QueryHit],
-    *,
-    top: int,
-    requested_scope: str,
-) -> list[QueryHit]:
-    """Keep the best chunk per path and cap active raw-locator competition."""
-    if top <= 0:
-        return []
-    ordered = sorted(hits, key=lambda hit: _hit_sort_key(hit, requested_scope))
-    unique: list[QueryHit] = []
-    seen: set[tuple[str, str]] = set()
-    locator_count = 0
-    for hit in ordered:
-        key = (hit.source, hit.path)
-        if key in seen:
-            continue
-        if (
-            requested_scope == ACTIVE_SCOPE
-            and hit.representation == RAW_LOCATOR_REPRESENTATION
-        ):
-            if locator_count >= 2:
-                continue
-            locator_count += 1
-        seen.add(key)
-        unique.append(hit)
-        if len(unique) >= top:
-            break
-    return _calibrate_active_locator_tail(unique, requested_scope)
-
-
-def _rank_hits(
-    hits: Sequence[QueryHit],
-    *,
-    top: int,
-    requested_scope: str,
-) -> list[QueryHit]:
-    """Preserve chunk ranking while bounding raw cards in active search."""
-    if top <= 0:
-        return []
-    selected: list[QueryHit] = []
-    locator_count = 0
-    for hit in sorted(hits, key=lambda hit: _hit_sort_key(hit, requested_scope)):
-        if (
-            requested_scope == ACTIVE_SCOPE
-            and hit.representation == RAW_LOCATOR_REPRESENTATION
-        ):
-            if locator_count >= 2:
-                continue
-            locator_count += 1
-        selected.append(hit)
-        if len(selected) >= top:
-            break
-    return _calibrate_active_locator_tail(selected, requested_scope)
-
-
-def _backfill_locator_hit(
-    selected: Sequence[QueryHit],
-    supplements: Sequence[QueryHit],
-    *,
-    top: int,
-    requested_scope: str,
-    collapse: bool,
-) -> list[QueryHit]:
-    """Reserve at most one tail slot for an exact raw-locator navigation hit.
-
-    The locator never competes on a dense, tier, or cross-encoder score scale.
-    In active search, one authored result is always retained ahead of it.
-    """
-    if top <= 0:
-        return []
-    chosen = (
-        _collapse_hits(supplements, top=1, requested_scope=requested_scope)
-        if collapse
-        else _rank_hits(supplements, top=1, requested_scope=requested_scope)
-    )
-    base = list(selected[:top])
-    if not chosen:
-        return base
-
-    locator = chosen[0]
-    identity = (
-        (locator.source, locator.path)
-        if collapse
-        else (locator.source, locator.path, locator.chunk_id)
-    )
-    existing = {
-        (hit.source, hit.path) if collapse else (hit.source, hit.path, hit.chunk_id)
-        for hit in base
-    }
-    if identity in existing:
-        return base
-    if (
-        requested_scope == ACTIVE_SCOPE
-        and top == 1
-        and any(hit.representation != RAW_LOCATOR_REPRESENTATION for hit in base)
-    ):
-        return base
-
-    if requested_scope == ACTIVE_SCOPE:
-        non_locators = [
-            hit for hit in base if hit.representation != RAW_LOCATOR_REPRESENTATION
-        ]
-        existing_locators = [
-            hit for hit in base if hit.representation == RAW_LOCATOR_REPRESENTATION
-        ]
-        base = non_locators[: max(0, top - 1)]
-        remaining = max(0, top - 1 - len(base))
-        # One existing dense locator plus the exact backfill stays within the
-        # active two-card cap when authored results do not fill the page.
-        base.extend(existing_locators[: min(1, remaining)])
-    else:
-        base = base[: max(0, top - 1)]
-
-    score = max(0.0, min(1.0, locator.score))
-    if base:
-        score = min(score, max(0.0, base[-1].score - 0.0001))
-    return [*base, replace(locator, score=round(score, 4))]
-
-
-def _locator_backfill_enabled(scope: str) -> bool:
-    """Raw locator navigation is orthogonal to dense or hybrid retrieval."""
-    return scope in {ACTIVE_SCOPE, RAW_SCOPE}
-
-
-def _local_candidate_count(
-    top: int,
-    *,
-    cross_encoder: bool,
-    collapse: bool,
-) -> int:
-    """Return the local candidate pool needed by the selected query mode."""
-    if top <= 0:
-        return 0
-    if cross_encoder:
-        return max(top, 30)
-    if collapse:
-        return max(top * 6, 50)
-    return top
-
-
-_CAPSULE_HEADING = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$", re.MULTILINE)
-_CAPSULE_LIMIT = 600
-
-
-def _capsule(hit: QueryHit, requested_scope: str) -> dict[str, Any]:
-    text = hit.chunk_text.strip()
-    heading_match = _CAPSULE_HEADING.search(text)
-    heading = (
-        heading_match.group(1).strip().rstrip("#").strip()
-        if heading_match
-        else Path(hit.path).stem
-    )
-    truncated = len(text) > _CAPSULE_LIMIT
-    if truncated:
-        marker = "\n[truncated]"
-        snippet = text[: _CAPSULE_LIMIT - len(marker)].rstrip() + marker
-    else:
-        snippet = text
-    result_scope = hit.scope
-    if hit.source == "local" and requested_scope != ALL_SCOPE:
-        result_scope = requested_scope
-    return {
-        "path": hit.path,
-        "score": round(hit.score, 4),
-        "source": hit.source,
-        "tier": hit.tier,
-        "scope": result_scope,
-        "representation": hit.representation,
-        "chunk_id": hit.chunk_id,
-        "heading": heading,
-        "snippet": snippet,
-        "truncated": truncated,
-    }
-
-
-def _emit_hits(
-    hits: Sequence[QueryHit],
-    *,
-    output_format: str,
-    context: bool,
-    requested_scope: str,
-    include_source: bool,
-) -> None:
-    if output_format == "json":
-        if context:
-            payload = [_capsule(hit, requested_scope) for hit in hits]
-        else:
-            payload = []
-            for hit in hits:
-                row = {
-                    "path": hit.path,
-                    "score": round(hit.score, 4),
-                    "matched_tokens": list(hit.matched_tokens),
-                }
-                if include_source:
-                    row["source"] = hit.source
-                payload.append(row)
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
-        return
-
-    for hit in hits:
-        third = ",".join(hit.matched_tokens) if hit.matched_tokens else hit.source
-        print(f"{hit.path}\t{hit.score:.3f}\t{third}")
-
-
-def stub_query(args: argparse.Namespace) -> int:
-    warn("stub mode: lexical fallback, results are NOT semantic")
-
-    tokens = tokenize(args.query)
-    if not tokens:
-        warn("query tokenized to empty; no results")
-        return 0
-
-    vault = vault_root()
-    prefixes: list[str] = []
-    for raw_path in args.path or []:
-        prefix = _normalize_path_prefix(raw_path, vault)
-        if prefix is not None:
-            prefixes.append(prefix)
-    if args.path and not prefixes:
-        warn("no usable --path filters remain; no results")
-        return 0
-    after = parse_date(args.after, "--after")
-    before = parse_date(args.before, "--before")
-
-    if args.lang != "auto":
-        warn(f"--lang {args.lang} is a no-op in stub mode")
-    if args.sources != "local":
-        warn("stub mode is local-only; external sources are ignored")
-
-    results: list[QueryHit] = []
-    for record in iter_corpus_records(vault, scope=args.scope):
-        if prefixes and not _path_matches(record.path, prefixes):
-            continue
-        modified = datetime.fromtimestamp(record.mtime)
-        if after and modified < after:
-            continue
-        if before and modified > before:
-            continue
-        score, matched = lexical_score_text(
-            f"{record.path}\n{record.text}",
-            tokens,
-        )
-        if score > 0:
-            results.append(
-                QueryHit(
-                    path=record.path,
-                    score=score,
-                    chunk_text=record.text,
-                    tier=_derive_hit_tier(record.path, record.representation),
-                    mtime=record.mtime,
-                    source="local",
-                    scope=record.scope,
-                    representation=record.representation,
-                    matched_tokens=tuple(matched),
-                )
-            )
-
-    selected = (
-        _collapse_hits(
-            results,
-            top=args.top,
-            requested_scope=args.scope,
-        )
-        if args.context
-        else _rank_hits(results, top=args.top, requested_scope=args.scope)
-    )
-    _emit_hits(
-        selected,
-        output_format=args.format,
-        context=args.context,
-        requested_scope=args.scope,
-        include_source=False,
-    )
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Real mode (embedding-backed search)
-# ---------------------------------------------------------------------------
-
-
-def _load_trust_scores() -> dict:
-    """Load wiki trust scores from trust.py. Returns {relative_path: score}."""
-    try:
-        from trust import load_wiki, score_notes
-        from datetime import date as _date
-
-        notes = load_wiki(as_of=_date.today())
-        _, note_scores = score_notes(notes, as_of=_date.today())
-        # trust.py keys by absolute path; the index stores vault-relative
-        # paths. Relativize or the reranker's trust bonus never matches.
-        vault = vault_root()
-        scores: dict = {}
-        for p, s in note_scores.items():
-            try:
-                scores[str(Path(p).relative_to(vault))] = s
-            except ValueError:
-                scores[str(p)] = s
-        return scores
-    except Exception:
-        return {}
-
-
-def _build_retriever(with_reranker: bool = True, hybrid: bool = False):
-    """Lazy-import and construct the Retriever with the configured backends.
-
-    `hybrid=True` wraps the dense Retriever in a HybridRetriever that fuses
-    BM25 (sparse) results with dense cosine via Reciprocal Rank Fusion.
-    """
-    from semantic_backends import (
-        LanceStore,
-        Retriever,
-        TierRecencyReranker,
-        make_embedder,
-    )
-
-    embedder = make_embedder()
-    warn(
-        f"embedder: {embedder.model_name()} (device: {embedder._device}, dim: {embedder.dimension()}, max_tokens: {embedder._max_tokens})"
-    )
-
-    store = LanceStore(
-        db_path=str(LANCE_DIR),
-        embedding_dim=embedder.dimension(),
-        model_name=embedder.model_name(),
-    )
-
-    reranker = None
-    if with_reranker:
-        trust = _load_trust_scores()
-        if trust:
-            warn(f"loaded trust scores for {len(trust)} wiki entries")
-            indexed = store.get_indexed_mtimes()
-            if indexed and not (trust.keys() & indexed.keys()):
-                warn(
-                    "warning: trust keys match no indexed paths; "
-                    "trust reranking is a no-op (key format drift?)"
-                )
-        reranker = TierRecencyReranker(trust_scores=trust)
-
-    retriever = Retriever(embedder=embedder, store=store, reranker=reranker)
-    if hybrid:
-        from semantic_backends import HybridRetriever
-
-        warn("hybrid: BM25 + dense (RRF)")
-        retriever = HybridRetriever(base=retriever)
-    return retriever
-
-
-def real_query(args: argparse.Namespace) -> int:
-    warn("real mode: embedding-backed semantic search")
-
-    if not args.query.strip():
-        warn("empty query; no results")
-        return 0
-
-    # Resolve $OV early; fail fast before loading the embedder.
-    default_path = str(vault_root())
-
-    sources = {source.strip() for source in args.sources.split(",") if source.strip()}
-    unknown_sources = sources - {"local", "readwise"}
-    if unknown_sources:
-        warn(f"unknown --sources value(s): {', '.join(sorted(unknown_sources))}")
-        return 2
-    if args.top <= 0:
-        _emit_hits(
-            [],
-            output_format=args.format,
-            context=args.context,
-            requested_scope=args.scope,
-            include_source=True,
-        )
-        return 0
-    retriever = _build_retriever(hybrid=getattr(args, "hybrid", False))
-
-    # Optional cross-encoder rerank over the merged top-N candidate set.
-    cross_encoder = None
-    if (
-        getattr(args, "rerank", "auto") == "ce"
-        or getattr(args, "rerank", "auto") == "auto"
-    ):
-        # In `auto` mode the cross-encoder is opt-in via env to avoid a model
-        # download on first use; explicit `ce` always loads it.
-        import os
-
-        if args.rerank == "ce" or os.environ.get("SEMANTIC_RERANK_CE") == "1":
-            from semantic_backends import CrossEncoderReranker
-
-            warn("cross-encoder rerank: BAAI/bge-reranker-v2-m3")
-            cross_encoder = CrossEncoderReranker()
-
-    # Build filters from CLI args
-    filters = {"scope": args.scope}
-    paths = args.path or [default_path]
-    if paths != [default_path]:
-        # The index stores vault-relative paths, so prefix filters must be
-        # vault-relative too. Relativize absolute --path values; reject ones
-        # outside the vault loudly instead of silently matching nothing.
-        rel_paths = []
-        for p in paths:
-            normalized = _normalize_path_prefix(p, vault_root())
-            if normalized is not None:
-                rel_paths.append(normalized)
-        if not rel_paths:
-            warn("no usable --path filters remain; no results")
-            return 0
-        filters["path_prefix"] = rel_paths
-
-    after_dt = parse_date(args.after, "--after")
-    before_dt = parse_date(args.before, "--before")
-    if after_dt:
-        filters["mtime_after"] = after_dt.timestamp()
-    if before_dt:
-        filters["mtime_before"] = before_dt.timestamp()
-
-    t0 = time.time()
-    results: list[QueryHit] = []
-    locator_supplements: list[QueryHit] = []
-    collapse_results = args.context or len(sources) > 1
-
-    # Local search. When the cross-encoder is enabled we pull a wider
-    # candidate pool from the dense+hybrid layer so the cross-encoder has
-    # enough material to reorder meaningfully.
-    if "local" in sources:
-        candidate_k = _local_candidate_count(
-            args.top,
-            cross_encoder=cross_encoder is not None,
-            collapse=collapse_results,
-        )
-        local_results = retriever.query(
-            args.query, top_k=candidate_k, filters=filters or None
-        )
-        if cross_encoder:
-            local_results = cross_encoder.rerank(
-                args.query, local_results, top_k=candidate_k
-            )
-        if _locator_backfill_enabled(args.scope):
-            from semantic_backends import search_raw_locators_lexical
-
-            locator_results = search_raw_locators_lexical(
-                retriever.store,
-                args.query,
-                top_k=max(args.top, 2),
-                filters=filters,
-            )
-            locator_supplements.extend(
-                QueryHit(
-                    path=result.path,
-                    score=result.score,
-                    chunk_id=result.chunk_id,
-                    chunk_text=result.chunk_text,
-                    tier=result.tier,
-                    mtime=result.mtime,
-                    source=result.source,
-                    scope=result.scope,
-                    representation=result.representation,
-                )
-                for result in locator_results
-            )
-            if locator_results:
-                warn(f"raw locator lexical backfill: {len(locator_results)} candidates")
-        results.extend(
-            QueryHit(
-                path=result.path,
-                score=result.score,
-                chunk_id=result.chunk_id,
-                chunk_text=result.chunk_text,
-                tier=result.tier,
-                mtime=result.mtime,
-                source=result.source,
-                scope=result.scope,
-                representation=result.representation,
-            )
-            for result in local_results
-        )
-        warn(f"local: {len(local_results)} results")
-
-    # Readwise federated search
-    if "readwise" in sources:
-        from semantic_backends import ReadwiseSearcher
-
-        if ReadwiseSearcher.available():
-            rw_results = ReadwiseSearcher.search(args.query, top_k=args.top)
-            results.extend(
-                QueryHit(
-                    path=result.path,
-                    score=result.score,
-                    chunk_id=result.chunk_id,
-                    chunk_text=result.chunk_text,
-                    tier=result.tier,
-                    mtime=result.mtime,
-                    source=result.source,
-                    scope=result.scope,
-                    representation=result.representation,
-                )
-                for result in rw_results
-            )
-            warn(f"readwise: {len(rw_results)} results")
-        else:
-            warn("readwise: CLI not installed, skipping")
-
-    results = (
-        _collapse_hits(
-            results,
-            top=args.top,
-            requested_scope=args.scope,
-        )
-        if collapse_results
-        else _rank_hits(results, top=args.top, requested_scope=args.scope)
-    )
-    results = _backfill_locator_hit(
-        results,
-        locator_supplements,
-        top=args.top,
-        requested_scope=args.scope,
-        collapse=collapse_results,
-    )
-
-    elapsed = time.time() - t0
-    warn(f"total: {len(results)} results in {elapsed:.2f}s")
-
-    _emit_hits(
-        results,
-        output_format=args.format,
-        context=args.context,
-        requested_scope=args.scope,
-        include_source=True,
-    )
-
-    return 0
-
-
-def _record_manifest(
-    decisions: Sequence[Any],
-    locators: Sequence[CorpusRecord],
-) -> dict[str, dict[str, Any]]:
-    manifest = {
-        item.relative_path: {
-            "mtime": item.mtime,
-            "manifest_fingerprint": physical_manifest_fingerprint(
-                str(item.scope),
-                str(item.representation),
-                item.mtime,
-            ),
-        }
-        for item in decisions
-        if item.included
-    }
-    manifest.update(
-        {
-            record.path: {
-                "mtime": record.mtime,
-                "manifest_fingerprint": record.manifest_fingerprint,
-            }
-            for record in locators
-        }
-    )
-    return manifest
-
-
-def _manifest_changed(
-    current: dict[str, Any],
-    indexed: dict[str, Any],
-) -> bool:
-    if abs(float(current.get("mtime", 0.0)) - float(indexed.get("mtime", 0.0))) > 1.0:
-        return True
-    fingerprint = str(current.get("manifest_fingerprint", "") or "")
-    return bool(fingerprint) and fingerprint != str(
-        indexed.get("manifest_fingerprint", "") or ""
-    )
-
-
-def _manifest_uses_current_policy(
-    manifest: dict[str, dict[str, Any]],
-) -> bool:
-    """Whether every indexed record declares the current corpus policy."""
-    if not manifest:
-        return False
-    prefix = POLICY_FINGERPRINT + ":"
-    return all(
-        (fingerprint := str(row.get("manifest_fingerprint", "") or "")).startswith(
-            prefix
-        )
-        and len(fingerprint.split(":", 3)) >= 3
-        for row in manifest.values()
-    )
-
-
-def _search_efficiency_report(
-    retriever: Any,
-    *,
-    audit: dict[str, Any],
-    update: dict[str, Any],
-) -> dict[str, Any]:
-    """Measure scope reduction, query latency, deduplication, and capsule size."""
-    probes = (
-        "current goals and active commitments",
-        "technical architecture and system design",
-        "health energy and recovery patterns",
-    )
-    latencies_ms: list[float] = []
-    candidate_rows = 0
-    unique_rows = 0
-    capsule_bytes = 0
-    capsule_count = 0
-
-    for query in probes:
-        started = time.perf_counter()
-        raw_results = retriever.query(
-            query,
-            top_k=30,
-            filters={"scope": ACTIVE_SCOPE},
-        )
-        from semantic_backends import search_raw_locators_lexical
-
-        locator_results = search_raw_locators_lexical(
-            retriever.store,
-            query,
-            top_k=10,
-            filters={"scope": ACTIVE_SCOPE},
-        )
-        latencies_ms.append((time.perf_counter() - started) * 1000)
-        hits = [
-            QueryHit(
-                path=result.path,
-                score=result.score,
-                chunk_id=result.chunk_id,
-                chunk_text=result.chunk_text,
-                tier=result.tier,
-                mtime=result.mtime,
-                source=result.source,
-                scope=result.scope,
-                representation=result.representation,
-            )
-            for result in raw_results
-        ]
-        locator_hits = [
-            QueryHit(
-                path=result.path,
-                score=result.score,
-                chunk_id=result.chunk_id,
-                chunk_text=result.chunk_text,
-                tier=result.tier,
-                mtime=result.mtime,
-                source=result.source,
-                scope=result.scope,
-                representation=result.representation,
-            )
-            for result in locator_results
-        ]
-        collapsed = _collapse_hits(
-            hits,
-            top=10,
-            requested_scope=ACTIVE_SCOPE,
-        )
-        collapsed = _backfill_locator_hit(
-            collapsed,
-            locator_hits,
-            top=10,
-            requested_scope=ACTIVE_SCOPE,
-            collapse=True,
-        )
-        candidate_rows += len(hits) + len(locator_hits)
-        unique_rows += len(collapsed)
-        for hit in collapsed:
-            capsule_bytes += len(
-                json.dumps(
-                    _capsule(hit, ACTIVE_SCOPE),
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            )
-            capsule_count += 1
-
-    sorted_latency = sorted(latencies_ms)
-    active_records = int(audit["by_scope"][ACTIVE_SCOPE]["records"])
-    all_records = int(audit["by_scope"][ALL_SCOPE]["records"])
-    scope_reduction = 1.0 - active_records / all_records if all_records else 0.0
-    duplicate_reduction = 1.0 - unique_rows / candidate_rows if candidate_rows else 0.0
-    return {
-        "schema": 1,
-        "update": update,
-        "index": {
-            "chunks": retriever.stats().total_chunks,
-            "model": retriever.stats().model_name,
-        },
-        "corpus": {
-            "active_records": active_records,
-            "all_records": all_records,
-            "default_scope_reduction_pct": round(scope_reduction * 100, 2),
-            "excluded_files": int(audit["summary"]["excluded_files"]),
-            "raw_assets": int(audit["raw"]["assets"]),
-            "raw_locator_records": int(audit["raw"]["locator_records"]),
-            "readable_raw_files": int(audit["raw"]["readable_files"]),
-        },
-        "query_probe": {
-            "queries": len(probes),
-            "p50_ms": round(sorted_latency[len(sorted_latency) // 2], 2),
-            "max_ms": round(max(latencies_ms), 2),
-            "candidate_chunks": candidate_rows,
-            "unique_top_results": unique_rows,
-            "duplicate_chunk_reduction_pct": round(duplicate_reduction * 100, 2),
-            "average_capsule_bytes": (
-                round(capsule_bytes / capsule_count, 1) if capsule_count else 0.0
-            ),
-        },
-    }
-
-
-def real_index(args: argparse.Namespace) -> int:
-    from semantic_backends import Retriever, chunk_markdown
-
-    retriever = _build_retriever(with_reranker=False)
-    # cmd_index never goes through the hybrid wrapper; narrow for index_* calls.
-    assert isinstance(retriever, Retriever), "indexing requires base Retriever"
-
-    schema_migration = not retriever.store.has_corpus_metadata()
-    indexed_manifest = retriever.store.get_indexed_manifest()
-    policy_migration = bool(indexed_manifest) and not _manifest_uses_current_policy(
-        indexed_manifest
-    )
-    empty_index = not indexed_manifest
-    rebuild = bool(args.rebuild or schema_migration or policy_migration or empty_index)
-    if schema_migration and not args.rebuild:
-        warn("index schema lacks corpus metadata; forcing one derived-cache rebuild")
-    elif policy_migration and not args.rebuild:
-        warn("corpus policy version changed; forcing one derived-cache rebuild")
-    elif empty_index and not args.rebuild:
-        warn("index is empty; forcing a full derived-cache rebuild")
-    if rebuild:
-        warn("--rebuild: clearing existing index...")
-        retriever.store.clear()
-
-    vault = vault_root()
-    warn(f"classifying corpus under {vault}/ with semantic_corpus policy...")
-    decisions, files, locators = _corpus_snapshot(vault)
-    current_manifest = _record_manifest(decisions, locators)
-    locator_tuples = [
-        (
-            record.path,
-            record.text,
-            record.mtime,
-            record.manifest_fingerprint,
-            record.record_id,
-        )
-        for record in locators
-    ]
-    warn(
-        f"found {len(files)} physical text files and "
-        f"{len(locators)} generated raw locator records"
-    )
-
-    t0 = time.time()
-    update: dict[str, Any]
-    if rebuild:
-        physical_chunks = retriever.index_files(
-            files,
-            vault,
-            append_only=True,
-        )
-        locator_chunks = retriever.index_text_records(
-            locator_tuples,
-            append_only=True,
-        )
-        elapsed = time.time() - t0
-        update = {
-            "mode": "rebuild",
-            "added_chunks": physical_chunks + locator_chunks,
-            "changed_records": len(current_manifest),
-            "unchanged_records": 0,
-            "removed_records": 0,
-            "elapsed_s": round(elapsed, 2),
-        }
-        warn(
-            f"full rebuild: {physical_chunks + locator_chunks} chunks in {elapsed:.1f}s"
-        )
-    else:
-        current_paths = set(current_manifest)
-        indexed_paths = set(indexed_manifest)
-        changed_paths = {
-            path
-            for path in current_paths
-            if path not in indexed_manifest
-            or _manifest_changed(current_manifest[path], indexed_manifest[path])
-        }
-        removed_paths = sorted(indexed_paths - current_paths)
-        prior_changed = sorted(changed_paths & indexed_paths)
-        if removed_paths:
-            retriever.store.delete_by_path(removed_paths)
-        if prior_changed:
-            retriever.store.delete_by_path(prior_changed)
-
-        changed_files = [
-            item.absolute_path
-            for item in decisions
-            if item.included
-            and item.relative_path in changed_paths
-            and item.absolute_path is not None
-        ]
-        changed_locators = [
-            record for record in locators if record.path in changed_paths
-        ]
-        physical_chunks = retriever.index_files(changed_files, vault)
-        locator_chunks = retriever.index_text_records(
-            [
-                (
-                    record.path,
-                    record.text,
-                    record.mtime,
-                    record.manifest_fingerprint,
-                    record.record_id,
-                )
-                for record in changed_locators
-            ]
-        )
-        added = physical_chunks + locator_chunks
-        skipped = len(current_manifest) - len(changed_paths)
-        removed = len(removed_paths)
-        elapsed = time.time() - t0
-        update = {
-            "mode": "incremental",
-            "added_chunks": added,
-            "changed_records": len(changed_paths),
-            "unchanged_records": skipped,
-            "removed_records": removed,
-            "elapsed_s": round(elapsed, 2),
-        }
-        warn(
-            f"incremental: {added} chunks added, {skipped} records unchanged, "
-            f"{removed} records removed in {elapsed:.1f}s"
-        )
-
-    stats = retriever.stats()
-    warn(
-        f"index stats: {stats.total_documents} chunks, {stats.embedding_dimension}d, model={stats.model_name}"
-    )
-    corpus_audit = audit_corpus(vault, chunk_estimator=chunk_markdown)
-    report = _search_efficiency_report(
-        retriever,
-        audit=corpus_audit,
-        update=update,
-    )
-    print(
-        json.dumps(
-            {"search_efficiency": report},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-    )
-    return 0
-
-
-# ---------------------------------------------------------------------------
-# Command dispatch
-# ---------------------------------------------------------------------------
-
-
-def cmd_query(args: argparse.Namespace) -> int:
-    if args.context and args.format != "json":
-        warn("--context requires --format json")
-        return 2
-    if in_real_mode() and LANCE_DIR == _LANCE_OLD:
-        warn(
-            "querying legacy index at ~/.cache/reflectl/lance/; run "
-            "`uv run scripts/semantic.py index` once to migrate to "
-            "~/.cache/atelier/lance/, then `rm -rf ~/.cache/reflectl/lance` to clean up."
-        )
-    if in_real_mode():
-        return real_query(args)
-    return stub_query(args)
-
-
-def cmd_status(args: argparse.Namespace) -> int:
-    result = inspect_index_freshness()
-    if args.format == "json":
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-    else:
-        print(_freshness_summary(result))
-    return 2 if result.get("error") else 0
-
-
-def cmd_corpus(args: argparse.Namespace) -> int:
-    """Report corpus boundaries without loading an embedding model."""
-    from semantic_backends import chunk_markdown
-
-    result = audit_corpus(vault_root(), chunk_estimator=chunk_markdown)
-    if args.format == "json":
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
-
-    summary = result["summary"]
-    print(
-        "corpus: "
-        f"included={summary['included_files']} files, "
-        f"excluded={summary['excluded_files']} files, "
-        f"records={summary['records']}"
-    )
-    for scope in VALID_SCOPES:
-        row = result["by_scope"][scope]
-        print(
-            f"{scope}: files={row['files']}, records={row['records']}, "
-            f"estimated_chunks={row.get('estimated_chunks', 0)}"
-        )
-    raw = result["raw"]
-    print(
-        "raw: "
-        f"assets={raw['assets']}, clusters={raw['clusters']}, "
-        f"locators={raw['locator_records']}, readable={raw['readable_files']}"
-    )
-    duplicates = result["exact_duplicates"]
-    print(
-        "duplicates: "
-        f"groups={duplicates['groups']}, files={duplicates['files']}, "
-        f"redundant_bytes={duplicates['redundant_bytes']}"
-    )
-    return 0
-
-
-def cmd_index(args: argparse.Namespace) -> int:
-    # Index always writes to the new path. If a legacy ~/.cache/reflectl/lance/
-    # exists, we deliberately do NOT rebuild into it — that would silently keep
-    # the user on the old location forever. Force migration here.
-    global LANCE_DIR
-    LANCE_DIR = _resolve_lance_dir(prefer_new=True)
-    with _exclusive_index_lock() as acquired:
-        if not acquired:
-            warn("another semantic index writer is active; skipping this refresh")
-            return 0
-        if _LANCE_OLD.exists() and not _LANCE_NEW.exists():
-            warn(
-                "legacy index exists at ~/.cache/reflectl/lance/; rebuilding at "
-                "~/.cache/atelier/lance/ to migrate. The old path can be deleted "
-                "after this run completes."
-            )
-        elif not LANCE_DIR.exists():
-            warn(
-                "no existing index found; creating ~/.cache/atelier/lance/ "
-                "and building index..."
-            )
-        LANCE_DIR.mkdir(parents=True, exist_ok=True)
-        if args.if_stale:
-            freshness = inspect_index_freshness(index_dir=LANCE_DIR)
-            warn(f"freshness check: {_freshness_summary(freshness)}")
-            if freshness["fresh"]:
-                warn("index refresh skipped: no corpus drift")
-                return 0
-        return real_index(args)
+def status(vault: Path) -> dict:
+    """Inspect status against staged state so QMD never opens the live DB."""
+    def inspect() -> dict:
+        require_index(vault)
+        result = {**bridge(vault, "status"), "backend": "qmd", "freshness": "unchecked",
+                  "profile": settings()["profile"], "runtime": settings()["runtime"]}
+        result["ready"] = bool(result["totalDocuments"] and result["hasVectorIndex"]
+                               and not result["needsEmbedding"] and result["models_ready"])
+        return result
+
+    if STAGED_MODEL_DIRECTORY_ENV in os.environ:
+        return inspect()
+    with tempfile.TemporaryDirectory(prefix="atelier-qmd-status-") as temporary:
+        overrides = prepare_query_copy(vault, Path(temporary) / "qmd", require_models=False)
+        with _staged_environment(overrides):
+            return inspect()
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        prog="semantic.py",
-        description=(
-            f"Local semantic search for zk/ (current mode: {mode_label()}). "
-            "STUB mode uses lexical fallback; results are ranked by token "
-            "match count and are NOT semantic. REAL mode activates when "
-            "~/.cache/atelier/lance/ exists, with a legacy fallback to "
-            "~/.cache/reflectl/lance/ for pre-rename installs."
-        ),
-        epilog="See sources/semantic.md for the full contract.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
+    parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-
-    q = sub.add_parser("query", help="Run a semantic query.")
-    q.add_argument("query", help="Query text (quoted).")
-    q.add_argument(
-        "--path",
-        action="append",
-        default=None,
-        help="Restrict to a subdirectory, relative to the vault root ($OV); "
-        "absolute paths under the vault are accepted and relativized. "
-        "Repeatable. Default: the whole vault.",
-    )
-    q.add_argument(
-        "--after",
-        default=None,
-        help="Only files with mtime >= YYYY-MM-DD.",
-    )
-    q.add_argument(
-        "--before",
-        default=None,
-        help="Only files with mtime <= YYYY-MM-DD.",
-    )
-    q.add_argument(
-        "--top",
-        type=int,
-        default=10,
-        help="Max results. Default: 10.",
-    )
-    q.add_argument(
-        "--lang",
-        choices=["zh", "en", "auto"],
-        default="auto",
-        help="Query language hint. No-op in stub mode.",
-    )
-    q.add_argument(
-        "--format",
-        choices=["tsv", "json"],
-        default="tsv",
-        help="Output format. Default: tsv.",
-    )
-    q.add_argument(
-        "--scope",
-        choices=VALID_SCOPES,
-        default=ACTIVE_SCOPE,
-        help="Corpus scope. Default: active.",
-    )
-    q.add_argument(
-        "--context",
-        action="store_true",
-        help="Emit bounded section capsules in JSON output.",
-    )
-    q.add_argument(
-        "--sources",
-        default="local",
-        help="Comma-separated search sources. Options: local, readwise. "
-        "Default: local.",
-    )
-    q.add_argument(
-        "--hybrid",
-        action="store_true",
-        help="Enable BM25+dense hybrid retrieval (RRF fusion). Slightly slower; "
-        "consistently improves recall on keyword-heavy queries.",
-    )
-    q.add_argument(
-        "--rerank",
-        choices=["off", "auto", "ce"],
-        default="auto",
-        help="Reranker mode. 'ce' = BGE-reranker-v2-m3 cross-encoder (best "
-        "quality, ~500ms extra per query on MPS). 'auto' = ce when "
-        "SEMANTIC_RERANK_CE=1 else off. 'off' = tier/recency only.",
-    )
-    q.set_defaults(func=cmd_query)
-
-    s = sub.add_parser(
-        "status",
-        help="Inspect index freshness without loading the embedding model.",
-    )
-    s.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format. Default: text.",
-    )
-    s.set_defaults(func=cmd_status)
-
-    c = sub.add_parser(
-        "corpus",
-        help="Audit corpus scopes, exclusions, raw locators, and duplicates without a model.",
-    )
-    c.add_argument(
-        "--format",
-        choices=["text", "json"],
-        default="text",
-        help="Output format. Default: text.",
-    )
-    c.set_defaults(func=cmd_corpus)
-
-    i = sub.add_parser("index", help="Build or refresh the embedding index.")
-    index_mode = i.add_mutually_exclusive_group()
-    index_mode.add_argument(
-        "--rebuild",
-        action="store_true",
-        help="Force full rebuild.",
-    )
-    index_mode.add_argument(
-        "--if-stale",
-        action="store_true",
-        help="Run incremental indexing only when a lightweight drift check finds changes.",
-    )
-    i.set_defaults(func=cmd_index)
-
+    init = sub.add_parser("init", help="Create local QMD config; model download is explicit.")
+    init.add_argument("--download-models", action="store_true")
+    index = sub.add_parser("index", help="Let QMD scan, reconcile deleted files, and embed changes.")
+    index.add_argument("--lexical-only", action="store_true", help="Update text only; semantic queries will refuse missing embeddings.")
+    status = sub.add_parser("status", help="Inspect QMD readiness; does not scan the vault for freshness.")
+    status.add_argument("--format", choices=("text", "json"), default="json")
+    query_parser = sub.add_parser("query", help="Bounded local search; scores are ranking evidence, not confidence.")
+    query_parser.add_argument("query")
+    query_parser.add_argument("--mode", choices=("hybrid", "lexical", "vector"), default="hybrid")
+    query_parser.add_argument("--scope", choices=SCOPES + ("all",), default="active")
+    query_parser.add_argument("--top", type=int, default=10)
+    query_parser.add_argument("--path", action="append")
+    query_parser.add_argument("--after")
+    query_parser.add_argument("--before")
+    query_parser.add_argument("--no-rerank", action="store_true")
+    query_parser.add_argument("--expand", action="store_true", help="Opt into the local query-expansion model.")
+    query_parser.add_argument("--format", choices=("json", "tsv"), default="json")
     return parser
 
 
-def main() -> int:
-    parser = build_parser()
-    args = parser.parse_args()
-    return args.func(args)
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        vault = vault_root()
+        if args.command in {"init", "index"} and STAGED_MODEL_DIRECTORY_ENV in os.environ:
+            raise SearchError("staged QMD state is read-only input and cannot be used for init or index")
+        if args.command == "query":
+            if not 1 <= args.top <= 100 or not args.query.strip():
+                raise SearchError("query must be nonempty and --top must be between 1 and 100")
+            payload = query(args)
+        elif args.command == "init":
+            directory = prepare(vault)
+            if args.download_models:
+                executable = ROOT / "node_modules" / ".bin" / "qmd"
+                env = dict(child_environment(), QMD_CONFIG_DIR=str(directory), INDEX_PATH=str(directory / "index.sqlite"),
+                           XDG_CACHE_HOME=str(cache_root() / "assets"))
+                try:
+                    result = _node.run([executable, "--index", "index", "pull"],
+                                       cwd=ROOT, env=env, stdout=sys.stderr, timeout=3600)
+                except _node.NodeError as exc:
+                    raise SearchError(f"QMD model download failed: {exc}") from exc
+                if result.returncode:
+                    raise SearchError(f"QMD model download exited {result.returncode}")
+            payload = {"backend": "qmd", "profile": settings()["profile"],
+                       "config": str(directory / "index.yml"), "indexed": False}
+        elif args.command == "index":
+            prepare(vault)
+            payload = bridge(vault, "index", roles=[] if args.lexical_only else ["embed"],
+                             lexicalOnly=args.lexical_only)
+        else:
+            payload = status(vault)
+        if args.command == "query" and args.format == "tsv":
+            for row in payload:
+                print(f"{row['path']}\t{row['score']:.4f}\t{row['scope']}")
+        elif getattr(args, "format", "json") == "text":
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+        else:
+            print(json.dumps(payload, ensure_ascii=False))
+        return 0
+    except (SearchError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        print(f"semantic: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

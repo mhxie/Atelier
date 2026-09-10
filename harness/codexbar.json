@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "hooks": {"enabled": false, "events": []},
+  "providers": [
+    {"id": "codex", "enabled": true, "source": "oauth", "cookieSource": "off"},
+    {"id": "claude", "enabled": true, "source": "oauth", "cookieSource": "off", "claudeSwapEnabled": false}
+  ]
+}

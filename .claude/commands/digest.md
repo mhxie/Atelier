@@ -1,5 +1,5 @@
 ---
-description: "Daily and weekly digest: action surface, mandatory configured status updates, and routine intel, written to $OV and mailed."
+description: "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
 ---
 # Digest
 
@@ -45,7 +45,7 @@ decision, and which saved articles are worth the user's time.
 ```bash
 SCRATCH=$(mktemp -d)
 MODE=daily   # or weekly
-PY="${ATELIER_PYTHON:-$(scripts/find_python.sh)}"
+PY="$(scripts/find_python.sh markdown_it)" || exit 1
 BRIEF=""
 CONTEXT=""
 PLACE=""   # city where the day is spent, from the calendar; empty skips weather
@@ -57,84 +57,37 @@ if [ "$MODE" = daily ]; then
         --response-fields title,author,summary,category,word_count,reading_time,saved_at,tags,source_url \
         --json > "$SCRATCH/articles.json" || echo "readwise unavailable" >&2
 fi
-"$PY" scripts/daily_context.py ${PLACE:+--place "$PLACE"} --json --out "$SCRATCH/context.json" && CONTEXT=1
+"$PY" scripts/daily_context.py --refresh-quota --no-weather --json --out "$SCRATCH/context.json" && CONTEXT=1
 ```
 
-The scheduled run passes `--offline` to `daily_context.py`: its allowlist
-grants no web action, so the script must not fetch weather there, and the
-flag says so instead of leaving the model to skip the whole script and lose
-the quota half, which never touches the network. Weather in the unattended
-document needs an explicit permission in the profile, and that changes the
-profile fingerprint, so the permission smokes must be re-run first.
+Use this interpreter for every step; never substitute `uv run`. Python and the
+locked Node/MJML packages are deployment prerequisites (`uv sync --locked`,
+`npm ci`) and must never be installed or synced during a run.
 
-`PLACE` is where the day is spent, and it is the one input here that needs
-judgment: interactively, read today's calendar, take the city of the first
-located event, and pass it as a city name (`"Lisbon"`), not an address. Leave
-it unset when the calendar is unavailable, which is always the case for the
-scheduled run: `daily_context.py` then falls back to `[weather] place` in the
-private `$OV/_meta/digest.toml` (add `region` there when the name is
-ambiguous; the geocoder otherwise takes the most populous match), and with
-neither it renders no weather and still carries the quota. It geocodes the place and fetches the day's forecast
-from Open-Meteo, the only network call it makes; the harness quota half reads
-the claude-hud usage snapshot and the newest Codex session log from disk, so
-both numbers carry their snapshot age into the document.
+Interactively, set `PLACE` to the city of today's first located calendar event,
+not an address. To fetch weather interactively, replace `--no-weather` with
+`--place "$PLACE"`; an empty place falls back to private weather config.
+Scheduled runs use `--refresh-quota --no-weather` only with `quota:read`;
+otherwise use `--offline`. Scheduled weather is disabled by the helper, and
+offline never makes network requests. Missing optional inputs, including
+CodexBar, are non-fatal: retain warnings and attach only completed artifacts.
 
-`PY` is the interpreter for every script call in this procedure, and it is
-never `uv run`. The scheduled routine exports `$ATELIER_PYTHON` because inside
-its sandbox a bare `python3` is macOS's 3.9 and `uv` cannot sync; interactively
-`scripts/find_python.sh` resolves the same thing. The scripts are stdlib-only,
-so no environment is needed beyond the interpreter. `BRIEF` and `CONTEXT` record
-whether the brief and the context actually landed, so step 5 attaches each
-only when it exists.
+Install the host's standalone [CodexBar 0.57.0](https://github.com/steipete/CodexBar/releases/tag/v0.57.0)
+and resource bundle on the runner's PATH, using existing provider logins.
+`harness/codexbar.json` disables hooks, browser cookies, and account swapping.
+Smoke the quota-only command above in the runner's environment before enabling
+refresh. `<paths.cache>/digest-quota.json` stores only normalized measurements;
+offline reads retain timestamps and omit expired windows. Never install,
+log in, or retry during a digest run.
 
-`daily_brief.py` is an offline integration layer. It reads any configured
-tracking cache but never refreshes it. The independent, owner-gated
-`com.atelier.tracking-refresh` deterministic routine owns AniList and concert
-cache refreshes before this procedure runs; a missed or failed refresh appears
-as a brief warning instead of turning the digest into a network retry path.
+Selection windows, one-day carry, delivered-update cursors, private ledger
+rows, cache reads, and first-screen folding are deterministic script-owned
+behavior. Do not recreate them in prose or refresh caches here. For backlog,
+add `--unacked --max-files 40` to `collect`.
 
-The daily selection is the effective day plus a one-day carry: files dated
-yesterday that no earlier daily digest delivered. Routines that finish after
-the morning run (the Thursday finance pair runs at 07:00 and 08:00, the digest
-at 06:00) write files dated that day, and without the carry they were never
-digested. `write` records every delivered path with the artifact's date in
-`$OV/_meta/digest_update_state.json`; the next day's carry skips those, while
-a same-day re-run reproduces the same selection. Carried sources are marked
-`carried` in the manifest and `补录` in the source index. `--days` or
-`--since` disables the carry.
-
-For backlog, swap the window for `--unacked --max-files 40`.
-
-All three fetches are deterministic and happen before any judgment. The
-scheduled routine runs them the same way: its profile carries
-`shell_network = "enabled"`, which under `workspace-write` grants shell egress
-while leaving the filesystem fence in place. The Readwise read is the only thing
-that needs the network, and it did not justify `danger-full-access`.
-
-`routine_digest.py collect` also reads optional append-only status ledgers from
-`$OV/_meta/digest_updates.toml`. Their paths and labels are private config, not
-public workflow policy. New rows are mandatory digest content: daily mode uses
-a delivery cursor so an update made after the morning run appears exactly once
-in the next daily artifact; weekly mode repeats rows checked inside the 7-day
-window. `write` advances the daily cursor only after the artifact lands. This
-cursor means “reported”, not “reviewed”, and is intentionally separate from
-`routine_acks.json`.
-
-Report the window, the file count, the status-update count, and every warning
-the manifest or brief raised. If the manifest has 0 files, 0 status updates,
-**and** the brief has 0 groups, say so and stop; do not write or mail an empty
-document.
-
-The brief's first screen carries, in this order: forfeitable rows inside their
-lead time, **本季主线** (the `milestone` rows of the deadline index, which are
-the dated commitments from `profile/directions.md`), dated TODOs, then the
-folded counts. 本季主线 is never folded; it exists so the screen pulls toward
-the quarter's purpose and not only away from lost money. Its rows are
-refreshed by `/weekly`, not here.
-
-The brief's warnings matter as much as its content. A stale deadline index or a
-stale tracking cache means the first screen is incomplete, and the user needs to
-know that before trusting it. Surface those verbatim.
+Report the window, file count, status-update count, and every manifest or brief
+warning verbatim. If there are no files, status updates, or brief groups, say
+so and stop without writing or mailing an empty document.
 
 ### 2. Read the manifest
 
@@ -260,11 +213,13 @@ Section order for **daily**:
    contradicted something, what changed versus last week.
 
 5. **前沿实验室** is rendered from the `frontier_labs` object, not from
-   `sections`. Fill it from the newest manifest source that carries this
-   object; the routine producing it is declared privately in
-   `$OV/_meta/routine_watch.toml`, so when its latest output is older than
-   the window, read the newest file under that routine's `output_dir` rather
-   than naming a path here:
+   `sections`. Read the specific vault-relative file in
+   `manifest.context_sources.frontier_labs.path` to build this object. The
+   collector selects the latest eligible sweep through the window end, even
+   outside the window; this background reference is not fresh routine output.
+   Do not discover its directory through the private registry. If the reference
+   is absent, retain `context_warnings` and omit the object rather than inventing
+   a sweep:
 
    ```json
    "frontier_labs": {
@@ -352,9 +307,9 @@ Content rules:
   routine itself marked unverified stay marked.
 - **Name the gaps.** Routines log their blocked sources and skipped channels. A
   week where a monitor collected nothing is a finding.
-- **Budget.** Daily: 200-400 words total. Weekly: 600-900. The source index
-  already costs about 1000 words and the whole document targets an
-  eight-minute read.
+- **Budget.** The whole document targets an eight-minute read and the source index
+  already spends most of it, so the written sections are the short part. Weekly
+  carries seven days and earns proportionally more.
 - **Language.** Match the user's. Chinese topics and Chinese-language sources get
   Chinese. No em dashes.
 
@@ -369,23 +324,11 @@ Content rules:
 ```
 
 `write` resolves the destination from the digest routine's own
-`routine_watch.toml` row: the one row carrying `digest = { include = false }`,
-which is what stops tomorrow's digest from ingesting today's. The name is not
-passed because the registry is private and the routine's name is not exported
-into the sandbox. If several rows are excluded, `write` stops and names them;
-then add `--routine <name>` to say which one writes the digest.
-
-It warns when the document exceeds Gmail's ~102 KB clip threshold. That is a
-report, not a failure: the document is ordered so the clipped tail is the source
-index. A clip warning on a normal window means the window is too wide.
-
-`write` also runs the document's own invariants before writing and prints each
-miss as a `check:` line: a countdown printed twice on one ledger row, a tech
-feed of bare headlines, a decision card without its settling condition. They
-are reports on the inputs, never a reason to skip the morning's document.
-`"$PY" scripts/routine_digest.py check` re-runs them on the newest artifact:
-exit 3 on findings, 1 when the check itself could not run, 0 when clean;
-`/lint` Phase 0 calls it and reports findings as WARN.
+private row carrying `digest = { include = false }`; if several rows match, it
+stops until `--routine <name>` selects one. Surface every size or `check:`
+warning but keep the artifact: input-quality findings and Gmail clipping are
+reports, not write failures. `"$PY" scripts/routine_digest.py check` re-runs
+those checks; `/lint` owns their WARN integration.
 
 Interactively, show the user the first screen and the overview text before
 step 6. The scheduled run has no such gate, which is why the mail is addressed
@@ -399,20 +342,10 @@ only to the user themselves.
   --subject "<the document title>"
 ```
 
-The recipient is not a parameter. It comes from `$OV/_meta/mail.toml`, which
-this procedure never reads, so no wording here and no model decision can send
-the document anywhere but the configured account.
-
-Delivery is deterministic on purpose, and not only for safety: the Codex Gmail
-plugin marks `send_email` as requiring approval, and unattended routines run
-under `approval_policy = "never"`, so a model-sent message fails outright there.
-
-If the send fails, say so and stop. Do **not** fail the cycle or retry into a
-different channel: the artifact is already written and is the source of truth,
-so a delivery failure is a secondary-channel failure by
-`protocols/remote-routines.md`.
-
-Report the artifact path and whether the mail was sent.
+The deterministic mail command gets its sole recipient from private config; the
+model neither reads nor overrides it. On send failure, report it and stop: do
+not fail the cycle, retry, or choose another channel, because the artifact is
+already canonical. Always report the artifact path and mail status.
 
 ### 7. Offer the ack
 
@@ -420,13 +353,9 @@ Report the artifact path and whether the mail was sent.
 "$PY" scripts/routine_digest.py ack --manifest "$SCRATCH/manifest.json" --dry-run
 ```
 
-Show the diff, then run without `--dry-run` **only after the user approves**. It
-writes `$OV/_meta/routine_acks.json`. Acking claims the material was reviewed; it
-is the user's call, not a cleanup step. Routines the digest excluded keep their
-cue.
-
-Under the scheduled routine, ack is **not** run: the mail arriving is not
-evidence the user read it. Acking stays an interactive act.
+Show the diff, then run without `--dry-run` **only after the user approves**.
+Ack means reviewed, not merely delivered; excluded routines keep their cue.
+Never ack in a scheduled run.
 
 ## Weekly deadline extraction
 
@@ -462,25 +391,16 @@ verdict.
 
 - Scratch files live in `mktemp -d` output. The artifact itself is the only
   durable output and `write` places it.
-- The masthead strip shows a number only when it changes the next twelve
-  hours: 关窗, 主线 (days to the nearest milestone), 体重 (days since the last
-  weight row), 决策 (bullets under 需要的决策), and 失败 when nonzero. Fleet
-  bookkeeping (有产出, 完成, 待 review, recurring 逾期) is in the colophon.
-- Mail clients sanitize CSS, so the renderer emits semantic HTML only. Source
-  references render as plain labels rather than `#anchor` links, because Gmail
-  rewrites in-message anchors so they navigate nowhere.
+- The renderer owns masthead/colophon placement, responsive MJML, escaping,
+  HTTP(S)-only links, and source labels. Do not reproduce or override those
+  deterministic presentation rules in the overview.
 - Per-routine lanes and exclusions live in `$OV/_meta/routine_watch.toml`
-  (`digest = { lane = "...", include = false }`), not here. Propose an edit there
-  when a routine lands in the wrong lane; that file is private state, so the user
-  approves the write.
-- Harness-maintenance output (the nightly decay sweep) is excluded by default and
+  (`digest = { lane = "...", include = false }`), not here. A correction there
+  is a private-state write and requires user approval.
+- Autoevo maintenance output is excluded by default and
   belongs to `/autoevo-review`.
-- The Readwise CLI registers its subcommands from a 24-hour tool cache in the
-  home directory and rewrites it when stale; inside the routine sandbox that
-  write fails and every subcommand becomes unknown. `routine_runner.sh` warms
-  the cache outside the sandbox before launching any routine whose allowlist
-  carries a `readwise:` permission, so this does not depend on someone having
-  used the CLI interactively in the last day.
+- The Prefect adapter owns any required Readwise tool-cache warm-up before the
+  sandbox; do not repair or install it during this procedure.
 - The brief's line cap never folds forfeitable items. When it reports `over_cap`,
   that is a real signal that too much is closing at once, not a formatting
   problem to fix.

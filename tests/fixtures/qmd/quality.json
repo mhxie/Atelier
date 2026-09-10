@@ -1,0 +1,5 @@
+[
+  {"query": "How should a client handle HTTP 429 responses?", "target": "wiki/rate-limits.md"},
+  {"query": "连续开会很疲惫，怎样恢复注意力？", "target": "reflections/精力管理.md"},
+  {"query": "Prefect 如何安排 QMD indexing task？", "target": "work/任务编排.md"}
+]

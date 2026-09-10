@@ -1,6 +1,4 @@
 """routine_mail.py: SMTP delivery of the rendered digest; recipient and credentials come only from private config.
-
-Split out of routine_digest.py; routine_digest.py re-exports every name so callers and tests are unchanged.
 """
 
 from __future__ import annotations

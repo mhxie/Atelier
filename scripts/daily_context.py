@@ -1,46 +1,18 @@
 #!/usr/bin/env python3
-"""daily_context.py: masthead context for the daily digest, deterministic.
+"""Digest weather and timestamped quota; setup lives in the digest command.
 
-Two facts that belong at the top of the morning document but that no routine
-produces: what the sky will do where the user will actually be, and how much of
-each coding harness's weekly window is still there. Both are read here so the
-digest procedure stays a judgment layer and never a data-fetching one.
-
-Quota is read from files the harnesses already leave behind, not from an API:
-
-- Claude Code: the newest snapshot claude-hud writes under
-  ``~/.cache/claude-hud/usage-*.json`` (``percent`` used, ``resetsAtEpoch``,
-  ``model``). It only exists when a statusline has rendered recently, so the
-  snapshot time is carried into the output and shown next to the number.
-- Codex: the last ``rate_limits`` event in the newest rollout under
-  ``~/.codex/sessions``. Same caveat, same treatment.
-
-A passive snapshot can be a day old. That is acceptable for a weekly window,
-which is why the digest shows the snapshot time rather than hiding it, and why
-this script never opens a network connection for quota.
-
-Weather is the one network call. The place comes from ``--place`` when the
-digest procedure could read the calendar, otherwise from the private
-``$OV/_meta/digest.toml`` (``[weather] place = "..."``), which is what an
-unattended run uses. No place, no weather. Open-Meteo needs no key. A failed
-fetch becomes a warning, never a missing document.
-
-``--offline`` skips the weather fetch even when a place is configured, so a
-run whose action allowlist grants no web access can still carry the quota
-half, which never touches the network. The skip is reported as a warning
-when a place was configured, so the reader knows why the masthead is bare.
-
-Usage:
-    daily_context.py [--place "Lisbon"] [--offline] [--date YYYY-MM-DD] --json [--out F]
+--refresh-quota uses CodexBar OAuth. --offline forbids network; scheduled
+weather is always off. Missing context is non-fatal.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
+import math
 import os
-import re
+import signal
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -50,19 +22,14 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import PathsError, vault_root  # noqa: E402
+from _paths import PathsError, atomic_write, tier_segments, vault_root  # noqa: E402
 
-CONTEXT_SCHEMA = 1  # must match routine_digest.CONTEXT_SCHEMA
+CONTEXT_SCHEMA = 1  # must match routine_collect.CONTEXT_SCHEMA
 DIGEST_CONFIG = "_meta/digest.toml"
 
 HTTP_TIMEOUT = 12
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
-
-# Remaining share of the window, not the used share: the number the reader
-# acts on is how much is left, so that is the one that carries the colour.
-QUOTA_GREEN_ABOVE = 40
-QUOTA_AMBER_ABOVE = 20
 
 # WMO weather interpretation codes, the subset Open-Meteo emits, in Chinese.
 _WMO = {
@@ -96,26 +63,20 @@ _WMO = {
     99: "雷暴冰雹",
 }
 
-_CODEX_RATE_LIMITS = re.compile(
-    r'"rate_limits":\s*(\{\s*"limit_id".*?"plan_type":\s*"[^"]*"[^}]*\})'
-)
-
-
 # ---------------------------------------------------------------- quota
 
 
 def quota_level(left_percent: int) -> str:
     """'ok' above 40 % left, 'low' down to 20 %, 'critical' below that."""
-    if left_percent > QUOTA_GREEN_ABOVE:
+    if left_percent > 40:
         return "ok"
-    if left_percent > QUOTA_AMBER_ABOVE:
+    if left_percent > 20:
         return "low"
     return "critical"
 
 
 def relative_reset(reset_epoch: float, now: float) -> str:
-    """'1 天 23 小时后重置': a countdown, because a weekday and clock time make
-    the reader do the subtraction the document should have done."""
+    """Chinese reset countdown, rounded down to whole minutes."""
     seconds = max(0, int(reset_epoch - now))
     days, rem = divmod(seconds, 86400)
     hours, rem = divmod(rem, 3600)
@@ -134,7 +95,14 @@ def _quota_entry(
     snapshot_epoch: float,
     now: float,
 ) -> dict[str, Any]:
-    used = max(0, min(100, int(round(used_percent))))
+    values = (used_percent, reset_epoch, snapshot_epoch)
+    if (name not in {"Codex", "Claude Code"} or not isinstance(window, str)
+            or not window[:-1].isdigit() or window[-1:] not in {"m", "h", "d"}
+            or any(type(v) not in (int, float) or not math.isfinite(v) for v in values)
+            or not 0 <= used_percent <= 100 or not 0 < snapshot_epoch <= now + 300
+            or reset_epoch <= max(now, snapshot_epoch)):
+        raise ValueError("invalid or expired quota window")
+    used = int(round(used_percent))
     left = 100 - used
     return {
         "name": name,
@@ -149,97 +117,84 @@ def _quota_entry(
     }
 
 
-def read_claude_quota(cache_dir: Path, now: float) -> dict[str, Any] | None:
-    """Newest claude-hud usage snapshot, or None when no statusline has run."""
-    paths = sorted(glob.glob(str(cache_dir / "usage-*.json")), key=os.path.getmtime)
-    if not paths:
-        return None
-    path = paths[-1]
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict) or "percent" not in data or "resetsAtEpoch" not in data:
-        return None
-    fetched = float(data.get("fetchedAtMs") or 0) / 1000 or os.path.getmtime(path)
-    model = str(data.get("model") or "").strip()
-    window = f"{model} · 7d" if model else "7d"
-    return _quota_entry(
-        "Claude Code", window, float(data["percent"]), float(data["resetsAtEpoch"]), fetched, now
+def _epoch(value: str) -> float:
+    stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if stamp.tzinfo is None:
+        raise ValueError("quota timestamp has no timezone")
+    return stamp.timestamp()
+
+
+def _codexbar_rows() -> list[dict[str, Any]]:
+    """One bounded OAuth read; never inherit GUI hooks or token overrides."""
+    env = {k: v for k, v in os.environ.items() if k in {
+        "HOME", "PATH", "LANG", "TMPDIR", "CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
+    }}
+    env["CODEXBAR_CONFIG"] = str(Path(__file__).resolve().parents[1] / "harness/codexbar.json")
+    proc = subprocess.Popen(
+        ["codexbar", "usage", "--provider", "both", "--source", "oauth", "--format", "json", "--json-only"],
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True,
     )
-
-
-def _find_key(obj: Any, key: str, depth: int = 0) -> Any:
-    """First value under `key` anywhere in a nested JSON object."""
-    if depth > 6:
-        return None
-    if isinstance(obj, dict):
-        if key in obj and isinstance(obj[key], dict):
-            return obj[key]
-        for value in obj.values():
-            found = _find_key(value, key, depth + 1)
-            if found is not None:
-                return found
-    elif isinstance(obj, list):
-        for value in obj:
-            found = _find_key(value, key, depth + 1)
-            if found is not None:
-                return found
-    return None
-
-
-def _rate_limits_from_line(line: str) -> dict[str, Any] | None:
-    """Parse the whole line as JSON and walk to `rate_limits`; the regex is a
-    fallback for a line that is not one complete JSON object."""
     try:
-        found = _find_key(json.loads(line), "rate_limits")
-        if found is not None:
-            return found
-    except json.JSONDecodeError:
-        pass
-    match = _CODEX_RATE_LIMITS.search(line)
-    if not match:
-        return None
+        stdout, _ = proc.communicate(timeout=45)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.communicate()
+        raise
+    data = json.loads(stdout)  # A nonzero exit can still contain one good provider.
+    rows = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict) or item.get("error"):
+            continue
+        name = {"codex": "Codex", "claude": "Claude Code"}.get(item.get("provider"))
+        usage = item.get("usage")
+        if not name or not isinstance(usage, dict):
+            continue
+        for key in ("primary", "secondary"):
+            window = usage.get(key)
+            if not isinstance(window, dict):
+                continue
+            try:
+                minutes = window["windowMinutes"]
+                if type(minutes) is not int or minutes <= 0:
+                    continue
+                label = f"{minutes // 1440}d" if minutes % 1440 == 0 else (
+                    f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}m")
+                rows.append(dict(name=name, window=label, used_percent=window["usedPercent"],
+                                 reset_epoch=_epoch(window["resetsAt"]), snapshot_epoch=_epoch(usage["updatedAt"])))
+            except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
+                continue
+    return rows
+
+
+def read_quota(cache: Path | None, now: float, refresh: bool) -> tuple[list[dict[str, Any]], list[str]]:
+    warnings = []
     try:
-        return json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return None
-
-
-def read_codex_quota(sessions_dir: Path, now: float) -> dict[str, Any] | None:
-    """Last rate_limits event in the newest rollout, or None."""
-    paths = sorted(
-        glob.glob(str(sessions_dir / "*" / "*" / "*" / "rollout-*.jsonl")),
-        key=os.path.getmtime,
-    )
-    for path in reversed(paths[-5:]):
-        last: dict[str, Any] | None = None
+        rows = _codexbar_rows() if refresh else json.loads(cache.read_text()) if cache else []
+    except (OSError, TypeError, ValueError, OverflowError, subprocess.SubprocessError):
+        rows = []
+    entries, clean = [], []
+    for row in rows if isinstance(rows, list) else []:
         try:
-            with open(path, encoding="utf-8", errors="replace") as handle:
-                for line in handle:
-                    if '"rate_limits"' not in line:
-                        continue
-                    parsed = _rate_limits_from_line(line)
-                    if parsed is not None:
-                        last = parsed
+            entry = _quota_entry(now=now, **row)
+        except (TypeError, ValueError, OverflowError):
+            warnings.append("quota: invalid or expired window omitted")
+            continue
+        entries.append(entry)
+        clean.append(row)
+    if refresh and cache:
+        mask = os.umask(0o077)
+        try:
+            if cache.exists():
+                cache.chmod(0o600)
+            atomic_write(cache, json.dumps(clean) + "\n")
         except OSError:
-            continue
-        primary = (last or {}).get("primary") or {}
-        if not primary or "used_percent" not in primary or "resets_at" not in primary:
-            continue
-        minutes = int(primary.get("window_minutes") or 0)
-        window = f"{minutes // 1440}d" if minutes >= 1440 else f"{minutes}m"
-        plan = str(last.get("plan_type") or "").strip()
-        label = f"{plan} · {window}" if plan else window
-        return _quota_entry(
-            "Codex",
-            label,
-            float(primary["used_percent"]),
-            float(primary["resets_at"]),
-            os.path.getmtime(path),
-            now,
-        )
-    return None
+            warnings.append("quota: cache write unavailable")
+        finally:
+            os.umask(mask)
+    for name in ("Codex", "Claude Code"):
+        if not any(entry["name"] == name for entry in entries):
+            warnings.append(f"{name} quota: unavailable")
+    return entries, warnings
 
 
 # ---------------------------------------------------------------- weather
@@ -288,10 +243,10 @@ def geocode(place: str, region: str | None = None, country: str | None = None) -
 
 def summarize_forecast(daily: dict[str, Any], hourly: dict[str, Any], place: str) -> dict[str, Any]:
     """Reduce one day's forecast to the four numbers a masthead has room for."""
-    code = int((daily.get("weather_code") or [0])[0])
-    tmin = round(float((daily.get("temperature_2m_min") or [0])[0]))
-    tmax = round(float((daily.get("temperature_2m_max") or [0])[0]))
-    pop = int((daily.get("precipitation_probability_max") or [0])[0])
+    code = int(daily["weather_code"][0])
+    tmin = round(float(daily["temperature_2m_min"][0]))
+    tmax = round(float(daily["temperature_2m_max"][0]))
+    pop = int(daily["precipitation_probability_max"][0])
     hours: list[dict[str, Any]] = []
     for stamp, temp in zip(hourly.get("time") or [], hourly.get("temperature_2m") or []):
         hour = int(str(stamp)[11:13])
@@ -364,29 +319,26 @@ def build(
     region: str | None = None,
     country: str | None = None,
     now: float | None = None,
-    claude_cache: Path | None = None,
-    codex_sessions: Path | None = None,
+    quota_cache: Path | None = None,
     weather_fetcher=fetch_weather,
     ov: Path | None = None,
     offline: bool = False,
+    refresh_quota: bool = False,
+    no_weather: bool = False,
 ) -> dict[str, Any]:
     now = time.time() if now is None else now
-    home = Path.home()
-    claude_cache = claude_cache or home / ".cache" / "claude-hud"
-    codex_sessions = codex_sessions or home / ".codex" / "sessions"
-    warnings: list[str] = []
-
-    quota = []
-    claude = read_claude_quota(claude_cache, now)
-    if claude:
-        quota.append(claude)
-    else:
-        warnings.append("claude quota: no claude-hud snapshot found")
-    codex = read_codex_quota(codex_sessions, now)
-    if codex:
-        quota.append(codex)
-    else:
-        warnings.append("codex quota: no rate_limits event found in recent sessions")
+    if quota_cache is None:
+        try:
+            quota_cache = (ov or vault_root()) / tier_segments()["cache"] / "digest-quota.json"
+        except PathsError:
+            pass
+    allowed = "quota:read" in os.environ.get("ATELIER_ROUTINE_PERMISSIONS", "").split(",")
+    scheduled = "ATELIER_ROUTINE_PROFILE" in os.environ
+    no_weather = no_weather or scheduled
+    denied = offline or (scheduled and not allowed)
+    quota, warnings = read_quota(quota_cache, now, refresh_quota and not denied)
+    if refresh_quota and denied:
+        warnings.append("quota refresh skipped: offline or routine permission denied")
 
     weather: dict[str, Any] | None = None
     place_source = "argument" if place else ""
@@ -398,8 +350,8 @@ def build(
             region_arg = region_arg or configured.get("region")
             country_arg = country_arg or configured.get("country")
             place_source = "config"
-    if place and offline:
-        warnings.append(f"weather skipped for {place!r}: --offline (no web access in this run)")
+    if place and (offline or no_weather):
+        warnings.append(f"weather skipped for {place!r}: {'--offline' if offline else '--no-weather'}")
     elif place:
         try:
             weather = weather_fetcher(place, day, region_arg, country_arg)
@@ -445,15 +397,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--offline",
         action="store_true",
-        help="Never fetch weather; quota only. For runs without web access.",
+        help="No network: cached quota only, no weather fetch.",
     )
+    parser.add_argument("--refresh-quota", action="store_true", help="Refresh quota through CodexBar OAuth.")
+    parser.add_argument("--no-weather", action="store_true", help="Skip weather independently of quota refresh.")
     parser.add_argument("--json", action="store_true", help="JSON instead of a text report.")
     parser.add_argument("--out", help="Write to a file instead of stdout.")
     args = parser.parse_args(argv)
 
     day = date.fromisoformat(args.date) if args.date else datetime.now().date()
     context = build(
-        day, place=args.place, region=args.region, country=args.country, offline=args.offline
+        day, place=args.place, region=args.region, country=args.country, offline=args.offline,
+        refresh_quota=args.refresh_quota, no_weather=args.no_weather,
     )
     payload = json.dumps(context, ensure_ascii=False, indent=2) if args.json else text_view(context)
     if args.out:

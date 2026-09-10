@@ -1,6 +1,4 @@
 """routine_collect.py: collect routine outputs, updates, health, and context into the digest manifest.
-
-Split out of routine_digest.py; routine_digest.py re-exports every name so callers and tests are unchanged.
 """
 
 from __future__ import annotations
@@ -17,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write  # noqa: E402
+from _paths import date_in_text  # noqa: E402
 from routine_digest_core import (  # noqa: E402
     DEFAULT_EXCERPT_CHARS,
     DEFAULT_MAX_FILES,
@@ -26,6 +24,7 @@ from routine_digest_core import (  # noqa: E402
     Routine,
     _vault_relative,
     humanize_slug,
+    iter_sources,
     load_acks,
     load_routines,
     source_anchor,
@@ -62,7 +61,6 @@ DELIVERED_RETENTION_DAYS = 14
 # still skips research on a window that had it.
 LANE_ORDER = ["Research", "Tech feed", "Finance", "Toolcraft", "Career", "Findings"]
 
-_DATE_IN_NAME = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 
@@ -141,7 +139,7 @@ def load_update_sources(ov: Path) -> tuple[list[DigestUpdateSource], list[str]]:
     public harness.
     """
     config_path = ov / DIGEST_UPDATES_CONFIG
-    if not config_path.is_file():
+    if not config_path.exists() and not config_path.is_symlink():
         return [], []
     try:
         config = tomllib.loads(config_path.read_text(encoding="utf-8"))
@@ -232,36 +230,62 @@ def load_delivered_state(ov: Path) -> tuple[dict[str, str], list[str]]:
         return {}, ["digest update state delivered ledger is invalid"]
     return {str(k): str(v) for k, v in delivered.items() if isinstance(v, str)}, []
 
+def row_key(source_name: str, headers: list[str], cells: list[str]) -> str:
+    """Identity of one ledger row, from its normalized values.
+
+    Persisted as the daily delivery cursor, so it must not move when the table
+    is only reformatted. Column order is part of the key; pipe alignment, cell
+    padding, and internal whitespace runs are not.
+    """
+    normalized = "\x1f".join(
+        f"{header.strip()}={' '.join(cell.split())}"
+        for header, cell in zip(headers, cells)
+    )
+    return hashlib.sha256(f"{source_name}\0{normalized}".encode("utf-8")).hexdigest()
+
+def legacy_row_id(source_name: str, raw_line: str) -> str:
+    """Pre-normalization identity: a hash of the raw source line.
+
+    Only read, never written. A cursor stored before `row_key` existed still
+    resolves through this, so no state migration is needed; the next write
+    replaces it with the normalized key.
+    """
+    return hashlib.sha256(f"{source_name}\0{raw_line}".encode("utf-8")).hexdigest()
+
 def _markdown_cells(line: str) -> list[str]:
     raw = line.strip()
     if not raw.startswith("|"):
         return []
     return [cell.strip() for cell in raw.strip("|").split("|")]
 
-def _markdown_table(text: str, section: str) -> tuple[list[str], list[tuple[str, list[str]]]]:
+def _markdown_table(
+    text: str, section: str
+) -> tuple[list[str], list[tuple[str, list[str]]], list[str]]:
     heading = re.compile(rf"^#{{1,6}}\s+{re.escape(section)}\s*$", re.MULTILINE)
     match = heading.search(text)
     if not match:
-        return [], []
+        return [], [], []
     lines = text[match.end():].splitlines()
     start = next((i for i, line in enumerate(lines) if line.lstrip().startswith("|")), None)
     if start is None or start + 1 >= len(lines):
-        return [], []
+        return [], [], []
     headers = _markdown_cells(lines[start])
     separator = _markdown_cells(lines[start + 1])
     if not headers or len(separator) != len(headers) or not all(
         re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in separator
     ):
-        return [], []
+        return [], [], []
     rows: list[tuple[str, list[str]]] = []
+    rejected: list[str] = []
     for raw in lines[start + 2:]:
         if not raw.lstrip().startswith("|"):
             break
         cells = _markdown_cells(raw)
         if len(cells) != len(headers):
+            rejected.append(raw.strip())
             continue
         rows.append((raw.strip(), cells))
-    return headers, rows
+    return headers, rows, rejected
 
 def collect_digest_updates(
     ov: Path,
@@ -291,12 +315,17 @@ def collect_digest_updates(
         except OSError as exc:
             warnings.append(f"digest update source {source.name!r} unreadable: {exc!r}")
             continue
-        headers, raw_rows = _markdown_table(text, source.section)
+        headers, raw_rows, rejected = _markdown_table(text, source.section)
         if not headers:
             warnings.append(
                 f"digest update source {source.name!r} has no table under {source.section!r}"
             )
             continue
+        if rejected:
+            warnings.append(
+                f"digest update source {source.name!r} skipped {len(rejected)} row(s) "
+                f"whose cell count disagrees with the header: {rejected[0]!r}"
+            )
         required_columns = [source.date_column, *source.display_columns]
         missing = [column for column in required_columns if column not in headers]
         if missing:
@@ -318,10 +347,10 @@ def collect_digest_updates(
                 continue
             if source.since and checked < source.since:
                 continue
-            row_id = hashlib.sha256(f"{source.name}\0{raw}".encode("utf-8")).hexdigest()
             parsed.append(
                 {
-                    "id": row_id,
+                    "id": row_key(source.name, headers, cells),
+                    "legacy_id": legacy_row_id(source.name, raw),
                     "source": source.name,
                     "label": source.label,
                     "path": source.path,
@@ -337,7 +366,12 @@ def collect_digest_updates(
             cursor = daily_state.get(source.name)
             if cursor:
                 cursor_index = next(
-                    (index for index, item in enumerate(parsed) if item["id"] == cursor), None
+                    (
+                        index
+                        for index, item in enumerate(parsed)
+                        if cursor in (item["id"], item["legacy_id"])
+                    ),
+                    None,
                 )
                 if cursor_index is None:
                     warnings.append(
@@ -349,9 +383,10 @@ def collect_digest_updates(
             # A backdated daily render must never pull a future ledger row.
             # There is intentionally no lower window bound: an unreported
             # late-day update belongs in the next artifact, even on the next date.
-            selected.extend(
-                item for item in candidates if date.fromisoformat(item["date"]) <= end
-            )
+            for item in candidates:
+                if date.fromisoformat(item["date"]) > end:
+                    break  # An append cursor cannot skip an undelivered row.
+                selected.append(item)
         else:
             selected.extend(
                 item for item in parsed if start <= date.fromisoformat(item["date"]) <= end
@@ -367,22 +402,44 @@ def collect_digest_updates(
     )
     return selected, warnings
 
-def advance_update_state(ov: Path, manifest: dict[str, Any]) -> None:
-    """Mark daily updates and sources as written, without claiming they were reviewed.
-
-    Updates advance the per-ledger cursor. Sources are recorded in the
-    delivered ledger under the artifact's effective date; the first delivery
-    date wins, and entries older than DELIVERED_RETENTION_DAYS are dropped.
-    """
+def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """Merge delivery state under the publisher's lock without moving cursors back."""
     if manifest.get("mode") != "daily":
-        return
+        return None
     delivered_on = str(manifest.get("window", {}).get("until", ""))[:10]
-    current, _ = load_update_state(ov)
-    delivered, _ = load_delivered_state(ov)
-    for item in manifest.get("updates") or []:
-        current[str(item["source"])] = str(item["id"])
+    current, warnings = load_update_state(ov)
+    delivered, more = load_delivered_state(ov)
+    if warnings or more:
+        raise SystemExit("; ".join(warnings + more))
+    updates = manifest.get("updates") or []
+    positions: dict[tuple[str, str], int] = {}
+    declarations, warnings = load_update_sources(ov)
+    if warnings:
+        raise SystemExit("; ".join(warnings))
+    configured = {source.name for source in declarations}
+    if updates:
+        rows, more = collect_digest_updates(ov, mode="weekly", start=date.min, end=date.max)
+        if more:
+            raise SystemExit("; ".join(more))
+        for row in rows:
+            for key in ("id", "legacy_id"):
+                positions.setdefault((row["source"], row[key]), row["sequence"])
+    candidates = {}
+    for item in sorted(updates, key=lambda row: positions.get((row["source"], row["id"]), row.get("sequence", 0))):
+        candidates[str(item["source"])] = str(item["id"])
+    for source, candidate in candidates.items():
+        proposed = positions.get((source, candidate))
+        previous = positions.get((source, current.get(source, "")))
+        if source in configured and proposed is None:
+            raise SystemExit(f"digest update for {source!r} no longer resolves; recollect before writing")
+        if source in current and current[source] != candidate:
+            if proposed is None or previous is None:
+                raise SystemExit(f"cannot order digest updates for {source!r}; repair the source before writing")
+            if proposed < previous:
+                continue
+        current[source] = candidate
     if delivered_on:
-        for _lane, source in _iter_manifest_sources(manifest):
+        for _lane, source in iter_sources(manifest):
             path = str(source.get("path", ""))
             if path:
                 delivered.setdefault(path, delivered_on)
@@ -392,21 +449,12 @@ def advance_update_state(ov: Path, manifest: dict[str, Any]) -> None:
         except ValueError:
             pass
     if not current and not delivered:
-        return
-    payload = {
+        return None
+    return {
         "schema": 1,
         "daily": dict(sorted(current.items())),
         "delivered": dict(sorted(delivered.items())),
     }
-    atomic_write(
-        ov / DIGEST_UPDATES_STATE,
-        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
-    )
-
-def _iter_manifest_sources(manifest: dict[str, Any]):
-    for lane in manifest.get("lanes", []):
-        for source in lane.get("sources", []):
-            yield lane.get("lane", ""), source
 
 def effective_date(now: datetime | None = None) -> date:
     """Today, or yesterday before 03:00 local -- the harness day boundary."""
@@ -447,12 +495,9 @@ def file_date(path: Path) -> tuple[date, str]:
     date anywhere in the stem wins. mtime is the fallback and is reported as
     such, because a re-synced vault rewrites mtimes.
     """
-    match = _DATE_IN_NAME.search(path.name)
-    if match:
-        try:
-            return date(int(match.group(1)), int(match.group(2)), int(match.group(3))), "filename"
-        except ValueError:
-            pass
+    when = date_in_text(path.name)
+    if when is not None:
+        return when, "filename"
     return date.fromtimestamp(path.stat().st_mtime), "mtime"
 
 def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -738,6 +783,67 @@ class Source:
     units: list[dict[str, Any]] = field(default_factory=list)
     carried: bool = False
 
+def collect_context_sources(
+    ov: Path, routines: list[Routine], end: date,
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """Latest declared background references; inspect filenames/stat, never bodies."""
+    contexts: dict[str, dict[str, Any]] = {}
+    warnings: list[str] = []
+    root = ov.resolve()
+    for routine in routines:
+        if not routine.context:
+            continue
+        key = routine.context
+        relative_dir = Path(routine.output_dir)
+        pattern = Path(routine.file_pattern)
+        if relative_dir.is_absolute() or ".." in relative_dir.parts or pattern.is_absolute() or ".." in pattern.parts:
+            warnings.append(f"context {key}: unsafe output directory or file pattern")
+            continue
+        directory = ov / relative_dir
+        try:
+            resolved_dir = directory.resolve(strict=True)
+            resolved_dir.relative_to(root)
+            if not resolved_dir.is_dir():
+                raise NotADirectoryError
+        except (OSError, RuntimeError, ValueError):
+            warnings.append(f"context {key}: output directory missing, unreadable, or outside vault")
+            continue
+        latest: tuple[date, str, str] | None = None
+        try:
+            for path in directory.glob(routine.file_pattern):
+                try:
+                    resolved = path.resolve(strict=True)
+                    resolved.relative_to(resolved_dir)
+                    resolved.relative_to(root)
+                    if not resolved.is_file():
+                        continue
+                    stat = resolved.stat()
+                    when = date_in_text(path.name)
+                    date_source = "filename" if when is not None else "mtime"
+                    when = when if when is not None else date.fromtimestamp(stat.st_mtime)
+                    if when > end:
+                        continue
+                    relative = _vault_relative(ov, path)
+                    rank = (when, path.name, relative)
+                    if latest is None or rank > latest:
+                        latest = rank
+                        contexts[key] = {
+                            "routine": routine.name, "label": routine.label,
+                            "path": relative, "name": path.name,
+                            "date": when.isoformat(), "date_source": date_source,
+                            "bytes": stat.st_size, "anchor": source_anchor(relative),
+                        }
+                except (OSError, RuntimeError, ValueError, OverflowError):
+                    warning = f"context {key}: unsafe or unreadable matching source skipped"
+                    if warning not in warnings:
+                        warnings.append(warning)
+        except (OSError, ValueError):
+            warnings.append(f"context {key}: source discovery failed")
+        if key not in contexts:
+            warnings.append(f"context {key}: no eligible source at or before {end.isoformat()}")
+    return contexts, warnings
+
+
 def collect(
     ov: Path,
     *,
@@ -755,6 +861,7 @@ def collect(
     routines = load_routines(ov)
     acks = load_acks(ov)
     start, end, span = resolve_window(mode, days=days, since=since, until=until, now=now)
+    context_sources, context_warnings = collect_context_sources(ov, routines, end)
 
     sources: list[Source] = []
     skipped: list[str] = []
@@ -881,6 +988,8 @@ def collect(
         "lanes": lanes,
         "updates": updates,
         "update_warnings": update_warnings,
+        "context_sources": context_sources,
+        "context_warnings": context_warnings,
         "acks": ack_targets,
         **({"carry": carry} if carry is not None else {}),
     }
@@ -892,16 +1001,7 @@ def collect_health(
     start: date,
     end: date,
 ) -> dict[str, Any]:
-    """Fleet numbers for the window: who reported, who failed, what is owed.
-
-    The digest was answering "what did the routines say" without ever answering
-    "did the routines run". Those come apart badly: a thin window reads as a
-    quiet day when it is actually a broken scheduler. Measured on 2026-08-31,
-    95 of 279 claims were failures, and nothing in the document said so.
-
-    Counts only, and only from files already on disk. Anything that needs a
-    judgement stays in the overview where a human wrote it.
-    """
+    """Fleet output, Prefect run state, and review debt for the local-date window."""
     included = [r for r in routines if r.include]
     reported: set[str] = set()
     for routine in included:
@@ -915,29 +1015,30 @@ def collect_health(
                 break
 
     completed = failed = other = 0
-    runs_root = ov / "_meta" / "routine_runs"
-    for routine in included:
-        directory = runs_root / routine.name
-        if not directory.is_dir():
+    state_unavailable = False
+    since = datetime.combine(start, datetime.min.time()).astimezone()
+    names = {routine.name for routine in included if routine.execution == "local"}
+    runs = []
+    if names:
+        import routine_status
+
+        try:
+            runs = routine_status.recent_runs(since, model_only=True)
+        except routine_status.StatusUnavailable:
+            state_unavailable = True
+    for run in runs:
+        if run.get("routine") not in names:
             continue
-        for path in directory.glob("*.toml"):
-            try:
-                cycle = date.fromisoformat(path.stem[:10])
-            except ValueError:
-                continue
-            if not (start <= cycle <= end):
-                continue
-            try:
-                claim = tomllib.loads(path.read_text(encoding="utf-8"))
-            except (OSError, tomllib.TOMLDecodeError):
-                continue
-            status = str(claim.get("status") or "")
-            if status == "completed":
-                completed += 1
-            elif status in {"failed", "completion-uncertain"}:
-                failed += 1
-            else:
-                other += 1
+        started = run.get("expected_start_time") or run.get("start_time")
+        if not isinstance(started, datetime) or not (start <= started.astimezone().date() <= end):
+            continue
+        state = run.get("state")
+        if state == "COMPLETED":
+            completed += 1
+        elif state in {"FAILED", "CRASHED", "CANCELLED"} and run.get("state_name") != "Deferred":
+            failed += 1
+        else:
+            other += 1
 
     # Review debt is the backlog this digest exists to drain, so it belongs on
     # the face of the document rather than in a session-start cue nobody reads
@@ -956,6 +1057,7 @@ def collect_health(
         "completed": completed,
         "failed": failed,
         "running_or_deferred": other,
+        "state_unavailable": state_unavailable,
         "review_debt": debt,
     }
 
@@ -970,8 +1072,8 @@ def _build_source(
 ) -> Source:
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        text = ""
+    except OSError as exc:
+        raise SystemExit(f"routine output unreadable: {_vault_relative(ov, path)}: {exc}") from exc
     meta, body = parse_frontmatter(text)
     units = split_units(text)
     urls = []
@@ -981,7 +1083,7 @@ def _build_source(
         if url.startswith("http") and url not in seen:
             seen.add(url)
             urls.append(url)
-    keep = {"date", "type", "slug", "signal_type", "source_type", "source_tier", "status", "item_count", "window"}
+    keep = {"date", "type", "slug", "signal_type", "source_type", "source_tier", "status", "item_count", "window", "channels_reached"}
     # A multi-signal file's substance lives in its units; a file-level excerpt
     # on top of them would just repeat the first unit.
     file_excerpt = "" if units else extract_excerpt(body, excerpt_chars)

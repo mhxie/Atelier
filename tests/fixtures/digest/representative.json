@@ -1,0 +1,308 @@
+{
+  "manifest": {
+    "schema": 1,
+    "mode": "daily",
+    "window": {
+      "since": "2099-01-30",
+      "until": "2099-01-30"
+    },
+    "generated": "2099-01-30T06:22:00",
+    "counts": {
+      "files": 2,
+      "bytes": 4096,
+      "updates": 1
+    },
+    "health": {
+      "reported": 4,
+      "declared": 19,
+      "completed": 2,
+      "failed": 0,
+      "review_debt": 149
+    },
+    "updates": [
+      {
+        "source": "example-status-ledger",
+        "id": "2099-01-30-example-status",
+        "label": "Example status",
+        "date": "2099-01-30",
+        "values": {
+          "Action": "Verify [primary](https://example.com/status)",
+          "State": "Open"
+        },
+        "path": "personal/example-status.md"
+      }
+    ],
+    "update_warnings": [
+      "example status ledger is one day stale"
+    ],
+    "lanes": [
+      {
+        "lane": "Tech feed",
+        "files": 1,
+        "sources": [
+          {
+            "path": "inbox/feed/2099-01-29-feed.md",
+            "anchor": "src-example-feed",
+            "label": "example feed digest",
+            "date": "2099-01-29",
+            "headline": "Two useful releases",
+            "carried": true,
+            "items": [
+              {
+                "title": "Example Model",
+                "url": "https://example.com/model",
+                "note": "示例模型发布了可复核的更新。"
+              }
+            ],
+            "units": [],
+            "excerpt": "A bounded fallback excerpt for the example feed.",
+            "max_lines": 5
+          }
+        ]
+      },
+      {
+        "lane": "Research",
+        "files": 1,
+        "sources": [
+          {
+            "path": "research/example/2099-01-30-note.md",
+            "anchor": "src-example-research",
+            "label": "example research note",
+            "date": "2099-01-30",
+            "headline": "A compact systems result",
+            "items": [],
+            "units": [
+              {
+                "slug": "example-result",
+                "source_url": "https://example.com/research",
+                "excerpt": "The system reduces an illustrative cost."
+              }
+            ],
+            "excerpt": "A compact systems result with a bounded source trail.",
+            "max_lines": 4
+          }
+        ]
+      }
+    ],
+    "skipped_routines": [
+      "example maintenance"
+    ]
+  },
+  "overview": {
+    "schema": 1,
+    "headline": "One decision and one research signal deserve attention.",
+    "sections": [
+      {
+        "title": "需要的决策",
+        "bullets": [
+          {
+            "text": "是否验证 **Example Model** 的新结果？",
+            "between": [
+              "今天运行小样本验证",
+              "保留到下周"
+            ],
+            "settles": "公开模型卡和独立基准一致",
+            "by": "2099-01-31",
+            "sources": [
+              "inbox/feed/2099-01-29-feed.md"
+            ]
+          },
+          {
+            "text": "This incomplete decision must become a signal.",
+            "sources": [
+              "research/example/2099-01-30-note.md"
+            ]
+          }
+        ]
+      },
+      {
+        "title": "信号",
+        "bullets": [
+          {
+            "text": "The research result has a [primary source](https://example.com/research).",
+            "sources": [
+              "research/example/2099-01-30-note.md"
+            ]
+          }
+        ]
+      }
+    ],
+    "routines": [
+      {
+        "path": "research/example/2099-01-30-note.md",
+        "summary": "第一行\n第二行\n第三行\n第四行\n第五行不应出现"
+      }
+    ],
+    "articles": [
+      {
+        "title": "A useful saved article",
+        "url": "https://example.com/article",
+        "minutes": "7",
+        "source": "Example Author",
+        "why": "支持当前的 **systems** direction。",
+        "abstract": "这是三行摘要的第一行。\n第二行说明证据。\n第三行给出下一步。"
+      },
+      {
+        "title": "A bare title that must be dropped",
+        "url": "https://example.com/bare"
+      }
+    ],
+    "frontier_labs": {
+      "sweep_date": "2099-01-29",
+      "drift_count": 0,
+      "promotion_count": 1,
+      "signals": [
+        {
+          "lab": "Example Lab",
+          "category": "模型发布",
+          "tier": 1,
+          "text": "Atlas early access shipped.",
+          "url": "https://example.com/atlas"
+        }
+      ],
+      "watchlist_note": "No mission drift in the synthetic fixture."
+    },
+    "deep_read": {
+      "total": 2,
+      "entries": [
+        {
+          "title": "Research result",
+          "url": "https://example.com/research",
+          "lane": "Research",
+          "facts": [
+            "第一条可复核事实。",
+            "第二条可复核事实。",
+            "第三条应被深度上限裁掉。"
+          ],
+          "why": "它改变了 **systems** 方向的验证顺序。"
+        }
+      ]
+    },
+    "gaps": [
+      "Synthetic optional source was unavailable."
+    ]
+  },
+  "brief": {
+    "schema": 1,
+    "date": "2099-01-30",
+    "signals": {
+      "closing": 1,
+      "closing_now": 0,
+      "focus_days": 12,
+      "weight_age_days": 4
+    },
+    "groups": [
+      {
+        "tier": 1,
+        "kind": "closing_lead",
+        "heading": "需要开始处理 1 件",
+        "folded": false,
+        "items": [
+          {
+            "text": "Example credit",
+            "label": "Example credit",
+            "hint": "book the synthetic reservation",
+            "days_left": 5,
+            "source": "finance/example.md:12"
+          }
+        ]
+      },
+      {
+        "tier": 1,
+        "kind": "milestone",
+        "heading": "本季主线",
+          "folded": false,
+          "items": [
+            {
+              "label": "Ship the example milestone",
+              "days_left": 21,
+              "source": "profile/example.md:3"
+          }
+        ]
+      },
+      {
+        "tier": 2,
+        "kind": "todo",
+        "heading": "TODO 到期 1 件",
+          "folded": false,
+          "items": [
+            {
+              "text": "Review the example",
+              "days_left": 0
+            }
+        ]
+      },
+      {
+        "tier": 3,
+        "kind": "recurring",
+        "heading": "recurring: 2 条逾期",
+        "folded": true,
+        "items": []
+      }
+    ],
+    "warnings": [
+      "synthetic deadline index is stale"
+    ]
+  },
+  "retrospect": [
+    {
+      "reviewed": true,
+      "title": "An earlier example",
+      "excerpt": "A reviewed prior note remains useful.",
+      "age_days": 90,
+      "tier": "wiki",
+      "path": "wiki/example.md"
+    },
+    {
+      "reviewed": false,
+      "title": "An unreviewed item that must stay hidden",
+      "excerpt": "Do not render this.",
+      "age_days": 30,
+      "tier": "wip",
+      "path": "wip/hidden.md"
+    }
+  ],
+  "context": {
+    "schema": 1,
+    "date": "2099-01-30",
+    "weather": {
+      "place": "Lisbon",
+      "tmin": 13,
+      "tmax": 25,
+      "summary": "少云",
+      "precip_probability": 2,
+      "hours": [
+        {
+          "hour": 9,
+          "temp": 18
+        },
+        {
+          "hour": 18,
+          "temp": 21
+        }
+      ],
+      "date": "2099-01-30"
+    },
+    "quota": [
+      {
+        "name": "Claude Code",
+        "window": "Fable · 7d",
+        "left_percent": 83,
+        "level": "ok",
+        "reset_relative": "1 天 2 小时后重置",
+        "snapshot_age_hours": 0.5
+      },
+      {
+        "name": "Codex",
+        "window": "prolite · 7d",
+        "left_percent": 15,
+        "level": "critical",
+        "reset_relative": "4 小时后重置",
+        "snapshot_age_hours": 3.0
+      }
+    ],
+    "warnings": [
+      "synthetic context warning"
+    ]
+  }
+}
