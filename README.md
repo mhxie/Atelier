@@ -174,7 +174,7 @@ The architecture rests on four principles:
 
 ## Forking
 
-MIT, for the code. Expect some rip-and-replace, not a turnkey second brain.
+[MIT](LICENSE), for the code. Expect some rip-and-replace, not a turnkey second brain.
 `profile/`, vault content, bilingual English/Chinese defaults, and the
 `civ` / `dine` / `prm` life-area workflows are bespoke. The impressionist
 vocabulary (*le cercle*, *the Painter*, *the œuvre*) is optional.

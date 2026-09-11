@@ -66,9 +66,8 @@ scan; it does not replace semantic review. Install it explicitly per clone with
 `git config core.hooksPath scripts/hooks`. These gates do not erase sensitive
 content from previously published history or remote forks.
 
-Publication also needs a confirmed license text and copyright attribution.
-The project's declared code license is MIT, but a standalone `LICENSE` file
-is not yet included; do not invent its attribution as part of a routine push.
+The project's code is licensed under [MIT](../LICENSE). Preserve the copyright
+and license notices when redistributing it.
 
 ## Conventions
 
