@@ -36,11 +36,11 @@ from _paths import atomic_write, tier_segments  # noqa: E402
 from command_timeout import release_process, stop_process_group, track_process, wait_until_deadline  # noqa: E402
 from runtime import capabilities as runtime_capabilities  # noqa: E402
 from observability import usage as observations  # noqa: E402
+import routine_receipts as receipts  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-SAFE_COMMAND = re.compile(r"^/[A-Za-z0-9][A-Za-z0-9._-]*(?: [A-Za-z0-9][A-Za-z0-9._-]*)?$")
 SAFE_CYCLE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 SAFE_MODEL = re.compile(r"^[a-z][a-z0-9_]*$")
 LOCAL_SANDBOXES = {"workspace-write", "danger-full-access"}
@@ -145,7 +145,7 @@ def local_prefect_settings(environ: dict[str, str] | None = None) -> Iterator[st
 @dataclass(frozen=True)
 class ScheduleSpec:
     name: str
-    kind: str
+    runner: str
     source: str
     cron: tuple[str, ...]
     timezone: str
@@ -156,12 +156,11 @@ class ScheduleSpec:
 @dataclass(frozen=True)
 class ModelSpec:
     schedule: ScheduleSpec
-    command: str
+    adapter: str
     profile: str
     profile_values: dict[str, Any]
     output_dir: str
     file_pattern: str
-    wrapper: str | None = None
     model: str | None = None
     rss_sources: str | None = None
     runtime_snapshot: bool = False
@@ -259,7 +258,7 @@ def resolve_timezone(value: object) -> str:
     return value
 
 
-def _schedule(row: dict[str, Any], *, kind: str, source: str) -> ScheduleSpec:
+def _schedule(row: dict[str, Any], *, runner: str, source: str) -> ScheduleSpec:
     name = row.get("name")
     if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
         raise ConfigurationError("routine name is missing or unsafe")
@@ -275,7 +274,7 @@ def _schedule(row: dict[str, Any], *, kind: str, source: str) -> ScheduleSpec:
         raise ConfigurationError(f"{name}: retry_delay_seconds must be from 1 through 3600")
     return ScheduleSpec(
         name=name,
-        kind=kind,
+        runner=runner,
         source=source,
         cron=tuple(item.strip() for item in cron),
         timezone=resolve_timezone(row.get("timezone")),
@@ -308,7 +307,7 @@ def _validate_profile(name: str, profile: object) -> dict[str, Any]:
     timeout = profile.get("timeout_seconds")
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 30 <= timeout <= 14400:
         raise ConfigurationError(f"{name}: profile has invalid timeout_seconds")
-    for field in ("permissions", "required_clis", "required_plugins", "optional_plugins", "allowed_commands"):
+    for field in ("permissions", "required_clis", "required_plugins", "optional_plugins", "allowed_adapters"):
         _string_list(profile.get(field), f"{name}.{field}")
     if profile["required_plugins"] and profile["user_config"] != "required":
         raise ConfigurationError(f"{name}: required plugins need user_config='required'")
@@ -329,48 +328,43 @@ def profile_fingerprint(name: str, profile: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _watch_rows(vault: Path) -> list[dict[str, Any]]:
-    meta = tier_segments().get("meta", "_meta")
-    rows = _load_toml(vault / meta / "routine_watch.toml").get("routine")
+def _private_rows(vault: Path) -> list[dict[str, Any]]:
+    root = tier_segments().get("private_routines", "_tools/routines")
+    document = _load_toml(vault / root / "registry.toml")
+    if document.get("version") != 1:
+        raise ConfigurationError("unsupported private routine registry")
+    rows = document.get("routine")
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-        raise ConfigurationError("routine_watch.toml must contain [[routine]] tables")
+        raise ConfigurationError("private routine registry must contain [[routine]] tables")
     return rows
 
 
 def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str, Any]]) -> ModelSpec:
-    schedule = _schedule(row, kind="model", source="private")
+    schedule = _schedule(row, runner="model", source="private")
     if schedule.retries:
         raise ConfigurationError(f"{schedule.name}: model attempts cannot declare retries")
-    command = row.get("command")
-    if not isinstance(command, str) or not SAFE_COMMAND.fullmatch(command):
-        raise ConfigurationError(f"{schedule.name}: command must be /name with at most one safe argument")
-    profile_name = row.get("local_profile")
+    adapter = row.get("adapter")
+    if not isinstance(adapter, str) or not SAFE_NAME.fullmatch(adapter):
+        raise ConfigurationError(f"{schedule.name}: adapter is missing or unsafe")
+    profile_name = row.get("profile")
     if not isinstance(profile_name, str):
-        raise ConfigurationError(f"{schedule.name}: local_profile is required")
+        raise ConfigurationError(f"{schedule.name}: profile is required")
     profile = _validate_profile(profile_name, profiles.get(profile_name))
-    verb = command.split(" ", 1)[0]
-    if verb not in profile["allowed_commands"]:
-        raise ConfigurationError(f"{schedule.name}: {verb} is not allowed by {profile_name}")
-    if verb == "/run-routine" and command != f"/run-routine {schedule.name}":
-        raise ConfigurationError(f"{schedule.name}: /run-routine argument must match the routine name")
-    wrapper = row.get("wrapper")
-    if wrapper is not None and wrapper != "autoevo":
-        raise ConfigurationError(f"{schedule.name}: unsupported wrapper {wrapper!r}")
-    if schedule.name == "autoevo-nightly":
-        wrapper = "autoevo"
+    if adapter not in profile["allowed_adapters"]:
+        raise ConfigurationError(f"{schedule.name}: adapter {adapter!r} is not allowed by {profile_name}")
     rss_sources = row.get("rss_sources")
     runtime_snapshot = row.get("runtime_snapshot", False)
     if not isinstance(runtime_snapshot, bool):
         raise ConfigurationError("runtime_snapshot must be boolean")
-    if runtime_snapshot and (verb != "/run-routine" or wrapper is not None):
-        raise ConfigurationError("runtime_snapshot requires an ordinary /run-routine")
+    if runtime_snapshot and adapter != "archived-prompt":
+        raise ConfigurationError("runtime_snapshot requires the archived-prompt adapter")
     if rss_sources is not None:
         rss_sources = _safe_relative(rss_sources, "rss_sources")
         if Path(rss_sources).suffix != ".toml":
             raise ConfigurationError("rss_sources must name a private TOML file")
-        if (verb != "/run-routine" or wrapper is not None
+        if (adapter != "archived-prompt"
                 or profile["web_search"] != "live" or "web:live" not in profile["permissions"]):
-            raise ConfigurationError("rss_sources requires an ordinary /run-routine with web:live")
+            raise ConfigurationError("rss_sources requires the archived-prompt adapter with web:live")
     model = row.get("model")
     if model is not None:
         if not isinstance(model, str) or not SAFE_MODEL.fullmatch(model):
@@ -381,12 +375,11 @@ def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str
             raise ConfigurationError(f"{schedule.name}: {exc}") from exc
     return ModelSpec(
         schedule=schedule,
-        command=command,
+        adapter=adapter,
         profile=profile_name,
         profile_values={**profile, "profile_fingerprint": profile_fingerprint(profile_name, profile)},
         output_dir=_safe_relative(row.get("output_dir"), f"{schedule.name}.output_dir"),
         file_pattern=_safe_relative(row.get("file_pattern"), f"{schedule.name}.file_pattern"),
-        wrapper=wrapper,
         model=model,
         rss_sources=rss_sources,
         runtime_snapshot=runtime_snapshot,
@@ -394,7 +387,7 @@ def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str
 
 
 def _public_process_spec(row: dict[str, Any], *, root: Path) -> ProcessSpec:
-    schedule = _schedule(row, kind="process", source="public")
+    schedule = _schedule(row, runner="process", source="public")
     raw_argv = _string_list(row.get("argv"), f"{schedule.name}.argv")
     if not raw_argv:
         raise ConfigurationError(f"{schedule.name}.argv must not be empty")
@@ -436,7 +429,7 @@ def _public_process_spec(row: dict[str, Any], *, root: Path) -> ProcessSpec:
 
 
 def _vault_process_spec(row: dict[str, Any], *, vault: Path) -> ProcessSpec:
-    schedule = _schedule(row, kind="process", source="private")
+    schedule = _schedule(row, runner="process", source="private")
     script = _safe_relative(row.get("script"), f"{schedule.name}.script")
     if Path(script).suffix not in {".py", ".sh"}:
         raise ConfigurationError(f"{schedule.name}: vault script must be .py or .sh")
@@ -475,22 +468,22 @@ def load_specs(*, root: Path = ROOT, environ: dict[str, str] | None = None) -> t
     profiles = _load_profiles(root)
     models: list[ModelSpec] = []
     processes: list[ProcessSpec] = []
-    for row in _watch_rows(vault):
+    for row in _private_rows(vault):
         if row.get("execution") != "local":
             continue
-        kind = row.get("kind", "model")
-        if kind == "model":
+        runner = row.get("runner")
+        if runner == "model":
             models.append(_model_spec(row, root=root, profiles=profiles))
-        elif kind == "vault-script":
+        elif runner == "process":
             processes.append(_vault_process_spec(row, vault=vault))
         else:
-            raise ConfigurationError(f"{row.get('name', '<missing>')}: unsupported local kind {kind!r}")
-    public = _load_toml(root / "harness/routine_jobs.toml")
-    if public.get("version") != 1 or not isinstance(public.get("job"), list):
-        raise ConfigurationError("unsupported public routine job registry")
-    if any(not isinstance(row, dict) for row in public["job"]):
-        raise ConfigurationError("public routine jobs must be TOML tables")
-    processes.extend(_public_process_spec(row, root=root) for row in public["job"])
+            raise ConfigurationError(f"{row.get('name', '<missing>')}: unsupported local runner {runner!r}")
+    public = _load_toml(root / "routines/registry.toml")
+    if public.get("version") != 1 or not isinstance(public.get("routine"), list):
+        raise ConfigurationError("unsupported public routine registry")
+    if any(not isinstance(row, dict) or row.get("runner") != "process" for row in public["routine"]):
+        raise ConfigurationError("public routine rows must declare runner='process'")
+    processes.extend(_public_process_spec(row, root=root) for row in public["routine"])
     names = [spec.schedule.name for spec in [*models, *processes]]
     duplicates = sorted({name for name in names if names.count(name) > 1})
     if duplicates:
@@ -567,10 +560,9 @@ def prepare_model(name: str, *, root: Path = ROOT, environ: dict[str, str] | Non
         output.relative_to(vault)
     except ValueError as exc:
         raise ConfigurationError(f"{name}: output_dir escapes the vault") from exc
-    if spec.wrapper != "autoevo":
+    if spec.adapter != "autoevo":
         output.mkdir(parents=True, exist_ok=True)
-    verb = spec.command.split(" ", 1)[0]
-    if verb == "/run-routine":
+    if spec.adapter == "archived-prompt":
         prompt = vault / tier_segments().get("routine_prompts", "_routine_prompts") / f"{name}.md"
         if not prompt.is_file():
             raise ConfigurationError(f"{name}: archived routine prompt is missing")
@@ -598,25 +590,22 @@ def prepare_model(name: str, *, root: Path = ROOT, environ: dict[str, str] | Non
     return spec.payload()
 
 
-def _command_contract(spec: ModelSpec, root: Path) -> tuple[str, str]:
-    verb, *argument = spec.command[1:].split()
-    commands = _load_toml(root / "harness/commands.toml").get("commands", {})
-    row = commands.get(verb) if isinstance(commands, dict) else None
-    if not isinstance(row, dict) or any(not isinstance(row.get(key), str) for key in ("source", "codex_prompt")):
-        raise ConfigurationError(f"{spec.schedule.name}: command {verb!r} is not registered")
-    source = root / row["source"]
+def _adapter_contract(spec: ModelSpec, root: Path) -> str:
+    adapters = _load_toml(root / "routines/registry.toml").get("adapters", {})
+    row = adapters.get(spec.adapter) if isinstance(adapters, dict) else None
+    if not isinstance(row, dict) or not isinstance(row.get("procedure"), str):
+        raise ConfigurationError(f"{spec.schedule.name}: adapter {spec.adapter!r} is not registered")
+    source = root / row["procedure"]
     if not source.is_file():
-        raise ConfigurationError(f"{spec.schedule.name}: command source is missing")
-    if verb == "run-routine" and argument != [spec.schedule.name]:
-        raise ConfigurationError("/run-routine argument must match the routine")
-    return row["source"], row["codex_prompt"]
+        raise ConfigurationError(f"{spec.schedule.name}: adapter procedure is missing")
+    return row["procedure"]
 
 
 def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
-    source, hint = _command_contract(spec, root)
+    source = _adapter_contract(spec, root)
     profile = spec.profile_values
     permissions = ",".join(profile["permissions"])
-    if spec.wrapper == "autoevo":
+    if spec.adapter == "autoevo":
         return (
             f"Read {root}/AGENTS.md and {root}/CLAUDE.md, then {root / source} completely. "
             "This unattended Autoevo invocation authorizes candidate drafting only. The vault and Atelier are "
@@ -630,8 +619,9 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
             "when the candidate file is ready (not a claim of live publication), plus summary and skipped_inputs."
         )
     return (
-        f"{hint}\n\nThis is an unattended local Atelier routine, not an interactive user command. "
-        f"Invocation: `{spec.command}`. Prefect has already completed the safe local preflight with profile "
+        "This is an unattended local Atelier routine, not an interactive user workflow. "
+        f"Routine identity: `{spec.schedule.name}`. Prefect has selected adapter `{spec.adapter}` and completed "
+        "the safe local preflight with profile "
         f"`{spec.profile}` (sandbox={profile['sandbox']}, atelier_access={profile['atelier_access']}, "
         f"web={profile['web_search']}, shell_network={profile['shell_network']}, user_config={profile['user_config']}). "
         f"Effective action permission allowlist: `{permissions}`. Treat it as a strict model-level allowlist: skip "
@@ -640,10 +630,10 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
         f"Read `{root}/AGENTS.md` and `{root}/CLAUDE.md` first, then read `{root / source}` completely and execute "
         "it in this process using the Codex adaptation table. Treat the Atelier repository as read-only unless "
         "atelier_access is read-write. Do not inspect scheduler state or the private routine registry; Prefect owns "
-        "scheduling and run state. Load only files required by the command and archived prompt after the mandatory "
+        "scheduling and run state. Load only files required by the adapter and archived prompt after the mandatory "
         "session-start reads. The scheduled invocation authorizes only autonomous effects explicitly allowed by the "
-        "command contract. Do not ask for interactive input. Ignore unrelated SessionStart cues. Stop safely if the "
-        "command requires authority it does not grant. The final response must contain only JSON matching the supplied "
+        "adapter contract. Do not ask for interactive input. Ignore unrelated SessionStart cues. Stop safely if the "
+        "procedure requires authority it does not grant. The final response must contain only JSON matching the supplied "
         "schema. Set outcome to delivered only after writing the canonical output artifact, noop only for an intentional "
         "documented no-op that still writes its audit artifact, or failed if no valid artifact was produced. Report the "
         "canonical artifact path in output_file."
@@ -696,7 +686,7 @@ def codex_argv(spec: ModelSpec, *, root: Path, vault: Path, cwd: Path, output: P
     if profile["sandbox"] == "workspace-write":
         network = str(profile["shell_network"] == "enabled").lower()
         argv += ["-c", f"sandbox_workspace_write.network_access={network}"]
-    if spec.wrapper == "autoevo":
+    if spec.adapter == "autoevo":
         if any(profile[key] != value for key, value in {
             "sandbox": "workspace-write", "atelier_access": "read", "shell_network": "disabled",
             "user_config": "ignore", "web_search": "disabled",
@@ -731,7 +721,7 @@ def codex_argv(spec: ModelSpec, *, root: Path, vault: Path, cwd: Path, output: P
         "-C",
         str(root if profile["atelier_access"] == "read-write" else cwd),
     ]
-    if spec.wrapper != "autoevo":
+    if spec.adapter != "autoevo":
         argv += ["--add-dir", str(vault)]
     return argv
 
@@ -923,21 +913,25 @@ def _model_result(path: Path, spec: ModelSpec, *, vault: Path, started_at: str) 
         raise ExecutionError("successful model result omitted output_file")
     raw_output = raw_output.strip()[4:] if raw_output.strip().startswith("$OV/") else raw_output.strip()
     output = Path(raw_output).expanduser()
-    output = (output if output.is_absolute() else vault / output).resolve()
     try:
-        output.relative_to(vault)
-    except ValueError as exc:
-        raise ExecutionError("reported output_file escapes the vault") from exc
-    declared_root = (vault / spec.output_dir).resolve()
-    candidates = {
-        path.resolve()
-        for path in declared_root.glob(spec.file_pattern)
-        if path.is_file() and path.stat().st_size > 0
-    }
-    threshold = datetime.fromisoformat(started_at).timestamp() - 2.0
-    if output not in candidates or output.stat().st_mtime < threshold:
-        raise ExecutionError("reported output_file is absent, empty, stale, or outside the declared pattern")
-    value["output_file"] = output.relative_to(vault).as_posix()
+        if output.is_absolute():
+            try:
+                relative = output.relative_to(vault)
+            except ValueError:
+                relative = output.resolve().relative_to(vault.resolve())
+        else:
+            relative = output
+        if ".." in relative.parts:
+            raise ValueError("reported output_file is unsafe")
+        value["output_file"] = relative.as_posix()
+        output = receipts.artifact_path(value["output_file"], vault=vault,
+                                        output_dir=spec.output_dir, file_pattern=spec.file_pattern)
+        value["artifact_sha256"] = receipts.content_hash(
+            output, not_before=datetime.fromisoformat(started_at).timestamp() - 2.0
+        )
+        value["verification_scope"] = receipts.VERIFICATION_SCOPE
+    except (OSError, ValueError) as exc:
+        raise ExecutionError(f"artifact attestation failed: {exc}") from exc
     return value
 
 
@@ -971,25 +965,16 @@ def write_receipt(path: Path, fields: dict[str, Any]) -> None:
     atomic_write(path, "".join(lines))
 
 
-def read_receipt(path: Path) -> dict[str, Any]:
-    return _load_toml(path)
-
-
 def prior_delivery(spec: ModelSpec, *, cycle: str, vault: Path) -> dict[str, Any] | None:
     """Return an already verified cycle, or refuse an ambiguous prior attempt."""
     path = receipt_path(vault, spec.schedule.name, cycle)
-    if not path.is_file():
+    if not path.exists() and not path.is_symlink():
         return None
     try:
-        receipt = read_receipt(path)
-    except ConfigurationError as exc:
-        raise ExecutionError("existing domain receipt is unreadable; refusing an automatic rerun") from exc
-    if (
-        receipt.get("contract_version") != 3
-        or receipt.get("routine") != spec.schedule.name
-        or receipt.get("cycle_id") != cycle
-    ):
-        raise ExecutionError("existing domain receipt has the wrong identity; refusing an automatic rerun")
+        receipt = receipts.read(path, routine=spec.schedule.name, cycle=cycle, vault=vault,
+                                output_dir=spec.output_dir, file_pattern=spec.file_pattern)
+    except (OSError, ValueError) as exc:
+        raise ExecutionError(f"existing domain receipt is not verified; effects review is required: {exc}") from exc
     verification = receipt.get("verification")
     if verification == "blocked":
         return None
@@ -997,22 +982,6 @@ def prior_delivery(spec: ModelSpec, *, cycle: str, vault: Path) -> dict[str, Any
         raise ExecutionError(
             f"existing domain receipt verification is {verification or 'absent'}; effects review is required"
         )
-    raw_output = receipt.get("output_file")
-    if not isinstance(raw_output, str) or not raw_output:
-        raise ExecutionError("verified domain receipt omitted output_file")
-    relative = Path(raw_output)
-    if relative.is_absolute() or not relative.parts or ".." in relative.parts:
-        raise ExecutionError("verified domain receipt output_file is unsafe")
-    output = (vault / relative).resolve()
-    declared = (vault / spec.output_dir).resolve()
-    try:
-        output.relative_to(declared)
-    except ValueError as exc:
-        raise ExecutionError("verified domain receipt output_file is outside the declaration") from exc
-    if output not in {item.resolve() for item in declared.glob(spec.file_pattern) if item.is_file()}:
-        raise ExecutionError("verified domain receipt output_file no longer matches the declaration")
-    if output.stat().st_size == 0:
-        raise ExecutionError("verified domain receipt output_file is empty")
     print(f"routine cycle already verified: {spec.schedule.name} {cycle}", flush=True)
     return receipt
 
@@ -1070,7 +1039,7 @@ def execute_model(
     spec = ModelSpec.from_payload(payload)
     env_source = dict(os.environ if environ is None else environ)
     vault = vault_root(env_source)
-    if spec.wrapper == "autoevo":
+    if spec.adapter == "autoevo":
         return execute_autoevo(spec, vault=vault, root=root, cycle=cycle, flow_run_id=flow_run_id, environ=env_source)
     existing = prior_delivery(spec, cycle=cycle, vault=vault)
     if existing is not None:
@@ -1103,7 +1072,7 @@ def execute_model(
         prompt = adapter_prompt(spec, root=root)
         path = receipt_path(vault, spec.schedule.name, cycle)
         pending_receipt = {
-            "contract_version": 3,
+            "contract_version": receipts.VERSION,
             "routine": spec.schedule.name,
             "cycle_id": cycle,
             "prefect_flow_run_id": flow_run_id,
@@ -1126,7 +1095,7 @@ def execute_model(
             raise ExecutionError(f"Codex exited {result.returncode}; inspect Prefect state and observation coverage")
         outcome = _model_result(result_file, spec, vault=vault, started_at=started_at)
     receipt = {
-        "contract_version": 3,
+        "contract_version": receipts.VERSION,
         "routine": spec.schedule.name,
         "cycle_id": cycle,
         "prefect_flow_run_id": flow_run_id,
@@ -1138,6 +1107,8 @@ def execute_model(
         "duration_seconds": int(time.time() - started_epoch),
         "outcome": outcome["outcome"],
         "output_file": outcome["output_file"],
+        "artifact_sha256": outcome["artifact_sha256"],
+        "verification_scope": outcome["verification_scope"],
         "result_summary": outcome["summary"][:500],
         "skipped_inputs": outcome["skipped_inputs"],
         "verification": "blocked" if outcome["outcome"] == "noop" and outcome["skipped_inputs"] else "passed",

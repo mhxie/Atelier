@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = ROOT / ".claude/agents/reviewer.md"
+SPEC = ROOT / "agents/reviewer.md"
 
 import harness_lint  # noqa: E402
 

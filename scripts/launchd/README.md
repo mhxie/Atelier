@@ -1,6 +1,6 @@
 # launchd — Prefect services on macOS
 
-Atelier uses launchd only to keep two long-lived local services alive. Prefect
+Atelier uses launchd to keep long-lived local services alive. Prefect
 owns every routine schedule, timezone, run state, log, concurrency decision,
 and eligible retry. Model behavior remains governed by
 `protocols/remote-routines.md`; autoevo adds the domain contract in
@@ -17,16 +17,17 @@ updates never change installed LaunchAgents.
 |---|---|---|
 | `com.atelier.prefect-server.plist` | Local Prefect API/UI on `127.0.0.1:4200` | No routine schedule; persists Prefect state under `~/Library/Application Support/Atelier/Prefect` |
 | `com.atelier.prefect-routines.plist` | `scripts/routine_prefect.py serve` | Registers and serves all validated deployments; globally limited to one active run |
+| `com.atelier.observability.plist` | `scripts/observability` collector | No routine schedule; installed by `scripts/observability/native.py`, contract in `sources/runtimes/observability.md` |
 
-Both use `RunAtLoad` and `KeepAlive`. The server must be available before
+Each uses `RunAtLoad` and `KeepAlive`. The server must be available before
 the deployment runner can remain healthy; launchd will restart the runner if it
 starts too early.
 
 ## Inputs and boundaries
 
-Public deterministic declarations live in `harness/routine_jobs.toml`.
-Private model routines and vault scripts stay in
-`$OV/_meta/routine_watch.toml`. Public capability profiles live in
+Public declarations and model adapters live in `routines/registry.toml`.
+Private model and process routines stay in
+`<paths.private_routines>/registry.toml`. Public capability profiles live in
 `harness/routine_profiles.toml`.
 
 The service wrapper sources `~/.zprofile`, `~/.profile`, and then the

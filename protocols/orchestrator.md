@@ -85,7 +85,7 @@ Distinguish instruction conflicts from disagreements about evidence:
 
 ## Reader → Scholar auto-promotion
 
-The selection rule lives in `.claude/commands/read.md` → Reader vs Scholar selection. The selected
+The selection rule lives in `skills/read/SKILL.md` → Reader vs Scholar selection. The selected
 reading worker may apply several requested lenses; difficulty does not imply
 additional agents.
 

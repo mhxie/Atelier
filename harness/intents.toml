@@ -8,7 +8,7 @@
 #
 # The gitignored overlay `harness/intents.local.toml` may extend `examples`
 # for existing rows and may add private rows (`description` + `procedure`
-# pointing at an existing local file, typically a private feature's
+# pointing at an existing local file, typically a private skill's
 # SKILL.md) that this public catalog must never carry. It cannot change any
 # other field of a canonical row.
 #
@@ -66,7 +66,7 @@ examples = [
     "read with me",
 ]
 mode = "read-and-discuss"
-procedure = ".claude/commands/read.md"
+procedure = "skills/read/SKILL.md"
 context_budget_tokens = 8192
 agents = ["reader"]
 profile_reads = ["identity.md"]
@@ -108,7 +108,7 @@ profile_reads = []
 expected_subagent_count = 3
 parallel = false
 
-# Talk / transcript routes to `.claude/commands/read.md`: one Reader handles
+# Talk / transcript routes to `skills/read/SKILL.md`: one Reader handles
 # transcript preprocessing; the procedure adds specialists only for a concrete need.
 [intents.talk]
 description = "Read and discuss a talk, seminar, lecture, podcast, or video (or its transcript) as learning material; not a work meeting, not a written article."
@@ -119,7 +119,7 @@ examples = [
     "video",
 ]
 mode = "transcript-read"
-procedure = ".claude/commands/read.md"
+procedure = "skills/read/SKILL.md"
 context_budget_tokens = 8192
 agents = ["reader"]
 profile_reads = ["identity.md"]
@@ -128,7 +128,7 @@ parallel = false
 
 # Sync digests the mobile-capture submodule $OV/zettelm/ into daily notes and
 # raw attachments, enriches with backlinks, then stages zettelm deletions for
-# the user to commit. Procedure: .claude/commands/sync.md.
+# the user to commit. Procedure: skills/sync/SKILL.md.
 [intents.sync]
 description = "Ingest the mobile-capture submodule zettelm (fleeting notes from the phone) into the vault and stage its deletions; not the mailed digest report."
 examples = [
@@ -140,7 +140,7 @@ examples = [
     "fleeting digest",
 ]
 mode = "sync"
-procedure = ".claude/commands/sync.md"
+procedure = "skills/sync/SKILL.md"
 context_budget_tokens = 2048
 agents = ["researcher", "curator", "challenger", "scribe", "reviewer"]
 profile_reads = []
@@ -180,7 +180,7 @@ examples = [
     "weekly check-in",
 ]
 mode = "weekly-review"
-procedure = ".claude/commands/weekly.md"
+procedure = "skills/weekly/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
@@ -197,7 +197,7 @@ examples = [
     "energy check",
 ]
 mode = "energy-audit"
-procedure = ".claude/commands/daily-reflection.md"
+procedure = "skills/daily-reflection/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
@@ -214,7 +214,7 @@ examples = [
     "quarterly review",
 ]
 mode = "goal-review"
-procedure = ".claude/commands/review.md"
+procedure = "skills/review/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
@@ -233,7 +233,7 @@ examples = [
     "decision journal",
 ]
 mode = "decision-journal"
-procedure = ".claude/commands/decision.md"
+procedure = "skills/decision/SKILL.md"
 context_budget_tokens = 8192
 agents = ["thinker"]
 profile_reads = ["identity.md", "directions.md"]
@@ -250,7 +250,7 @@ examples = [
     "open threads",
 ]
 mode = "open-exploration"
-procedure = ".claude/commands/daily-reflection.md"
+procedure = "skills/daily-reflection/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md"]
@@ -269,7 +269,7 @@ examples = [
     "browse saves",
 ]
 mode = "curate-inbox"
-procedure = ".claude/commands/curate.md"
+procedure = "skills/curate/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
@@ -291,7 +291,7 @@ examples = [
     "digest 邮件",
 ]
 mode = "digest"
-procedure = ".claude/commands/digest.md"
+procedure = "skills/digest/SKILL.md"
 context_budget_tokens = 8192
 agents = []
 profile_reads = ["identity.md", "directions.md"]
@@ -308,7 +308,7 @@ examples = [
     "L4 entry",
 ]
 mode = "promote"
-procedure = ".claude/commands/promote.md"
+procedure = "skills/promote/SKILL.md"
 context_budget_tokens = 2048
 agents = ["researcher", "curator"]
 profile_reads = []
@@ -325,7 +325,7 @@ examples = [
     "run lint",
 ]
 mode = "lint"
-procedure = ".claude/commands/lint.md"
+procedure = "skills/lint/SKILL.md"
 context_budget_tokens = 2048
 agents = []
 profile_reads = []
@@ -343,7 +343,7 @@ examples = [
     "refresh profile",
 ]
 mode = "introspect"
-procedure = ".claude/commands/introspect.md"
+procedure = "skills/introspect/SKILL.md"
 context_budget_tokens = 2048
 agents = ["reviewer", "challenger"]
 profile_reads = []
@@ -362,7 +362,7 @@ examples = [
     "反思一下",
 ]
 mode = "daily-reflection"
-procedure = ".claude/commands/daily-reflection.md"
+procedure = "skills/daily-reflection/SKILL.md"
 context_budget_tokens = 12288
 agents = ["thinker", "scribe"]
 profile_reads = ["identity.md", "directions.md"]

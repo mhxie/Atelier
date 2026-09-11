@@ -6,7 +6,7 @@ description: "Use when the user's primary intent is to have an article, paper, t
 # Reading (Atelier entry hint)
 
 Forward the user's input verbatim into `/hi <user-text>`. The router in
-`.claude/commands/hi.md` selects the row and follows its procedure; reading
+`skills/hi/SKILL.md` selects the row and follows its procedure; reading
 dispatch is defined there, not here.
 
 Trigger only when the URL, wikilink, or "read this" phrase is the request

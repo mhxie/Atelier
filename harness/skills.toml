@@ -1,0 +1,140 @@
+# Public skill registry.
+#
+# `skills/<name>/SKILL.md` is canonical. The edge renderer copies each source
+# to Claude slash-command and Codex repo-skill discovery.
+#
+# An alias keeps a short canonical skill and names its target with `alias_of`.
+#
+# Most skills are reachable through `harness/intents.toml`. Skills that are intentionally direct-only
+# (no /hi routing) declare `direct_only = true`. These are typically:
+#   - dashboards (read-only, on-demand)
+#   - destructive / audit operations (need explicit user trigger)
+# `scripts/harness_lint.py` checks that every entry here either has an
+# intents.toml row OR declares `direct_only = true`.
+# Every row is user-facing. Routine adapters have their own registry.
+
+[skills.hi]
+source = "skills/hi/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Universal entry point — intent router for reflection, planning, action, reading, learning, capture, and more."
+
+[skills.reflect]
+source = "skills/reflect/SKILL.md"
+category = "session"
+status = "alias"
+alias_of = "hi"
+description = "Alias of /hi."
+
+[skills.daily-reflection]
+source = "skills/daily-reflection/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Daily reflection with on-demand energy and open-exploration branches, grounded in notes and goals."
+
+[skills.read]
+source = "skills/read/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Read and discuss a source with one reading worker; expand perspectives, evidence gathering, or review when the task needs it."
+
+[skills.weekly]
+source = "skills/weekly/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Weekly review of patterns, commitments, health follow-ups, and next-week priorities; life check-ins are contextual."
+
+[skills.review]
+source = "skills/review/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Goal review for quarterly full reviews and monthly light pulses."
+
+[skills.decision]
+source = "skills/decision/SKILL.md"
+category = "session"
+status = "canonical"
+description = "Lightweight decision journal with analysis proportional to the stakes."
+
+[skills.prm]
+source = "skills/prm/SKILL.md"
+category = "session"
+status = "canonical"
+direct_only = true
+description = "Personal relationship management audit grounded in local relationship notes."
+
+[skills.push]
+source = "skills/push/SKILL.md"
+category = "ops"
+status = "canonical"
+direct_only = true
+description = "Publish local commits after both privacy gates pass over the whole unpushed range."
+
+[skills.introspect]
+source = "skills/introspect/SKILL.md"
+category = "profile"
+status = "canonical"
+description = "Build or refresh profile files from local notes and attributable reading feedback."
+
+[skills.curate]
+source = "skills/curate/SKILL.md"
+category = "knowledge"
+status = "canonical"
+description = "Goal-aware content curation and inbox triage with attributable reading episodes."
+
+[skills.digest]
+source = "skills/digest/SKILL.md"
+category = "knowledge"
+status = "canonical"
+description = "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
+
+[skills.sync]
+source = "skills/sync/SKILL.md"
+category = "knowledge"
+status = "canonical"
+description = "Digest the mobile-capture submodule into the persistent L2 destinations and stage zettelm deletions."
+
+[skills.promote]
+source = "skills/promote/SKILL.md"
+category = "knowledge"
+status = "canonical"
+description = "Promote L2 working notes into a schema-compliant L4 wiki entry."
+# Reflection workflows default to fresh sessions (a reused session pollutes
+# the new reflection); resume_friendly marks the continuation-safe exceptions.
+resume_friendly = true
+
+[skills.lint]
+# Public field validation is owned by harness/registry.schema.json;
+# scripts/harness_lint.py retains cross-file and workflow checks.
+source = "skills/lint/SKILL.md"
+category = "ops"
+status = "canonical"
+description = "Run harness, privacy, structural, and staleness checks."
+
+[skills.triage]
+source = "skills/triage/SKILL.md"
+category = "ops"
+status = "canonical"
+direct_only = true
+description = "Unified operational review center with a read-only overview and bounded review batches."
+
+[skills.civ]
+source = "skills/civ/SKILL.md"
+category = "dashboard"
+status = "canonical"
+direct_only = true
+description = "Read-only life dashboard over privately configured resources, civilizations, and terminal values."
+
+[skills.dine]
+source = "skills/dine/SKILL.md"
+category = "dashboard"
+status = "canonical"
+direct_only = true
+description = "Restaurant recommendation flow using local context and credit-burn signals."
+
+[skills.autoevo-review]
+source = "skills/autoevo-review/SKILL.md"
+category = "ops"
+status = "canonical"
+direct_only = true
+description = "Triage the pending queue produced by the Autoevo routine."

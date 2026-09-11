@@ -16,11 +16,17 @@ import privacy_index as pi  # noqa: E402
 
 def _vault(tmp: str) -> Path:
     vault = Path(tmp) / "vault"
-    for d in ("research/quantum-widgets/raw", "research/quantum-widgets/audit-log", "research/quantum", "research/papers", "inbox/digest", "travel/trips", "wip", "people", "_meta", "_tools/features/gizmo-tracker", "profile", "cache"):
+    for d in (
+        "research/quantum-widgets/raw", "research/quantum-widgets/audit-log",
+        "research/quantum", "research/papers", "inbox/digest", "travel/trips",
+        "wip", "people", "_meta", "_tools/skills/gizmo-tracker", "_tools/agents",
+        "_tools/tools/meteor-console", "_tools/routines/nebula-scan", "profile", "cache",
+    ):
         (vault / d).mkdir(parents=True)
     (vault / "wip" / "Quarterly Plan Draft.md").write_text("---\ntitle: Quarterly Plan Draft\npeople: [Ada Lovelace, Grace Hopper]\n---\nSee [[Charles Babbage]].\n", encoding="utf-8")
-    (vault / "_meta" / "routine_watch.toml").write_text(
-        '[[routine]]\nname = "orbital-scan"\nlabel = "orbital mechanics scan"\noutput_dir = "research/quantum-widgets/agent-findings"\nfile_pattern = "*.md"\n', encoding="utf-8")
+    (vault / "_tools" / "routines" / "registry.toml").write_text(
+        'version = 1\n[[routine]]\nname = "orbital-scan"\nrunner = "model"\nlabel = "orbital mechanics scan"\noutput_dir = "research/quantum-widgets/agent-findings"\nfile_pattern = "*.md"\n', encoding="utf-8")
+    (vault / "_tools" / "agents" / "stellar-guide.md").write_text("---\nname: stellar-guide\n---\n", encoding="utf-8")
     (vault / "profile" / "identity.md").write_text("# Me\n\n**Acme Rocketry** employs me. I studied at **Miskatonic University**.\n", encoding="utf-8")
     return vault
 
@@ -54,7 +60,10 @@ class IndexBuildTest(unittest.TestCase):
             self.assertIn("orbital mechanics scan", terms)
             self.assertNotIn("research/quantum-widgets/agent-findings", data["paths"], "public segment tail")
             self.assertIn("gizmo-tracker", terms)
-            self.assertEqual(terms["gizmo-tracker"]["sources"], ["private feature directory"])
+            self.assertEqual(terms["gizmo-tracker"]["sources"], ["private skill directory"])
+            self.assertEqual(terms["meteor-console"]["sources"], ["private tool directory"])
+            self.assertEqual(terms["nebula-scan"]["sources"], ["private routine directory"])
+            self.assertEqual(terms["stellar-guide"]["sources"], ["private agent source"])
             self.assertNotIn("Acme Rocketry", terms, "profile prose is not an index source")
             self.assertNotIn("research/papers", data["paths"], "a public tier segment is never a path")
             self.assertNotIn("quantum-widgets/raw", " ".join(data["paths"]).replace("research/", ""), "raw is not name-like")
@@ -93,7 +102,7 @@ class IndexBuildTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertGreater(json.loads(proc.stdout)["terms"], 5)
             proc = subprocess.run([sys.executable, "scripts/privacy_index.py", "why", "orbital-scan"], cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=120)
-            self.assertIn("routine_watch.toml name", proc.stdout)
+            self.assertIn("private routine registry name", proc.stdout)
 
 
 if __name__ == "__main__":

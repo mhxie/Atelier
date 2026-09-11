@@ -6,7 +6,7 @@ description: Use when the user dictates raw factual content they want recorded v
 # Capture (Atelier entry hint)
 
 Forward the user's input verbatim into `/hi <user-text>`. The router in
-`.claude/commands/hi.md` selects `intents.capture` and dispatches Scribe for
+`skills/hi/SKILL.md` selects `intents.capture` and dispatches Scribe for
 verbatim recording; `harness/intents.toml` is the dispatch source of truth.
 
 Do not bypass `/hi` or call Scribe directly. Do not paraphrase, summarize, or

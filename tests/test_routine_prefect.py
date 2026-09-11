@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -48,9 +49,11 @@ class Fixture:
         self.bin = Path(self.temporary.name) / "bin"
         for path in (
             self.root / "harness/routine-shell",
-            self.root / ".claude/commands",
+            self.root / "routines/_adapters/archived-prompt",
+            self.root / "routines/_adapters/autoevo",
             self.root / "scripts",
             self.vault / "_meta",
+            self.vault / "_tools/routines",
             self.bin,
         ):
             path.mkdir(parents=True, exist_ok=True)
@@ -70,15 +73,23 @@ permissions = ["atelier:read", "vault:read-write"]
 required_clis = []
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/fixture"]
+allowed_adapters = ["archived-prompt"]
 """.lstrip(),
             encoding="utf-8",
         )
-        (self.root / "harness/routine_jobs.toml").write_text(
+        (self.root / "routines/registry.toml").write_text(
             """
 version = 1
-[[job]]
+
+[adapters.archived-prompt]
+procedure = "routines/_adapters/archived-prompt/PROCEDURE.md"
+
+[adapters.autoevo]
+procedure = "routines/_adapters/autoevo/PROCEDURE.md"
+
+[[routine]]
 name = "dummy"
+runner = "process"
 cron = "0 4 * * *"
 timezone = "UTC"
 argv = ["{python}", "scripts/dummy.py"]
@@ -86,29 +97,39 @@ timeout_seconds = 30
 retry_safe = true
 retries = 1
 retry_delay_seconds = 1
-""".lstrip(),
-            encoding="utf-8",
-        )
-        (self.root / "harness/commands.toml").write_text(
-            '[commands.fixture]\nsource = ".claude/commands/fixture.md"\ncodex_prompt = "Fixture command."\n',
+            """.lstrip(),
             encoding="utf-8",
         )
         (self.root / "harness/routine_result.schema.json").write_text("{}\n", encoding="utf-8")
-        (self.root / ".claude/commands/fixture.md").write_text("fixture\n", encoding="utf-8")
+        (self.root / "routines/_adapters/archived-prompt/PROCEDURE.md").write_text(
+            "Fixture archived-prompt adapter.\n", encoding="utf-8"
+        )
+        (self.root / "routines/_adapters/autoevo/PROCEDURE.md").write_text(
+            "Fixture Autoevo adapter.\n", encoding="utf-8"
+        )
         (self.root / "scripts/dummy.py").write_text("pass\n", encoding="utf-8")
-        (self.vault / "_meta/routine_watch.toml").write_text(
+        (self.vault / "_tools/routines/registry.toml").write_text(
             """
+version = 1
+
 [[routine]]
 name = "sample"
 execution = "local"
-kind = "model"
-command = "/fixture"
+runner = "model"
+adapter = "archived-prompt"
 cron = "0 5 * * *"
 timezone = "UTC"
-local_profile = "fixture"
+profile = "fixture"
 output_dir = "outputs"
 file_pattern = "*.md"
-""".lstrip(),
+            """.lstrip(),
+            encoding="utf-8",
+        )
+        prompts = self.vault / "_routine_prompts"
+        prompts.mkdir()
+        (prompts / "sample.md").write_text(
+            "LOCAL EXECUTION OVERRIDE\nRead local filesystem under $OV.\n"
+            "--- ORIGINAL ROUTINE PROMPT (fixture) ---\nFixture.\n",
             encoding="utf-8",
         )
         codex = self.bin / "codex"
@@ -172,20 +193,15 @@ class RssAdapterTests(unittest.TestCase):
         profile = self.root / "harness/routine_profiles.toml"
         profile.write_text(profile.read_text().replace('web_search = "disabled"', 'web_search = "live"')
                            .replace('"vault:read-write"', '"vault:read-write", "web:live"')
-                           .replace('"/fixture"', '"/run-routine"'))
-        watch = self.vault / "_meta/routine_watch.toml"
-        watch.write_text(watch.read_text().replace('command = "/fixture"', 'command = "/run-routine sample"')
-                         + '\nrss_sources = "_meta/feeds.toml"\n')
+                           .replace('["archived-prompt"]', '["archived-prompt", "autoevo"]'))
+        watch = self.vault / "_tools/routines/registry.toml"
+        watch.write_text(watch.read_text() + '\nrss_sources = "_meta/feeds.toml"\n')
         self.config = self.vault / "_meta/feeds.toml"
         self.config.write_text('version = 1\n[[feed]]\nid = "example"\nurl = "https://example.invalid/feed"\n')
         prompts = self.vault / "_routine_prompts"
-        prompts.mkdir()
         (prompts / "sample.md").write_text(
             "LOCAL EXECUTION OVERRIDE\nRead local filesystem under $OV.\n"
             "--- ORIGINAL ROUTINE PROMPT (fixture) ---\nFixture.\n"
-        )
-        (self.root / "harness/commands.toml").write_text(
-            '[commands.run-routine]\nsource = ".claude/commands/fixture.md"\ncodex_prompt = "Fixture."\n'
         )
         self.data = {
             "schema": 1, "collected_at": "2099-01-02T00:00:00Z", "status": "ok",
@@ -223,10 +239,9 @@ class RssAdapterTests(unittest.TestCase):
             path.write_text(content)
             with self.assertRaisesRegex(adapter.ConfigurationError, "web:live"):
                 self._prepare()
-        path.write_text(original.replace('"/run-routine"', '"/fixture"'))
-        watch = self.vault / "_meta/routine_watch.toml"
-        watch.write_text(watch.read_text().replace('/run-routine sample', '/fixture'))
-        with self.assertRaisesRegex(adapter.ConfigurationError, "ordinary /run-routine"):
+        watch = self.vault / "_tools/routines/registry.toml"
+        watch.write_text(watch.read_text().replace('adapter = "archived-prompt"', 'adapter = "autoevo"'))
+        with self.assertRaisesRegex(adapter.ConfigurationError, "archived-prompt adapter"):
             self._prepare()
         self.node.assert_not_called()
 
@@ -352,6 +367,10 @@ class AdapterTests(unittest.TestCase):
         stored = tomllib.loads(receipt.read_text(encoding="utf-8"))
         self.assertEqual((result["verification"], stored["output_file"]), ("passed", f"outputs/{CYCLE}.md"))
         self.assertEqual(stored["prefect_flow_run_id"], "flow-1")
+        self.assertEqual(stored["contract_version"], 4)
+        self.assertEqual(stored["verification_scope"], "artifact-bytes")
+        output = fixture.vault / stored["output_file"]
+        self.assertEqual(stored["artifact_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
         self.assertNotIn("status", stored)
 
     def test_noop_that_skipped_inputs_leaves_the_cycle_retryable(self) -> None:
@@ -389,7 +408,7 @@ class AdapterTests(unittest.TestCase):
                     payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
                     with self.assertRaises(adapter.ExecutionError):
                         fixture.execute(payload, flow_run_id="flow-2")
-                    receipt = adapter.read_receipt(adapter.receipt_path(fixture.vault, "sample", CYCLE))
+                    receipt = tomllib.loads(adapter.receipt_path(fixture.vault, "sample", CYCLE).read_text())
                     self.assertEqual((receipt["cycle_id"], receipt["verification"]), (CYCLE, "pending"))
                     with self.assertRaisesRegex(adapter.ExecutionError, "effects review is required"):
                         fixture.execute(payload, flow_run_id="flow-second")
@@ -415,7 +434,7 @@ class AdapterTests(unittest.TestCase):
                         with self.assertRaisesRegex(adapter.ExecutionError, "effects review is required"):
                             fixture.execute(payload, flow_run_id="flow-second")
                     self.assertEqual((launch.call_count, effects.read_text(encoding="utf-8")), (1, "effect\n"))
-                    receipt = adapter.read_receipt(adapter.receipt_path(fixture.vault, "sample", CYCLE))
+                    receipt = tomllib.loads(adapter.receipt_path(fixture.vault, "sample", CYCLE).read_text())
                     self.assertEqual(receipt["verification"], "pending")
                 finally:
                     fixture.close()
@@ -434,6 +453,125 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(adapter.ExecutionError, "effects review is required"):
             fixture.execute(payload, flow_run_id="flow-third")
 
+    def test_v3_reuses_unbound_evidence_without_upgrade_or_model_work(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
+        legacy = fixture.execute(payload, flow_run_id="flow-original")
+        legacy["contract_version"] = 3
+        legacy.pop("artifact_sha256")
+        legacy.pop("verification_scope")
+        path = adapter.receipt_path(fixture.vault, "sample", CYCLE)
+        adapter.write_receipt(path, legacy)
+        before = path.read_bytes()
+        (fixture.vault / legacy["output_file"]).write_text("later content", encoding="utf-8")
+        with mock.patch.object(adapter, "execute_observed_model") as launch:
+            reused = fixture.execute(payload, flow_run_id="flow-reuse")
+        launch.assert_not_called()
+        self.assertEqual(reused, legacy)
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_invalid_evidence_blocks_model_replay(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
+        delivered = fixture.execute(payload, flow_run_id="flow-original")
+        path = adapter.receipt_path(fixture.vault, "sample", CYCLE)
+        output = fixture.vault / delivered["output_file"]
+        original = output.read_bytes()
+        outside = Path(fixture.temporary.name) / "outside.md"
+        outside.write_bytes(original)
+        for problem in ("changed", "empty", "missing", "escape", "declaration", "scope", "hash",
+                        "version", "identity", "corrupt", "dangling-receipt"):
+            with self.subTest(problem=problem):
+                path.unlink(missing_ok=True)
+                output.unlink(missing_ok=True)
+                output.write_bytes(original)
+                receipt = dict(delivered)
+                if problem == "changed":
+                    output.write_bytes(b"!" + original[1:])
+                elif problem == "empty":
+                    output.write_bytes(b"")
+                elif problem == "missing":
+                    output.unlink()
+                elif problem == "escape":
+                    output.unlink()
+                    output.symlink_to(outside)
+                elif problem == "declaration":
+                    output.with_suffix(".txt").write_bytes(original)
+                    receipt["output_file"] = str(Path(receipt["output_file"]).with_suffix(".txt"))
+                elif problem == "scope":
+                    receipt["verification_scope"] = "business-outcome"
+                elif problem == "hash":
+                    receipt.pop("artifact_sha256")
+                elif problem == "version":
+                    receipt["contract_version"] = 99
+                elif problem == "identity":
+                    receipt["routine"] = "other"
+                adapter.write_receipt(path, receipt)
+                if problem == "corrupt":
+                    path.write_text("not valid toml", encoding="utf-8")
+                elif problem == "dangling-receipt":
+                    path.unlink()
+                    path.symlink_to(path.with_suffix(".missing"))
+                with mock.patch.object(adapter, "execute_observed_model") as launch:
+                    with self.assertRaisesRegex(adapter.ExecutionError, "effects review is required"):
+                        fixture.execute(payload, flow_run_id="flow-replay")
+                launch.assert_not_called()
+
+    def test_artifact_binding_is_computed_by_the_parent(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        spec = adapter.ModelSpec.from_payload(adapter.prepare_model("sample", root=fixture.root, environ=fixture.env))
+        output = fixture.vault / "outputs" / f"{CYCLE}.md"
+        output.write_text("trusted bytes", encoding="utf-8")
+        result = fixture.root / "result.json"
+        result.write_text(json.dumps({
+            "routine": "sample", "outcome": "delivered", "output_file": str(output),
+            "summary": "claimed success", "skipped_inputs": [],
+            "artifact_sha256": "fabricated", "verification_scope": "business-outcome",
+        }))
+        alias = Path(fixture.temporary.name) / "vault-alias"
+        alias.symlink_to(fixture.vault, target_is_directory=True)
+        value = adapter._model_result(
+            result, spec, vault=alias, started_at=datetime.now().astimezone().isoformat()
+        )
+        self.assertEqual(value["verification_scope"], "artifact-bytes")
+        self.assertEqual(value["artifact_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+
+        content_hash = adapter.receipts.content_hash
+        for data, reason in ((b"stale bytes", "stale"), (b"", "empty")):
+            with self.subTest(replacement=reason):
+                output.write_bytes(b"fresh bytes")
+                replacement = output.with_suffix(".swap")
+                replacement.write_bytes(data)
+                os.utime(replacement, (1, 1))
+
+                def swap_before_hash(path, **kwargs):
+                    replacement.replace(path)
+                    return content_hash(path, **kwargs)
+
+                with mock.patch.object(adapter.receipts, "content_hash", side_effect=swap_before_hash):
+                    with self.assertRaisesRegex(adapter.ExecutionError, reason):
+                        adapter._model_result(result, spec, vault=alias,
+                                              started_at=datetime.now().astimezone().isoformat())
+
+    def test_artifact_mutation_during_hashing_refuses_attestation(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        output = fixture.vault / "artifact.md"
+        output.write_bytes(b"before")
+        digest = hashlib.file_digest
+
+        def change_after_read(handle, algorithm):
+            result = digest(handle, algorithm)
+            output.write_bytes(b"after")
+            return result
+
+        with mock.patch.object(adapter.receipts.hashlib, "file_digest", side_effect=change_after_read):
+            with self.assertRaisesRegex(ValueError, "changed during verification"):
+                adapter.receipts.content_hash(output)
+
     def test_runtime_is_fixed_codex_and_environment_is_scrubbed(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
@@ -446,7 +584,7 @@ class AdapterTests(unittest.TestCase):
         self.assertIn("--output-schema", argv)
         self.assertEqual(env["ATELIER_ROUTINE_PROFILE"], spec.profile)
         self.assertEqual(env["ATELIER_ROUTINE_PERMISSIONS"], ",".join(spec.profile_values["permissions"]))
-        procedure = (ROOT / ".claude/commands/run-routine.md").read_text()
+        procedure = (ROOT / "routines/_adapters/archived-prompt/PROCEDURE.md").read_text()
         self.assertIn("```sh\n", procedure)
         self.assertIn("§ Runtime and permission boundary", procedure)
         check = procedure.split("```sh\n", 1)[1].split("```", 1)[0]
@@ -497,7 +635,7 @@ class AdapterTests(unittest.TestCase):
     def test_an_undeclared_identity_is_refused_at_configuration_load(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        watch = fixture.vault / "_meta/routine_watch.toml"
+        watch = fixture.vault / "_tools/routines/registry.toml"
         watch.write_text(
             watch.read_text(encoding="utf-8") + 'model = "no_such_identity"\n', encoding="utf-8"
         )
@@ -555,7 +693,7 @@ class AdapterTests(unittest.TestCase):
         script = fixture.vault / "jobs/collector.py"
         script.parent.mkdir()
         script.write_text("pass\n", encoding="utf-8")
-        watch = fixture.vault / "_meta/routine_watch.toml"
+        watch = fixture.vault / "_tools/routines/registry.toml"
         watch.write_text(
             watch.read_text(encoding="utf-8")
             + """
@@ -563,7 +701,7 @@ class AdapterTests(unittest.TestCase):
 [[routine]]
 name = "collector"
 execution = "local"
-kind = "vault-script"
+runner = "process"
 script = "jobs/collector.py"
 cron = "0 6 * * *"
 timezone = "UTC"
@@ -593,7 +731,7 @@ retry_safe = false
     def test_model_attempt_retries_are_rejected_but_safe_preflight_retries(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        watch = fixture.vault / "_meta/routine_watch.toml"
+        watch = fixture.vault / "_tools/routines/registry.toml"
         watch.write_text(
             watch.read_text(encoding="utf-8").replace('cron = "0 5 * * *"', 'cron = "0 5 * * *"\nretries = 1'),
             encoding="utf-8",
@@ -683,7 +821,7 @@ retry_safe = false
     def test_validation_rejects_invalid_cron_before_service_start(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
-        watch = fixture.vault / "_meta/routine_watch.toml"
+        watch = fixture.vault / "_tools/routines/registry.toml"
         watch.write_text(
             watch.read_text(encoding="utf-8").replace('cron = "0 5 * * *"', 'cron = "not a cron"'),
             encoding="utf-8",
@@ -704,8 +842,8 @@ retry_safe = false
         self.assertIn("scripts/routine_prefect.py serve", service)
 
     def test_public_index_schedule_uses_the_current_qmd_cli(self) -> None:
-        registry = tomllib.loads((ROOT / "harness/routine_jobs.toml").read_text(encoding="utf-8"))
-        row = next(job for job in registry["job"] if job["name"] == "semantic-index")
+        registry = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))
+        row = next(job for job in registry["routine"] if job["name"] == "semantic-index")
         argv = row["argv"]
         args = semantic.build_parser().parse_args(argv[argv.index("scripts/semantic.py") + 1:])
         self.assertEqual(args.command, "index")
@@ -814,9 +952,17 @@ class AutoevoAdapterTests(unittest.TestCase):
         self.addCleanup(self.fixture.close)
         self.root, self.vault = self.fixture.root.resolve(), self.fixture.vault.resolve()
         self.env = {**self.fixture.env, "OV": str(self.vault)}
+        profile = self.root / "harness/routine_profiles.toml"
+        profile.write_text(
+            profile.read_text().replace('["archived-prompt"]', '["autoevo"]'), encoding="utf-8"
+        )
+        registry = self.vault / "_tools/routines/registry.toml"
+        registry.write_text(
+            registry.read_text().replace('adapter = "archived-prompt"', 'adapter = "autoevo"'),
+            encoding="utf-8",
+        )
         payload = adapter.prepare_model("sample", root=self.root, environ=self.env)
         payload["schedule"]["name"] = "autoevo-nightly"
-        payload["wrapper"] = "autoevo"
         payload["profile_values"]["permissions"] = ["atelier:read", "vault:read", "staging:write"]
         self.spec = adapter.ModelSpec.from_payload(payload)
         source = self.vault / "wip/note.md"
@@ -844,6 +990,9 @@ class AutoevoAdapterTests(unittest.TestCase):
         ))
         self.enterContext(mock.patch.object(
             adapter, "_model_result", side_effect=AssertionError("transport ack is not domain evidence"),
+        ))
+        self.enterContext(mock.patch.object(
+            adapter.receipts, "read", side_effect=AssertionError("Autoevo must use its own verifier"),
         ))
 
     def _prepare(self, vault, workspace, cycle, readiness):

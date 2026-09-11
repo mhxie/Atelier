@@ -14,14 +14,14 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import fmt  # noqa: E402
+from _paths import fmt, tier_segments  # noqa: E402
 
 
 MANIFEST_SCHEMA = 1
 
 # Public harness routine whose output is maintenance bookkeeping, not intel.
 # Named here (not in the private vault registry) because the name is already
-# public in the Prefect service documentation and .claude/commands/.
+# public in the Prefect service documentation and routine adapter registry.
 MAINTENANCE_ROUTINES = {"autoevo-nightly"}
 
 DEFAULT_EXCERPT_CHARS = 800
@@ -77,11 +77,11 @@ class Routine:
     context: str | None = None
 
 def load_routines(ov: Path) -> list[Routine]:
-    """Parse $OV/_meta/routine_watch.toml into Routine rows.
+    """Parse the private routine registry into Routine rows.
 
     Rows without an output_dir are skipped: they cannot contribute files.
     """
-    config_path = ov / "_meta" / "routine_watch.toml"
+    config_path = ov / tier_segments().get("private_routines", "_tools/routines") / "registry.toml"
     if not config_path.is_file():
         raise SystemExit(f"routine registry missing: {fmt(config_path)}")
     try:
@@ -227,7 +227,7 @@ def resolve_output_dir(ov: Path, routine_name: str = "") -> Routine:
             return excluded[0]
         if not excluded:
             raise SystemExit(
-                "no routine in _meta/routine_watch.toml carries digest = { include = false }; "
+                "no private routine carries digest = { include = false }; "
                 "set it on the digest routine's row or pass --routine"
             )
         names = ", ".join(sorted(routine.name for routine in excluded))
@@ -241,10 +241,10 @@ def resolve_output_dir(ov: Path, routine_name: str = "") -> Routine:
         if routine.include:
             raise SystemExit(
                 f"routine {routine_name!r} writes the digest but is not excluded from it; "
-                "set digest = { include = false } on its routine_watch.toml row"
+                "set digest = { include = false } on its private registry row"
             )
         return routine
-    raise SystemExit(f"routine {routine_name!r} has no row in _meta/routine_watch.toml")
+    raise SystemExit(f"routine {routine_name!r} has no private registry row")
 
 def manifest_names_by_dir(manifest: dict[str, Any]) -> dict[str, set[str]]:
     """Filenames the manifest actually carries, keyed by their directory."""

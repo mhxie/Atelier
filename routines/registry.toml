@@ -1,10 +1,16 @@
 version = 1
 
-# Repository-owned deterministic jobs. Private vault collectors use
-# `kind = "vault-script"` rows in `$OV/_meta/routine_watch.toml` instead.
+# Public routine adapters. Private routine rows select one without becoming
+# public or entering skill discovery.
+[adapters.archived-prompt]
+procedure = "routines/_adapters/archived-prompt/PROCEDURE.md"
 
-[[job]]
+[adapters.autoevo]
+procedure = "routines/_adapters/autoevo/PROCEDURE.md"
+
+[[routine]]
 name = "semantic-index"
+runner = "process"
 cron = ["30 7 * * *", "30 19 * * *"]
 timezone = "local"
 argv = ["uv", "run", "--offline", "--frozen", "scripts/semantic.py", "index"]
@@ -13,8 +19,9 @@ retry_safe = true
 retries = 1
 retry_delay_seconds = 300
 
-[[job]]
+[[routine]]
 name = "tracking-refresh"
+runner = "process"
 cron = ["30 5 * * *", "30 17 * * *"]
 timezone = "local"
 argv = ["{python}", "scripts/refresh_tracking.py", "--json"]

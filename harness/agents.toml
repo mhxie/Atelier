@@ -1,10 +1,7 @@
 # Portable agent registry.
 #
-# Claude Code uses `.claude/agents/*.md` as native subagent specs.
-# Codex uses project-scoped `.codex/agents/*.toml` adapters. Each adapter
-# exposes this registry's description and routes the native subagent back to
-# the same `.claude/agents/*.md` role brief. `scripts/harness_lint.py` enforces
-# the mapping so the adapter edge cannot become a second role source.
+# `agents/*.md` is canonical. The edge renderer copies each source to Claude
+# and generates the project-scoped Codex adapter from this registry.
 #
 # Each agent declares a `voices` keyed inline table mapping leg name to
 # model identity. Allowed leg keys:
@@ -31,106 +28,91 @@
 # registry-to-adapter parity.
 
 [agents.precedent-judge]
-source = ".claude/agents/precedent-judge.md"
+source = "agents/precedent-judge.md"
 voices = { native = "sonnet" }
-status = "portable-adapted"
+status = "canonical"
 description = "Applies the user's own past decisions to a new pending item; one JSON verdict per prompt file, never invents policy. Le cercle archetype: The Clerk of the Court."
-codex_prompt = "Run the Precedent Judge role through native Codex agent `precedent-judge`; `.claude/agents/precedent-judge.md` remains authoritative."
 
 [agents.challenger]
-source = ".claude/agents/challenger.md"
+source = "agents/challenger.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-status = "portable-adapted"
+status = "canonical"
 description = "Probes the painter's thoughts with sharp questions; affirms or counters in turn. Le cercle archetype: The Critic (Degas)."
-codex_prompt = "Run the Challenger role through native Codex agent `challenger`; `.claude/agents/challenger.md` remains authoritative."
 
 [agents.curator]
-source = ".claude/agents/curator.md"
+source = "agents/curator.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Drafts note-content operations (compactions, merges, new notes, wiki entries) for the orchestrator to write under $OV/. Le cercle archetype: The Collector (Caillebotte)."
-codex_prompt = "Run the Curator role through native Codex agent `curator`; `.claude/agents/curator.md` remains authoritative."
 
 [agents.forgetter]
-source = ".claude/agents/forgetter.md"
+source = "agents/forgetter.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Active decay scanner over $OV/: redundant / time-stale / contradicted / low-signal. Proposes; never deletes. Returns findings inline via envelope for the trusted parent to validate. Le cercle archetype: The Conservator."
-codex_prompt = "Run the Forgetter role through native Codex agent `forgetter`; `.claude/agents/forgetter.md` remains authoritative. Hard contract: propose, never delete; return findings inline via the `---forgetter-result---` / `---end-result---` envelope. The parent validates them; do not write a report yourself."
 
 [agents.librarian]
-source = ".claude/agents/librarian.md"
+source = "agents/librarian.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Recommends readings, resources, and thinkers relevant to the painter's interests and goals. Le cercle archetype: The Cataloguer."
-codex_prompt = "Run the Librarian role through native Codex agent `librarian`; `.claude/agents/librarian.md` remains authoritative."
 
 [agents.meeting]
-source = ".claude/agents/meeting.md"
+source = "agents/meeting.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Processes work meeting transcripts into structured notes with action items and decisions. Le cercle archetype: The Stenographer."
-codex_prompt = "Run the Meeting role through native Codex agent `meeting`; `.claude/agents/meeting.md` remains authoritative."
 
 [agents.reader]
-source = ".claude/agents/reader.md"
+source = "agents/reader.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Reads articles and notes through critical, structural, practical, and dialectical lenses. For dense theory, foundational papers, or hard texts, dispatch the Scholar instead. Le cercle archetype: The Reader."
-codex_prompt = "Run the Reader role through native Codex agent `reader`; `.claude/agents/reader.md` remains authoritative."
 
 [agents.scholar]
-source = ".claude/agents/scholar.md"
+source = "agents/scholar.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-status = "portable-adapted"
+status = "canonical"
 description = "Deep-cognition variant of Reader: same lenses, same workflow, dispatched with stronger voices for dense theory, foundational papers, and hard texts. Le cercle archetype: The Scholar."
-codex_prompt = "Run the Scholar role through native Codex agent `scholar`; `.claude/agents/scholar.md` remains authoritative."
 
 [agents.researcher]
-source = ".claude/agents/researcher.md"
+source = "agents/researcher.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-status = "portable-adapted"
+status = "canonical"
 description = "Gathers raw context from the painter's œuvre ($OV/). Le cercle archetype: The Observer (Pissarro)."
-codex_prompt = "Run the Researcher role through native Codex agent `researcher`; `.claude/agents/researcher.md` remains authoritative."
 
 [agents.reviewer]
-source = ".claude/agents/reviewer.md"
+source = "agents/reviewer.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Quality-checks session outputs and system evolution changes. Le cercle archetype: The Arbiter (Manet)."
-codex_prompt = "Run the Reviewer role through native Codex agent `reviewer`; `.claude/agents/reviewer.md` remains authoritative."
 
 [agents.scout]
-source = ".claude/agents/scout.md"
+source = "agents/scout.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Gathers external context from outside the œuvre: articles, discussions, research, recent developments. Le cercle archetype: The Flâneur."
-codex_prompt = "Run the Scout role through native Codex agent `scout`; `.claude/agents/scout.md` remains authoritative."
 
 [agents.synthesizer]
-source = ".claude/agents/synthesizer.md"
+source = "agents/synthesizer.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-status = "portable-adapted"
+status = "canonical"
 description = "Composes gathered context into structured reflections, summaries, and insights. Le cercle archetype: The Colorist (Monet)."
-codex_prompt = "Run the Synthesizer role through native Codex agent `synthesizer`; `.claude/agents/synthesizer.md` remains authoritative."
 
 [agents.thinker]
-source = ".claude/agents/thinker.md"
+source = "agents/thinker.md"
 voices = { native = "opus", direct = "deepseek_pro_max" }
-status = "portable-adapted"
+status = "canonical"
 description = "Applies structured thinking frameworks for outside-view reasoning. Le cercle archetype: The Structuralist (Cézanne)."
-codex_prompt = "Run the Thinker role through native Codex agent `thinker`; `.claude/agents/thinker.md` remains authoritative."
 
 [agents.privacy-reviewer]
-source = ".claude/agents/privacy-reviewer.md"
+source = "agents/privacy-reviewer.md"
 voices = { native = "sonnet", direct = "deepseek_pro" }
-status = "portable-adapted"
+status = "canonical"
 description = "Semantic privacy scanner for committed-file diffs. Catches leaks the mechanical scripts/privacy_check.py misses. Le cercle archetype: The Steward."
-codex_prompt = "Run the Privacy Reviewer role through native Codex agent `privacy-reviewer`; `.claude/agents/privacy-reviewer.md` remains authoritative."
 
 [agents.scribe]
-source = ".claude/agents/scribe.md"
+source = "agents/scribe.md"
 voices = { native = "haiku" }  # single-leg by design: it writes files; a second leg risks duplicate writes or leaks
-status = "portable-adapted"
+status = "canonical"
 description = "Records user-dictated raw content to the named target file verbatim. Le cercle archetype: The Typewriter."
-codex_prompt = "Run the Scribe role through native Codex agent `scribe`; `.claude/agents/scribe.md` remains authoritative. Verbatim preservation is the trust property; no paraphrasing, summarizing, or editorialization."

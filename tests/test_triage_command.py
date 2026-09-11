@@ -12,16 +12,15 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = ROOT / ".claude" / "commands" / "triage.md"
+SPEC = ROOT / "skills" / "triage" / "SKILL.md"
 
 
 class TriageCommandContractTest(unittest.TestCase):
-    def test_registry_exposes_direct_only_command(self) -> None:
-        with (ROOT / "harness" / "commands.toml").open("rb") as handle:
-            row = tomllib.load(handle)["commands"]["triage"]
-        self.assertEqual(row["source"], ".claude/commands/triage.md")
+    def test_registry_exposes_direct_only_skill(self) -> None:
+        with (ROOT / "harness" / "skills.toml").open("rb") as handle:
+            row = tomllib.load(handle)["skills"]["triage"]
+        self.assertEqual(row["source"], "skills/triage/SKILL.md")
         self.assertTrue(row["direct_only"])
-        self.assertNotEqual(row.get("user_facing"), False)
 
     def test_overview_is_read_only_and_precedes_batches(self) -> None:
         text = SPEC.read_text(encoding="utf-8")

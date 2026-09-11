@@ -12,7 +12,7 @@ decision.
 | Surface | Class | How the line is written |
 |---|---|---|
 | `/autoevo-review` apply, skip, defer | `autoevo/<category>` | `scripts/autoevo_pending.py resolve --reason` (mandatory) and `defer --reason` (optional) write it |
-| `/autoevo-nightly` precedent defaults | `autoevo/<category>` | `scripts/precedent.py autoevo` calls `set-default`, which records `by = "precedent"` |
+| Autoevo routine precedent defaults | `autoevo/<category>` | `scripts/precedent.py autoevo` calls `set-default`, which records `by = "precedent"` |
 | `/hi` clarification | `hi/route` | `scripts/intent_coverage.py intent-log --match-kind clarified --clarified-to` |
 | `/triage` intent-coverage lane | `triage/intent-coverage` | `scripts/decisions.py record` with the accepted or rejected proposal |
 | `/curate`, `/read` reading episodes | `reading/item` | `scripts/decisions.py reading-record --input <event.json>`; typed evidence below |
@@ -35,7 +35,7 @@ from observed events or the user's actual words. It does not update profile
 files, factual trust, or external applications. Missing feedback stays unknown.
 
 Capture the policy before curation with `decisions.py reading-policy --file
-.claude/commands/curate.md --model <actual-model> --context <projection.json>`.
+skills/curate/SKILL.md --model <actual-model> --context <projection.json>`.
 Include additional selection instructions with repeated `--file` and all
 loaded preference context with repeated `--context`. The helper stores the
 exact source/context/model snapshot once as `reading/policy` in the private

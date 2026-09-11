@@ -5,8 +5,8 @@ system. The core idea is to separate four concerns:
 
 | Concern | Owned by | Example |
 |---|---|---|
-| Workflow | `protocols/`, command specs | `/hi`, `/weekly`, `/review` |
-| Role | `harness/agents.toml`, agent specs | Researcher, Synthesizer, Reviewer |
+| Workflow | `skills/`, `protocols/` | `/hi`, `/weekly`, `/review` |
+| Role | `harness/agents.toml`, `agents/` | Researcher, Synthesizer, Reviewer |
 | Capability | `harness/capabilities.toml` | `semantic_query`, `write_local_file`, `web_search` |
 | Runtime and model | adapters, local CLI config + `profile/models.toml` (gitignored) | one runtime per call, model bound per profile |
 
@@ -21,36 +21,36 @@ workflow.
 | Codex | `AGENTS.md` | `.agents/skills/`, `.codex/agents/`, `.codex/hooks.json`, Codex CLI and review | First-class native harness; shipped default |
 | Claude Code | `CLAUDE.md` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` (entry hints only; not authoritative dispatch) | First-class native harness; selectable default |
 
-Private user features are an exception to the committed project-edge layout.
-Their canonical source is `<paths.private_features>/<name>/SKILL.md`, and
+Private user skills are an exception to the committed project-edge layout.
+Their canonical source is `<paths.private_skills>/<name>/SKILL.md`, and
 native symlinks expose that same directory through the user-level Claude and
-Codex skill roots. Private names never enter `commands.toml`,
+Codex skill roots. Private names never enter `skills.toml`,
 `intents.toml`, or committed runtime adapters. The full ownership and
-activation contract is in `protocols/private-features.md`.
+activation contract is in `protocols/components.md`.
 
-`.claude/skills/` is a Claude Code-only surface holding **entry hints**, not authoritative dispatch. Claude Code matches a skill's frontmatter description against user phrasing semantically: the LLM judges relevance, not substring. On a match the skill forwards into `/hi`; the canonical intent catalog in `harness/intents.toml` is still the single decision point for which agents run. Codex does not read `.claude/skills/`; repo-scoped skills under `.agents/skills/` provide its native entry surface. `$atelier` handles broad routing and harness work, while explicit command skills such as `$weekly` and `$review` read the matching `.claude/commands/*.md` specification directly. Skill exposure is additive at both runtime edges and produces zero workflow duplication.
+`.claude/skills/` is a Claude Code-only surface holding **entry hints**, not authoritative dispatch. Claude Code matches a skill's frontmatter description against user phrasing semantically: the LLM judges relevance, not substring. On a match the skill forwards into `/hi`; the canonical intent catalog in `harness/intents.toml` is still the single decision point for which agents run. Codex does not read `.claude/skills/`; repo-scoped skills under `.agents/skills/` provide its native entry surface. `$atelier` handles broad routing and explicit workflows read the matching canonical `skills/*/SKILL.md`. Skill exposure is additive at both runtime edges and produces zero workflow duplication.
 
 `scripts/harness_lint.py` enforces structural invariants only: skill name matches its directory, frontmatter has a non-empty description that mentions `/hi` (delegation), and the skill name corresponds to an existing `intents.<name>` row. Coherence between the skill's prose description and the intent it exposes is human-curated — substring-checking an LLM-judged trigger surface would be the wrong tool.
 
-The command files remain Claude-shaped source specifications, but both runtimes
-have native execution edges. Claude Code consumes `AskUserQuestion` and
+The canonical skill files are provider-neutral, and both runtimes have native
+execution edges. Claude Code consumes `AskUserQuestion` and
 `Agent(...)` directly. Codex maps them to its available choice UI and the
 project agents under `.codex/agents/`, falling back to numbered questions or
 sequential role emulation only when the active surface lacks those features.
 
-`harness/commands.toml` and `harness/agents.toml` are the registries shared by
-both runtimes. They map portable names to the current Claude source files.
-Codex command skills and agent TOMLs point directly to those sources;
+`harness/skills.toml` and `harness/agents.toml` are the registries shared by
+both runtimes. They map portable names to `skills/` and `agents/` sources.
+Generated Claude and Codex edges point directly to those sources;
 `scripts/harness_lint.py` enforces the mapping.
 
 Codex reserves slash-prefixed input for built-in TUI commands. Its native
 repo-shared counterpart is an explicit `$skill` mention: Claude `/weekly` maps
-to Codex `$weekly`, `/hi` maps to `$hi`, and so on. Each command skill is
-explicit-only (`allow_implicit_invocation: false`) and reads its authoritative
-Claude command specification directly. Interactive use does not launch a
+to Codex `$weekly`, `/hi` maps to `$hi`, and so on. Each project skill is
+explicit-only (`allow_implicit_invocation: false`) and reads its canonical
+source directly. Interactive use does not launch a
 helper process. From an external shell, quote the skill mention, for example
 `codex -C . '$weekly'`. When a Claude-shaped workflow tells the user to invoke
-another registered project command, Codex renders the `$command` form. Native
+another registered project skill, Codex renders the `$skill` form. Native
 Codex built-ins such as `/hooks` keep their slash form.
 
 Lifecycle hooks live in `.codex/hooks.json` and `.claude/settings.json`.
@@ -76,7 +76,7 @@ private review owns adoption and retirement, not the discovery module.
 `harness/runtimes.toml` declares both native CLI surfaces and ships with Codex
 as the default. `scripts/atelier_runtime.py` is an optional selector around
 those surfaces. It never expands a workflow into an adapter prompt: it sends
-the registered name directly as `$<command>` to Codex or `/<command>` to
+the registered name directly as `$<skill>` to Codex or `/<skill>` to
 Claude Code.
 
 Resolution order is:
@@ -185,16 +185,16 @@ their concrete tool mappings. Do not copy its inventory into guidance.
 Routine profiles in `harness/routine_profiles.toml` are a separate execution
 envelope, not additions to this role-capability vocabulary. Their permission
 strings are action allowlists for archived scheduled procedures, while fields
-such as `sandbox`, `atelier_access`, and `allowed_commands` are enforced by the
+such as `sandbox`, `atelier_access`, and `allowed_adapters` are enforced by the
 Codex-only local runner. Cloud rows describe connector requirements for manual
 ChatGPT Scheduled handoff. Do not add those action strings to
 `harness/capabilities.toml` unless an interactive agent role begins depending
 on a new provider-neutral capability.
 
-## Codex Command Execution
+## Codex Skill Execution
 
 `AGENTS.md` owns native invocation, tool translation, and role fallback;
 `CLAUDE.md` owns retrieval and write boundaries, including Scribe and bounded
-operational-artifact exceptions. Generated `$command` skills load both before
-the selected command specification. Keep launch recipes in user-level CLI
+operational-artifact exceptions. Generated `$skill` edges load both before
+the selected canonical skill. Keep launch recipes in user-level CLI
 documentation, not the always-loaded adapter.

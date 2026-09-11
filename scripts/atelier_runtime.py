@@ -29,7 +29,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "harness" / "runtimes.toml"
-COMMANDS_PATH = ROOT / "harness" / "commands.toml"
+SKILLS_PATH = ROOT / "harness" / "skills.toml"
 
 
 class RuntimeConfigError(ValueError):
@@ -142,15 +142,15 @@ def resolve_runtime(registry: dict[str, Any]) -> tuple[str, str]:
     return default, "committed"
 
 
-def load_commands() -> dict[str, Any]:
-    data = load_toml(COMMANDS_PATH)
-    commands = data.get("commands")
-    if not isinstance(commands, dict):
-        raise RuntimeConfigError("harness/commands.toml has no [commands] table")
-    return commands
+def load_skills() -> dict[str, Any]:
+    data = load_toml(SKILLS_PATH)
+    skills = data.get("skills")
+    if not isinstance(skills, dict):
+        raise RuntimeConfigError("harness/skills.toml has no [skills] table")
+    return skills
 
 
-def normalize_command(raw: str) -> str:
+def normalize_skill(raw: str) -> str:
     name = raw.strip()
     if name.startswith(("$", "/")):
         name = name[1:]
@@ -159,9 +159,9 @@ def normalize_command(raw: str) -> str:
     return name
 
 
-def require_user_command(raw: str) -> tuple[str, dict[str, Any]]:
-    name = normalize_command(raw)
-    entry = load_commands().get(name)
+def require_user_skill(raw: str) -> tuple[str, dict[str, Any]]:
+    name = normalize_skill(raw)
+    entry = load_skills().get(name)
     if not isinstance(entry, dict):
         raise RuntimeConfigError(f"workflow is not registered: {name}")
     if entry.get("user_facing", True) is False:
@@ -328,7 +328,7 @@ def cmd_shell(args: argparse.Namespace) -> int:
 def cmd_run(args: argparse.Namespace) -> int:
     registry = load_registry()
     runtime_name, _, runtime = runtime_entry(registry, args.runtime)
-    name, command = require_user_command(args.command)
+    name, skill = require_user_skill(args.skill)
     context = list(args.context)
     if context and context[0] == "--":
         context = context[1:]
@@ -336,7 +336,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if context:
         prompt = f"{prompt} {' '.join(context).strip()}"
 
-    if (args.resume or args.fork) and not command.get("resume_friendly", False):
+    if (args.resume or args.fork) and not skill.get("resume_friendly", False):
         print(
             f"warning: {name!r} is not marked resume_friendly; prior context may pollute this workflow",
             file=sys.stderr,
@@ -393,7 +393,7 @@ def build_parser() -> argparse.ArgumentParser:
     session = run.add_mutually_exclusive_group()
     session.add_argument("--resume", action="store_true")
     session.add_argument("--fork", action="store_true")
-    run.add_argument("command", help="Registered command name, with or without its runtime prefix.")
+    run.add_argument("skill", help="Registered skill name, with or without its runtime prefix.")
     run.add_argument("context", nargs=argparse.REMAINDER, help="Optional workflow context.")
     run.set_defaults(func=cmd_run)
     return parser

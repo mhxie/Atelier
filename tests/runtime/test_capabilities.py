@@ -319,15 +319,13 @@ class SnapshotAdapterTests(unittest.TestCase):
         self.addCleanup(self.fixture.close)
         self.root, self.vault, self.env = self.fixture.root, self.fixture.vault, self.fixture.env
         profile = self.root / "harness/routine_profiles.toml"
-        profile.write_text(profile.read_text().replace('"/fixture"', '"/run-routine"'))
-        self.watch = self.vault / "_meta/routine_watch.toml"
-        self.watch.write_text(self.watch.read_text().replace('command = "/fixture"', 'command = "/run-routine sample"'))
-        (self.root / "harness/runtimes.toml").write_text((ROOT / "harness/runtimes.toml").read_text())
-        (self.root / "harness/commands.toml").write_text(
-            '[commands.run-routine]\nsource = ".claude/commands/fixture.md"\ncodex_prompt = "Fixture."\n'
+        profile.write_text(
+            profile.read_text().replace('["archived-prompt"]', '["archived-prompt", "autoevo"]')
         )
+        self.watch = self.vault / "_tools/routines/registry.toml"
+        (self.root / "harness/runtimes.toml").write_text((ROOT / "harness/runtimes.toml").read_text())
         prompts = self.vault / "_routine_prompts"
-        prompts.mkdir()
+        prompts.mkdir(exist_ok=True)
         (prompts / "sample.md").write_text(
             "LOCAL EXECUTION OVERRIDE\nRead local filesystem under $OV.\n"
             "--- ORIGINAL ROUTINE PROMPT (fixture) ---\nFixture.\n"
@@ -358,8 +356,11 @@ class SnapshotAdapterTests(unittest.TestCase):
             self.watch.write_text(original + f"\nruntime_snapshot = {value}\n")
             with self.assertRaisesRegex(adapter.ConfigurationError, "must be boolean"):
                 self.prepare()
-        self.watch.write_text(original + '\nruntime_snapshot = true\nwrapper = "autoevo"\n')
-        with self.assertRaisesRegex(adapter.ConfigurationError, "ordinary /run-routine"):
+        self.watch.write_text(
+            original.replace('adapter = "archived-prompt"', 'adapter = "autoevo"')
+            + '\nruntime_snapshot = true\n'
+        )
+        with self.assertRaisesRegex(adapter.ConfigurationError, "requires the archived-prompt adapter"):
             self.prepare()
         self.snapshot.assert_not_called()
 

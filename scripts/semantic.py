@@ -97,7 +97,7 @@ def relative_path(value: str, vault: Path) -> str:
 def zones(vault: Path) -> dict[str, str]:
     registry = tier_segments()
     names = {"archive": "archive", "process": "sessions", "meta": "_meta",
-             "routine_prompts": "_routine_prompts", "private_features": "_tools/features"}
+             "routine_prompts": "_routine_prompts", "private_components": "_tools"}
     return {name: relative_path(registry.get(name if name != "process" else "sessions", default), vault)
             for name, default in names.items()}
 
@@ -110,7 +110,7 @@ def scope_for(path: str, vault: Path) -> str | None:
     if any(part.startswith(".") or part in HARD_DIRS for part in parts):
         return None
     if any(path == zone[key] or path.startswith(zone[key] + "/")
-           for key in ("meta", "routine_prompts", "private_features")):
+           for key in ("meta", "routine_prompts", "private_components")):
         return None
     if path.startswith(zone["archive"] + "/orphan-stubs/"):
         return None
@@ -129,7 +129,7 @@ def collection_config(vault: Path) -> dict:
     zone = zones(vault)
     hard = [f"**/{name}/**" for name in HARD_DIRS]
     hard += ["**/.*", "**/.*/**", zone["archive"] + "/orphan-stubs/**"]
-    hard += [zone[name] + "/**" for name in ("meta", "routine_prompts", "private_features")]
+    hard += [zone[name] + "/**" for name in ("meta", "routine_prompts", "private_components")]
     archive, process = zone["archive"] + "/**", zone["process"] + "/**"
     patterns = {
         "active": ("**/*.md", ["**/raw/**", "**/inbox/**", archive, process]),

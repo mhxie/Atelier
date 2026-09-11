@@ -6,11 +6,12 @@
   "required": [
     "harness/models.toml",
     "harness/agents.toml",
-    "harness/commands.toml",
+    "harness/skills.toml",
     "harness/capabilities.toml",
     "harness/runtimes.toml",
     "harness/intents.toml",
     "harness/paths.toml",
+    "routines/registry.toml",
     ".codex/hooks.json",
     ".claude/settings.json"
   ],
@@ -52,12 +53,11 @@
           "minProperties": 1,
           "additionalProperties": {
             "type": "object",
-            "required": ["source", "voices", "status", "description", "codex_prompt"],
+            "required": ["source", "voices", "status", "description"],
             "properties": {
               "source": {"$ref": "#/$defs/text"},
               "status": {"$ref": "#/$defs/text"},
               "description": {"$ref": "#/$defs/text"},
-              "codex_prompt": {"$ref": "#/$defs/text"},
               "voices": {
                 "type": "object",
                 "minProperties": 1,
@@ -66,29 +66,27 @@
               }
             },
             "if": {"properties": {"status": {"const": "script-driven"}}},
-            "then": {"properties": {"source": {"not": {"pattern": "^\\.claude/agents/"}}}},
-            "else": {"properties": {"source": {"pattern": "^\\.claude/agents/.+\\.md$"}}}
+            "then": {"properties": {"source": {"not": {"pattern": "^agents/"}}}},
+            "else": {"properties": {"source": {"pattern": "^agents/[a-z][a-z0-9-]*\\.md$"}}}
           }
         }
       }
     },
-    "harness/commands.toml": {
+    "harness/skills.toml": {
       "type": "object",
-      "required": ["commands"],
+      "required": ["skills"],
       "properties": {
-        "commands": {
+        "skills": {
           "type": "object",
           "minProperties": 1,
           "additionalProperties": {
             "type": "object",
-            "required": ["source", "category", "status", "description", "codex_prompt"],
+            "required": ["source", "category", "status", "description"],
             "properties": {
-              "source": {"type": "string", "pattern": "^\\.claude/commands/.+\\.md$"},
+              "source": {"type": "string", "pattern": "^skills/[a-z][a-z0-9-]*/SKILL\\.md$"},
               "category": {"$ref": "#/$defs/text"},
               "status": {"$ref": "#/$defs/text"},
               "description": {"$ref": "#/$defs/text"},
-              "codex_prompt": {"$ref": "#/$defs/text"},
-              "user_facing": {"type": "boolean"},
               "direct_only": {"type": "boolean"},
               "alias_of": {"$ref": "#/$defs/text"}
             }
@@ -173,6 +171,41 @@
             "wiki_localized": {"type": "object", "additionalProperties": {"type": "string"}}
           },
           "additionalProperties": {"type": "string"}
+        }
+      }
+    },
+    "routines/registry.toml": {
+      "type": "object",
+      "required": ["version", "adapters", "routine"],
+      "properties": {
+        "version": {"const": 1},
+        "adapters": {
+          "type": "object",
+          "required": ["archived-prompt", "autoevo"],
+          "additionalProperties": {
+            "type": "object",
+            "required": ["procedure"],
+            "properties": {"procedure": {"type": "string", "pattern": "^routines/_adapters/[a-z][a-z0-9-]*/PROCEDURE\\.md$"}}
+          }
+        },
+        "routine": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["name", "runner", "cron", "timezone", "argv", "timeout_seconds", "retry_safe"],
+            "properties": {
+              "name": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+              "runner": {"const": "process"},
+              "cron": {"oneOf": [{"$ref": "#/$defs/text"}, {"$ref": "#/$defs/strings"}]},
+              "timezone": {"$ref": "#/$defs/text"},
+              "argv": {"$ref": "#/$defs/strings", "minItems": 1},
+              "timeout_seconds": {"type": "integer", "minimum": 1},
+              "retry_safe": {"type": "boolean"},
+              "retries": {"type": "integer", "minimum": 0},
+              "retry_delay_seconds": {"type": "integer", "minimum": 1}
+            }
+          }
         }
       }
     },

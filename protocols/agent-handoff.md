@@ -66,7 +66,7 @@ return, but cannot stand in for unperformed verification.
 
 **Type:** `research-brief`
 
-Payload: the Research Brief body in `.claude/agents/researcher.md` → Output
+Payload: the Research Brief body in `agents/researcher.md` → Output
 Format (query, search strategy, sources with edit dates, verbatim excerpts with
 language, patterns, gaps). The Synthesizer does not re-search; critical gaps
 escalate to the orchestrator.
@@ -75,7 +75,7 @@ escalate to the orchestrator.
 
 **Type:** `reader-brief`
 
-Payload: the `---reader-brief---` body in `.claude/agents/reader.md` → Output
+Payload: the `---reader-brief---` body in `agents/reader.md` → Output
 Format (`lens`, `source`, then per lens the findings, quotes, cross-signals for
 other lenses, and one-sentence verdict). The parent normally receives this
 brief; a separate Synthesizer is optional. Preserve convergence, disagreement,
@@ -86,7 +86,7 @@ and evidence limitations when combining briefs.
 **Type:** `synthesis`
 
 Payload: `output_type` (reflection | review | exploration | reading-report)
-and the matching body in `.claude/agents/synthesizer.md` → Output Formats,
+and the matching body in `agents/synthesizer.md` → Output Formats,
 ending with its Source Audit (sourced claims, unsourced observations, goals
 referenced and missing).
 
@@ -94,7 +94,7 @@ referenced and missing).
 
 **Type:** `review-check`
 
-Required fields (envelope shape only; verdict rules are canonical in `.claude/agents/reviewer.md` → Scoring, do not duplicate here):
+Required fields (envelope shape only; verdict rules are canonical in `agents/reviewer.md` → Scoring, do not duplicate here):
 
 - `verdict`: `"APPROVED" | "APPROVED_WITH_NOTES" | "NEEDS_REVISION" | "REJECTED"`, with a one-line summary
 - `dimensions`: one compact read per Session Review dimension (`citation_accuracy`, `goal_coverage`, `honesty`, `staleness`, `synthesis_quality`), each `{read: "", issues: []}`; a dimension the selected mode skips is `n/a`
@@ -106,7 +106,7 @@ Required fields (envelope shape only; verdict rules are canonical in `.claude/ag
 
 **Type:** `challenge-set`
 
-Payload: the Challenger's Questions body in `.claude/agents/challenger.md` →
+Payload: the Challenger's Questions body in `agents/challenger.md` →
 Output Format (grounding, emotional register, affirming, probing, and
 challenging questions, the one question, framework note).
 
@@ -114,7 +114,7 @@ challenging questions, the one question, framework note).
 
 **Type:** `perspective`
 
-Payload: the Independent Perspective body in `.claude/agents/thinker.md` →
+Payload: the Independent Perspective body in `agents/thinker.md` →
 Output Format (reframe, framework with applicability 0-10, cross-validation,
 contrarian take, external signal).
 
@@ -122,7 +122,7 @@ contrarian take, external signal).
 
 **Type:** `scout-brief`
 
-Payload: the `---scout-brief---` body in `.claude/agents/scout.md` → Output
+Payload: the `---scout-brief---` body in `agents/scout.md` → Output
 Format (topic, assigned direction, sourced findings with dates, contrarian
 signal, recent developments, knowledge gap). Bounded verification returns the
 claim, source locators, excerpts, and unresolved limits instead.
@@ -131,7 +131,7 @@ claim, source locators, excerpts, and unresolved limits instead.
 
 **Type:** `recommendation`
 
-Payload: the Summary View in `.claude/agents/librarian.md` → Output Format
+Payload: the Summary View in `agents/librarian.md` → Output Format
 (topic, triggering context, resources with author, type, core insight, and
 relevance to the user), plus which resources were excluded as already read.
 
@@ -157,7 +157,7 @@ publishes any accepted change.
 
 ## Contract: Orchestrator → Challenger (Probe Contradiction)
 
-Used by `/autoevo-nightly` to distinguish rhetorical contradictions from
+Used by the `autoevo-nightly` routine to distinguish rhetorical contradictions from
 genuine ones before routing them. Read-only by contract; Challenger does not
 write any file. Only a complete, gap-free rhetorical verdict dismisses a
 finding. Genuine and unproven findings are queued for human review.
@@ -185,7 +185,7 @@ Use `---curator-proposal---` / `---end-proposal---` with common metadata.
 
 Required fields:
 - `operation`: compact | merge | create | replace | wiki-entry | archive
-- `mode`: `normal` (default; user-approval gate applies) | `auto-apply` (only valid for compact/merge/archive ops dispatched by `/autoevo-nightly`)
+- `mode`: `normal` (default; user-approval gate applies) | `auto-apply` (only valid for compact/merge/archive ops dispatched by the Autoevo routine)
 - `band`: required iff `mode = auto-apply`; one of `redundant-high` | `low-signal-high`. Omitted otherwise.
 - `auto_apply_safe`: required iff `mode = auto-apply`; `true` when Curator's scope guards pass and the content-preservation checklist succeeded, `false` otherwise.
 - `refusal_reason`: required iff `auto_apply_safe = false`; one short sentence explaining which guard tripped. Orchestrator surfaces this to the pending queue.
@@ -221,7 +221,7 @@ Required fields:
 - `mode`: `full` (sweep ran to completion) | `partial` (sweep stopped early on `max_candidates`, `time_budget_s`, or to keep room for the envelope before the turn ceiling)
 - `summary`: `{redundant: N, time_stale: N, contradicted: N, low_signal: N}` — counts per category
 - `findings_inline`: Full categorized findings keyed by category. Each row uses
-  the evidence required by `.claude/agents/forgetter.md` category sections:
+  the evidence required by `agents/forgetter.md` category sections:
   - `redundant`: `{path, confidence, peers, scores, mode: "qmd", evidence, proposed_action}`
   - `time_stale`: `{path, confidence: "medium", heuristic, evidence, proposed_action}`
   - `contradicted`: `{wiki, claim_id, confidence: "low", peer, signal, proposed_action}`
@@ -243,12 +243,12 @@ missing, the adapter fails the Prefect run without publishing a live report.
 
 **Per-finding `confidence` field.** Every row in `findings_inline` carries
 `confidence: high | medium | low` derived per category by the rules in
-`.claude/agents/forgetter.md` § Confidence Field. Confidence is evidence, not
+`agents/forgetter.md` § Confidence Field. Confidence is evidence, not
 write authority: the trusted parent routes and rechecks every finding against
 its retained plan and live state. A missing confidence is normalized to medium
 and cannot auto-apply.
 
-**Cross-reference:** `.claude/agents/forgetter.md` owns heuristics and
+**Cross-reference:** `agents/forgetter.md` owns heuristics and
 confidence; this protocol owns the envelope, and `scripts/autoevo_verify.py`
 owns derived report rendering.
 
@@ -257,7 +257,7 @@ owns derived report rendering.
 **Type:** `meeting-notes`
 
 Payload: a one-line source description (meeting name, date, participants if
-known) followed by the structured body in `.claude/agents/meeting.md` → Output
+known) followed by the structured body in `agents/meeting.md` → Output
 Format (key takeaways, action items by owner, decisions, next steps, items
 flagged unclear). Envelope `confidence` reflects how clean the transcript was.
 

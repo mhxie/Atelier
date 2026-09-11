@@ -15,7 +15,7 @@ def check_paper_cache() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
     claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     source_doc = (ROOT / "sources" / "local-papers.md").read_text(encoding="utf-8")
-    read_command = (ROOT / ".claude" / "commands" / "read.md").read_text(
+    read_skill = (ROOT / "skills" / "read" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     expect("/tmp/" in gitignore.splitlines(), "repo tmp containment rule is missing")
@@ -25,7 +25,7 @@ def check_paper_cache() -> None:
     )
     for document, label in (
         (source_doc, "local paper source doc"),
-        (read_command, "read command"),
+        (read_skill, "read skill"),
     ):
         expect(
             "scripts/paper_cache.py" in document,

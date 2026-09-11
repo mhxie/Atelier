@@ -142,7 +142,7 @@ def validation_payload(*, root: Path = ROOT, environ: dict[str, str] | None = No
                 "cron": list(spec.schedule.cron),
                 "timezone": spec.schedule.timezone,
                 "profile": spec.profile,
-                "command": spec.command,
+                "adapter": spec.adapter,
             }
             for spec in models
         ],

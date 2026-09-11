@@ -131,7 +131,7 @@ def check_dining_audit() -> None:
         )
 
 def check_tracking_refresh_routine() -> None:
-    jobs = tomllib.loads((ROOT / "harness/routine_jobs.toml").read_text(encoding="utf-8"))["job"]
+    jobs = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))["routine"]
     tracking = next(row for row in jobs if row["name"] == "tracking-refresh")
     expect(
         tracking["cron"] == ["30 5 * * *", "30 17 * * *"]

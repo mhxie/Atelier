@@ -7,16 +7,18 @@ How scheduled remote agents (cron-style) integrate with the atelier without leak
 
 | Layer | What lives here | Provides | Boundary |
 |---|---|---|---|
-| **atelier** (public, portable git repo) | `scripts/cues.py`, Prefect flow/adapter code, command and agent specs, `protocols/` | generic mechanism and public local job declarations | knows the **shape** of routine outputs and receipts, never private routine content |
-| **$OV/_meta/** (user-private vault metadata) | `routine_watch.toml`, `routine_acks.json`, local domain receipts | private policy and output evidence | never committed to atelier; receipts do not duplicate scheduler state |
+| **atelier** (public, portable git repo) | `scripts/cues.py`, Prefect flow/adapter code, canonical skills/agents, `routines/registry.toml`, `protocols/` | generic mechanism, adapters, public routines | knows the **shape** of private routine outputs and receipts, never private identities |
+| **<paths.private_routines>/** (user-private vault source) | `registry.toml`, optional routine packages | private routine declarations and implementations | never committed to Atelier |
+| **$OV/_meta/** (user-private vault state) | `routine_acks.json`, local domain receipts | output evidence and review state | receipts do not duplicate scheduler state |
 | **local Prefect** | schedules, run state/history/logs, concurrency, eligible retries | execution for local files, Git, CLIs, and fixed headless Codex | self-hosted on loopback; lifecycle is operator-managed |
 | **cloud scheduler** | routine definitions, prompt, and connector bindings | execution for cloud-accessible data and Drive persistence | lifecycle managed in the selected account scheduler |
 
 Private routine identities and output paths belong only in the vault registry.
 
-## Contract: routine_watch.toml
+## Contract: private routine registry
 
-User-private config at `$OV/_meta/routine_watch.toml`. Each routine declares where it writes:
+User-private config at `<paths.private_routines>/registry.toml`. It starts with
+`version = 1`; each routine declares where it writes:
 
 ```toml
 [[routine]]
@@ -132,8 +134,8 @@ receipts that attest domain output.
 | Schedules | `Cron` objects with an explicit IANA timezone |
 | Concurrency | one queued run per deployment and one run across the Mac |
 | Model boundary | `scripts/routine_adapter.py`, always headless Codex |
-| Public deterministic jobs | `harness/routine_jobs.toml` |
-| Private declarations | `$OV/_meta/routine_watch.toml` |
+| Public routines and model adapters | `routines/registry.toml` |
+| Private declarations | `<paths.private_routines>/registry.toml` |
 | Domain evidence | `$OV/_meta/routine_receipts/<routine>/<cycle>.toml` |
 | Execution status and logs | Prefect flow/task state, queried through `scripts/routine_status.py` |
 
@@ -151,9 +153,9 @@ A local model row remains private:
 name = "<routine-name>"
 support = "hybrid"                    # "local-only" | "hybrid" | "cloud-only"
 execution = "local"
-kind = "model"                         # optional; this is the default
-command = "/run-routine <routine-name>"
-local_profile = "local-research"       # from harness/routine_profiles.toml
+runner = "model"
+adapter = "archived-prompt"            # or "autoevo"
+profile = "local-research"             # from harness/routine_profiles.toml
 rss_sources = "<private-vault-relative>.toml"  # optional
 runtime_snapshot = true               # optional, default false; bounded CLI evidence
 cron = "0 6 * * *"                     # a string or non-empty array
@@ -163,11 +165,11 @@ file_pattern = "<glob>"
 label = "<short human label>"
 ```
 
-`/autoevo-nightly` uses the same row shape and selects its deterministic
-pre/post domain wrapper by name. No trigger ID or Drive-write flag is needed:
+The `autoevo` adapter uses the same row shape and selects its deterministic
+pre/post domain wrapper explicitly. No trigger ID or Drive-write flag is needed:
 the local runtime writes directly to `$OV`.
 
-`rss_sources` requires ordinary `/run-routine` and `web:live`. Its private TOML
+`rss_sources` requires `adapter = "archived-prompt"` and `web:live`. Its private TOML
 contains `version = 1` and `[[feed]]` rows with only `id` and `url`. Preflight
 validates offline; zero-retry execution collects through `routine_feeds.mjs`
 before the unchanged model sandbox. URLs stay out of Prefect parameters.
@@ -175,27 +177,27 @@ before the unchanged model sandbox. URLs stay out of Prefect parameters.
 article full text. Prompts must report counters/gaps and never refetch feeds;
 collector failure means unknown coverage. The helper owns network/size limits.
 
-`runtime_snapshot` opts ordinary `/run-routine` rows into temporary
+`runtime_snapshot` opts archived-prompt rows into temporary
 `ATELIER_RUNTIME_SNAPSHOT` evidence, not scheduler state or a new ledger.
 The [runtime evidence contract](../sources/runtimes/README.md) owns discovery,
 failure and cleanup semantics.
 
 `digest.context = "<safe-key>"` provides metadata-only latest background in
 `context_sources`, independent of fresh windows, caps, carry, and acks. Missing
-or unsafe references become `context_warnings`. The shared digest command owns
+or unsafe references become `context_warnings`. The shared digest skill owns
 consumption; background never implies freshness or acknowledgment.
 
 ### Deterministic jobs
 
-Repository-owned jobs are public `[[job]]` rows in
-`harness/routine_jobs.toml`. A private collector can instead use a reviewed
+Repository-owned jobs are public `[[routine]]` rows in
+`routines/registry.toml`. A private deterministic routine can use a reviewed
 vault script:
 
 ```toml
 [[routine]]
 name = "<collector-name>"
 execution = "local"
-kind = "vault-script"
+runner = "process"
 script = "<relative .py or .sh path under $OV>"
 args = []
 cron = "30 5 * * *"
@@ -212,14 +214,14 @@ unsafe process is rejected.
 
 `harness/routine_profiles.toml` declares sandbox, Atelier access, web and
 shell-network policy, user-config policy, timeout, reasoning effort, required
-CLIs and plugins, allowed commands, and a strict model-level permission list.
+CLIs and plugins, allowed adapters, and a strict model-level permission list.
 Private rows map a routine to one of those public profiles.
 
 Unattended model work always uses Codex. Interactive runtime preferences do not
 apply, and local routine profiles cannot select a primary or fallback runtime.
 Before model launch the adapter:
 
-1. validates every declaration, schedule, timezone, output path, command, and
+1. validates every declaration, schedule, timezone, output path, adapter, and
    profile;
 2. confirms required CLIs and installed, enabled Codex plugins;
 3. validates archived prompts and rejects literal credentials;
@@ -246,10 +248,10 @@ one. This is the current single-Mac resource envelope.
 
 ### Receipt contract
 
-A successful ordinary model run writes contract version 3:
+The parent adapter attests ordinary model artifacts and writes contract version 4:
 
 ```toml
-contract_version = 3
+contract_version = 4
 routine = "<routine-name>"
 cycle_id = "2026-09-07"
 prefect_flow_run_id = "<uuid>"
@@ -261,25 +263,26 @@ completed_at = "<ISO-8601 with timezone>"
 duration_seconds = 123
 outcome = "delivered"
 output_file = "<vault-relative artifact>"
+artifact_sha256 = "<sha256 of artifact bytes>"
+verification_scope = "artifact-bytes"
 result_summary = "<screened bounded summary>"
 skipped_inputs = []
 verification = "passed"
 ```
 
-Immediately before Codex starts, the adapter writes a minimal
-`verification = "pending"` receipt. A nonzero exit, timeout, invalid envelope,
-or failed artifact attestation leaves that conservative ambiguity evidence in
-place, so the same cycle cannot launch again without review. On a validated
-result the adapter fills the delivery fields; autoevo's domain verifier then
-promotes the pending receipt to `passed` only after sweep, sidecar, Git, and
-journal evidence agree. A preflight block records `blocked` and Prefect
-`Deferred`. A validated ordinary `noop` with skipped inputs also records
-`blocked`: its audit artifact is valid, but required work is incomplete.
+The adapter writes `pending` before launch. Failure or invalid output leaves it
+pending until effects review. The parent validates freshness, path, pattern,
+and nonempty content, then computes the hash; model hash claims are ignored.
+A valid `noop` with skipped inputs is `blocked` because work remains.
 
-On a later invocation of the same cycle, `passed` short-circuits only while its
-artifact is valid; `blocked` may proceed; other values refuse
-(`scripts/routine_adapter.py`). This does not enable automatic model retries.
-Review effects before manual reruns.
+`scripts/routine_receipts.py` validates receipts. V3 stays content-unbound and
+unchanged; only v4 binds bytes. Neither proves correctness or delivery.
+
+On replay, `passed` skips only while its artifact validates;
+`blocked` may proceed and other states refuse. Invalid latest evidence becomes
+`needs_review`, never an older success or an automatic retry. Autoevo instead
+uses its JSON result and dedicated verifier; preflight deferral emits no domain
+receipt, and `protocols/autoevo.md` owns its publication evidence.
 
 ### Recovery
 
@@ -309,17 +312,11 @@ and review acknowledgements.
 
 ## Privacy boundary
 
-Atelier-side code MUST NOT:
-- Name a specific routine (`name` field is in $OV).
-- Hardcode an `output_dir` value.
-- Reference a domain-specific filename pattern.
-- Embed trigger IDs.
-
-Routine identity, output policy, acknowledgement state, and local domain
-receipts stay under `$OV/_meta/`. Prompt bodies live separately under
-`$OV/_routine_prompts/`. If you need to add a new model routine, append its
-policy to the private watch file, not to Atelier source. Public deterministic
-jobs are the narrow exception and live in `harness/routine_jobs.toml`.
+Public code must not embed private routine identities, output paths, domain
+filename patterns, or trigger IDs. Private declarations belong in
+`<paths.private_routines>/registry.toml`; public declarations belong in
+`routines/registry.toml`. Acknowledgements and local domain receipts stay under
+`$OV/_meta/`; private prompt bodies live under `$OV/_routine_prompts/`.
 
 ## Adding a new routine
 
@@ -331,12 +328,14 @@ jobs are the narrow exception and live in `harness/routine_jobs.toml`.
 2. Ensure the canonical output is written under the declared `$OV` path.
    Cloud tasks require Google Drive write access on their hosting surface;
    local tasks write the synchronized filesystem directly.
-3. Append the private policy to `$OV/_meta/routine_watch.toml`:
+3. Append the private policy to `<paths.private_routines>/registry.toml`:
    ```toml
    [[routine]]
    name = "<short-name>"
    support = "hybrid"
-   local_profile = "<public-local-profile>"
+   runner = "model"
+   adapter = "archived-prompt"
+   profile = "<public-local-profile>"
    cloud_profile = "<public-cloud-profile>"
    execution = "local"
    cron = "<cron expression>"
@@ -362,7 +361,7 @@ When a routine is no longer wanted:
 
 1. Disable the active scheduler: pause/delete the Prefect deployment, or
    pause/delete the task in its cloud scheduler UI.
-2. Remove its `[[routine]]` block from `$OV/_meta/routine_watch.toml`. The cue stops firing.
+2. Remove its `[[routine]]` block from `<paths.private_routines>/registry.toml`. The cue stops firing.
 3. Decide what to do with the existing output files in `$OV/<output_dir>/`:
    - Keep as historical archive: no action.
    - Move to `<paths.archive>/routines/<name>/`: preserves provenance, removes from active surface.
@@ -375,10 +374,10 @@ The output directory itself is left in place (rmdir manually if empty and unwant
 
 | Symptom | Likely cause |
 |---|---|
-| Cue never fires | `$OV/_meta/routine_watch.toml` missing or unparseable. Run `uv run scripts/cues.py --verbose` and look at the `routine_outputs` debug line. |
+| Cue never fires | The private routine registry is missing or unparseable. Run `uv run scripts/cues.py --verbose` and look at the `routine_outputs` debug line. |
 | Cue fires for already-read files | `routine_acks.json` not updated. Update `{<output_dir>: <latest filename>}`. |
-| Cue fires for routine that doesn't exist anymore | Remove the `[[routine]]` block from `routine_watch.toml`. |
-| Routine fires but no file appears in $OV | Check `execution` in the private watch row. For local runs, inspect Prefect flow state/logs and any domain receipt. For cloud runs, inspect the hosting scheduler's session log and connector state. |
+| Cue fires for routine that doesn't exist anymore | Remove the `[[routine]]` block from the private registry. |
+| Routine fires but no file appears in $OV | Check `execution` in the private row. For local runs, inspect Prefect flow state/logs and any domain receipt. For cloud runs, inspect the hosting scheduler's session log and connector state. |
 | Filename sort gives wrong "latest" | Use `YYYY-MM-DD-...` filename prefix so lexicographic sort matches chronological sort. |
 
 ## Related

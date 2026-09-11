@@ -8,10 +8,16 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_TIMEOUT = 1800
 
 
 def _run_required(label: str, command: list[str]) -> bool:
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+    # An unbounded wait would hang the gate on a test that blocks on a socket or stdin.
+    try:
+        result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=REQUIRED_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        print(f"FAIL: {label} exceeded {REQUIRED_TIMEOUT}s", file=sys.stderr)
+        return False
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
@@ -28,7 +34,8 @@ def _run_ruff() -> bool:
         print("note: uvx unavailable; ruff strict-core check skipped")
         return True
     result = subprocess.run(
-        ["uvx", "--offline", "ruff", "check", "scripts", "tests", "--select", "F,E4,E7,E9,EXE001"],
+        ["uvx", "--offline", "ruff", "check", "--no-fix", "--no-fix-only",
+         "scripts", "tests", "--select", "F,E4,E7,E9,EXE001"],
         cwd=ROOT,
         capture_output=True,
         text=True,

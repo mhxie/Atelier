@@ -141,7 +141,7 @@ class QualityGateContractTest(unittest.TestCase):
     def test_ruff_findings_propagate_after_required_checks(self) -> None:
         result, calls, which = self.run_main([0, 0, 1])
         self.assertEqual(result, 1)
-        self.assertEqual(calls[2].args[0][:4], ["uvx", "--offline", "ruff", "check"])
+        self.assertEqual(calls[2].args[0][:6], ["uvx", "--offline", "ruff", "check", "--no-fix", "--no-fix-only"])
         which.assert_called_once()
 
     def test_success_and_optional_ruff_unavailability_return_zero(self) -> None:

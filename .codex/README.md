@@ -35,7 +35,7 @@ $weekly
 $lint
 ```
 
-Each skill reads the matching `.claude/commands/*.md` source directly and
+Each skill reads the matching `skills/<name>/SKILL.md` source directly and
 executes it in the current thread. No Python command bridge is required.
 
 From an external shell or automation, launch Codex directly with the skill
@@ -49,7 +49,7 @@ codex exec -C . '$lint'
 
 Codex discovers native roles from `.codex/agents/*.toml`. The adapters remain
 thin: `harness/agents.toml` supplies discovery descriptions and each adapter
-loads its authoritative `.claude/agents/*.md` role brief. Inspect active
+loads its authoritative `agents/*.md` role brief. Inspect active
 subagents with `/agent` in the CLI.
 
 Native hooks provide session cues, session-lock refresh, out-of-band intent

@@ -37,7 +37,7 @@ ITEM_TEXT_CHARS = 96
 REMINDER_TEXT_CHARS = 200
 
 # Optional reminder feed. The path is declared in private vault config, not
-# here, so this script stays vault-agnostic and carries no private feature's
+# here, so this script stays vault-agnostic and carries no private tool's
 # layout:
 #
 #     # $OV/_meta/brief_sources.toml

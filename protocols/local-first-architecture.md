@@ -40,7 +40,7 @@ Repo paths are project-relative; `<paths.*>` resolves through that registry.
 mobile-capture submodule, not another tier: `/sync` enriches and routes its
 narratives to daily notes and attachments to domain raw storage, then clears
 the digested sources under its own approval and verification rules. Nothing
-should be expected to survive there long-term; see `.claude/commands/sync.md`.
+should be expected to survive there long-term; see `skills/sync/SKILL.md`.
 
 ## Search Projections
 
@@ -132,10 +132,10 @@ deferred until another observed omission justifies it; no such script exists.
 
 ## Per-Agent Contract
 
-Role briefs in `.claude/agents/` own retrieval, proposals, and review, with
+Role briefs in `agents/` own retrieval, proposals, and review, with
 `protocols/agent-handoff.md` owning responsibilities and dispatch gates.
 After an approved wiki write, run `scripts/trust.py --note <path>` for structural
 verification and initial scores. Only Reviewer signoff warrants a
-`@pass: reviewer | status: verified` marker; `.claude/commands/lint.md` owns
+`@pass: reviewer | status: verified` marker; `skills/lint/SKILL.md` owns
 corpus checks. Promoted briefs belong in `<paths.agent_findings>/`, not cache,
 and follow the same orchestrator write boundary.

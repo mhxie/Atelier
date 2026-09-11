@@ -20,10 +20,6 @@ reflect-*/
 profile
 # Personal reference material (examples, sensitive context, reader persona)
 personal
-# Paper review methodology (functional locally, kept out of public repo)
-.claude/commands/paper-review.md
-# Signal sweep (private symlink)
-.claude/commands/signal-sweep.md
 # Handoff plans with personal note references
 handoffs
 # Local MCP server URL

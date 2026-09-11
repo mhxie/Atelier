@@ -2,7 +2,7 @@
 """Build `$OV/_meta/privacy_index.json` with provenance for the privacy gate.
 
 Sources: content-tier directory names/paths, note stems, wikilinks, private
-routine/digest/feature/intent registries, and identity-bearing frontmatter.
+routine/digest/component/intent registries, and identity-bearing frontmatter.
 Profile prose is excluded: bold labels are not identities; semantic review
 owns those leaks. Public tier segments, dates, numbers, and plain single words
 are excluded; compounds, phrases, and non-ASCII names qualify. Single-word
@@ -37,7 +37,10 @@ INDEX_NAME = "privacy_index.json"
 DICTIONARY = Path("/usr/share/dict/words")
 # Tiers whose subdirectories are the atelier's own schema (dated runs, decayed
 # archives, prompt archives), not the user's taxonomy: no path rule there.
-SYSTEM_TIERS = {"meta", "routine_prompts", "cache", "inbox", "agent_findings", "zettelm", "sessions", "archive", "private_features"}
+SYSTEM_TIERS = {
+    "meta", "routine_prompts", "cache", "inbox", "agent_findings", "zettelm",
+    "sessions", "archive", "private_skills", "private_agents", "private_tools", "private_routines",
+}
 # Tiers whose direct children are the user's own taxonomy (a topic, a person,
 # a project): a single plain word there is still a name because the tier
 # prefix makes the path distinctive. Elsewhere (`travel/trips`,
@@ -87,7 +90,7 @@ _public_vocab: set[str] | None = None
 
 
 def public_vocabulary() -> set[str]:
-    """Names the public harness already uses: command, agent, intent, and file
+    """Names the public harness already uses: skill, agent, intent, and file
     stems plus registry description text. A private registry entry that merely
     repeats one of these (a routine named after the command it runs) is not a
     leak."""
@@ -95,7 +98,7 @@ def public_vocabulary() -> set[str]:
     if _public_vocab is not None:
         return _public_vocab
     vocab: set[str] = set()
-    for name in ("commands", "agents", "intents"):
+    for name in ("skills", "agents", "intents"):
         try:
             data = tomllib.loads((REPO_ROOT / "harness" / f"{name}.toml").read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
@@ -103,11 +106,11 @@ def public_vocabulary() -> set[str]:
         for key, row in data.get(name, {}).items():
             vocab.add(str(key).casefold())
             if isinstance(row, dict):
-                for field in ("description", "label", "codex_prompt"):
+                for field in ("description", "label"):
                     text = row.get(field)
                     if isinstance(text, str):
                         vocab.add(text.casefold())
-    for pattern in ("protocols/*.md", ".claude/commands/*.md", ".claude/agents/*.md", "scripts/*.py", "scripts/launchd/*.plist"):
+    for pattern in ("protocols/*.md", "skills/*/SKILL.md", "agents/*.md", "scripts/*.py", "scripts/launchd/*.plist"):
         for f in REPO_ROOT.glob(pattern):
             stem = f.stem
             vocab.add(stem.casefold())
@@ -290,7 +293,12 @@ def index_dirs(idx: Index, *, public: set[str], allowlist: set[str]) -> None:
 
 
 def index_stems_and_links(idx: Index, *, allowlist: set[str]) -> None:
-    dirs = pc._discover_private_dirs(idx.vault)
+    system_roots = {
+        canonical_tiers()[key].strip("/").split("/", 1)[0]
+        for key in SYSTEM_TIERS
+        if key in canonical_tiers()
+    }
+    dirs = [name for name in pc._discover_private_dirs(idx.vault) if name not in system_roots]
     for title in pc.collect_titles(idx.vault, allowlist, dirs):
         idx.add(title, "stem", "note filename")
     for target in pc.collect_wikilinks(idx.vault, allowlist, dirs):
@@ -314,10 +322,10 @@ def _walk_strings(value: Any, keys: tuple[str, ...], path: str = "") -> list[tup
 
 def index_registries(idx: Index, *, public: set[str], allowlist: set[str]) -> None:
     meta = idx.vault / canonical_tiers().get("meta", "_meta")
-    watch = meta / "routine_watch.toml"
-    if watch.is_file():
+    routine_registry = idx.vault / canonical_tiers().get("private_routines", "_tools/routines") / "registry.toml"
+    if routine_registry.is_file():
         try:
-            data = tomllib.loads(watch.read_text(encoding="utf-8"))
+            data = tomllib.loads(routine_registry.read_text(encoding="utf-8"))
         except (OSError, tomllib.TOMLDecodeError):
             data = {}
         for routine in data.get("routine", []) if isinstance(data.get("routine"), list) else []:
@@ -326,7 +334,7 @@ def index_registries(idx: Index, *, public: set[str], allowlist: set[str]) -> No
             for key in ("name", "label"):
                 value = str(routine.get(key, "")).strip()
                 if value and is_specific(value, public=public, allowlist=allowlist, strict=False) and not is_public_vocabulary(value):
-                    idx.add(value, "registry", f"routine_watch.toml {key}")
+                    idx.add(value, "registry", f"private routine registry {key}")
             out_dir = str(routine.get("output_dir", "")).strip("/")
             if out_dir:
                 parts = out_dir.split("/")
@@ -337,7 +345,7 @@ def index_registries(idx: Index, *, public: set[str], allowlist: set[str]) -> No
                 for part in parts:
                     # Path parts are directory names: the strict dir rule applies.
                     if is_specific(part, public=public, allowlist=allowlist) and not is_public_vocabulary(part):
-                        idx.add(part, "registry", f"routine_watch.toml output_dir {out_dir}")
+                        idx.add(part, "registry", f"private routine registry output_dir {out_dir}")
     ledger = meta / "digest_updates.toml"
     if ledger.is_file():
         try:
@@ -347,11 +355,21 @@ def index_registries(idx: Index, *, public: set[str], allowlist: set[str]) -> No
         for value, where in _walk_strings(data, ("name", "label", "title", "path", "source")):
             if is_specific(value, public=public, allowlist=allowlist, strict=False) and not is_public_vocabulary(value):
                 idx.add(value, "registry", f"digest_updates.toml {where}")
-    features = idx.vault / canonical_tiers().get("private_features", "_tools/features")
-    if features.is_dir():
-        for child in sorted(features.iterdir()):
-            if child.is_dir() and not child.name.startswith(".") and is_specific(child.name, public=public, allowlist=allowlist, strict=False):
-                idx.add(child.name, "registry", "private feature directory")
+    for key, default, label in (
+        ("private_skills", "_tools/skills", "private skill directory"),
+        ("private_tools", "_tools/tools", "private tool directory"),
+        ("private_routines", "_tools/routines", "private routine directory"),
+    ):
+        root = idx.vault / canonical_tiers().get(key, default)
+        if root.is_dir():
+            for child in sorted(root.iterdir()):
+                if child.is_dir() and not child.name.startswith(".") and is_specific(child.name, public=public, allowlist=allowlist, strict=False):
+                    idx.add(child.name, "registry", label)
+    agent_root = idx.vault / canonical_tiers().get("private_agents", "_tools/agents")
+    if agent_root.is_dir():
+        for child in sorted(agent_root.glob("*.md")):
+            if is_specific(child.stem, public=public, allowlist=allowlist, strict=False):
+                idx.add(child.stem, "registry", "private agent source")
     overlay = REPO_ROOT / "harness" / "intents.local.toml"
     if overlay.is_file():
         try:
@@ -389,7 +407,12 @@ def _frontmatter_values(text: str) -> list[tuple[str, str]]:
 
 
 def index_frontmatter(idx: Index, *, public: set[str], allowlist: set[str]) -> None:
-    for sub in pc._discover_private_dirs(idx.vault):
+    system_roots = {
+        canonical_tiers()[key].strip("/").split("/", 1)[0]
+        for key in SYSTEM_TIERS
+        if key in canonical_tiers()
+    }
+    for sub in (name for name in pc._discover_private_dirs(idx.vault) if name not in system_roots):
         for f in (idx.vault / sub).rglob("*.md"):
             try:
                 head = f.read_text(encoding="utf-8", errors="ignore")[:4096]

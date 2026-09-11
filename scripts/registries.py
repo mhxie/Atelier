@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared validated loaders for commands, agents, models, and intents.
+"""Shared validated loaders for skills, agents, models, and intents.
 
 Production consumers receive one ``RegistryError`` type and retain their own
 edge policy. Lint keeps an independent parse; runtime launch configuration
@@ -34,8 +34,8 @@ def _load_table(filename: str, table: str, root: Path | None = None) -> dict:
     return value
 
 
-def load_commands(root: Path | None = None) -> dict[str, dict]:
-    return {k: v for k, v in _load_table("commands.toml", "commands", root).items() if isinstance(v, dict)}
+def load_skills(root: Path | None = None) -> dict[str, dict]:
+    return {k: v for k, v in _load_table("skills.toml", "skills", root).items() if isinstance(v, dict)}
 
 
 def load_agents(root: Path | None = None) -> dict[str, dict]:
@@ -52,7 +52,7 @@ def load_models(root: Path | None = None) -> dict[str, dict]:
 
 if __name__ == "__main__":
     for name, loader in (
-        ("commands", load_commands),
+        ("skills", load_skills),
         ("agents", load_agents),
         ("intents", load_intents),
         ("models", load_models),

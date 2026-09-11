@@ -35,6 +35,7 @@ Source Register
 # Public schema and adapter vocabulary. Both slug and display forms are kept
 # because private vault filenames can produce either candidate.
 address-history
+autoevo-nightly
 credentials index
 credentials-index
 meta-reflection-draft
@@ -46,4 +47,3 @@ signal-sweep
 
 # Public sample infrastructure identifiers explicitly approved by the user.
 atelier-mbp
-

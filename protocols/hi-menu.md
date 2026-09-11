@@ -18,16 +18,16 @@ procedure.
 
 ### Reflect
 
-- Daily Reflection: `.claude/commands/daily-reflection.md`
-- Weekly Review: `.claude/commands/weekly.md`
-- Explore: `.claude/commands/daily-reflection.md`, intent `explore`, Exploration branch only
+- Daily Reflection: `skills/daily-reflection/SKILL.md`
+- Weekly Review: `skills/weekly/SKILL.md`
+- Explore: `skills/daily-reflection/SKILL.md`, intent `explore`, Exploration branch only
 
 ### Plan
 
-- Goal Review: `.claude/commands/review.md`
-- Decision Journal: `.claude/commands/decision.md`
-- Energy Audit: `.claude/commands/daily-reflection.md`, intent `energy-audit`, Energy branch only
-- PRM Audit: `.claude/commands/prm.md`
+- Goal Review: `skills/review/SKILL.md`
+- Decision Journal: `skills/decision/SKILL.md`
+- Energy Audit: `skills/daily-reflection/SKILL.md`, intent `energy-audit`, Energy branch only
+- PRM Audit: `skills/prm/SKILL.md`
 
 ### Analyze
 
@@ -35,7 +35,7 @@ procedure.
 
 ### Act
 
-- Curate Inbox: `.claude/commands/curate.md`
+- Curate Inbox: `skills/curate/SKILL.md`
 - Process Meeting: `protocols/intent-meeting.md`
 - Compact Notes: ask for the topic; Researcher finds related notes;
   orchestrator snapshots sources under `<paths.cache>/`; Curator drafts only
@@ -48,11 +48,11 @@ procedure.
 
 ### Read
 
-Load `.claude/commands/read.md` for its reading modes and Reader or Scholar
+Load `skills/read/SKILL.md` for its reading modes and Reader or Scholar
 selection.
 
 ### Learn
 
 - Recommend Resources: ask for a topic and dispatch Librarian. Use existing
   notes for context and present reading-intensive results in Chinese.
-- Introspect: `.claude/commands/introspect.md`
+- Introspect: `skills/introspect/SKILL.md`

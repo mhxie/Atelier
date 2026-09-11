@@ -57,9 +57,9 @@ keys, paths, command names, and data fields stay literal.
 
 ## Workflows and runtimes
 
-Commands are registered in `harness/commands.toml`; intent rows and procedure
+Skills are registered in `harness/skills.toml`; intent rows and procedure
 paths live in `harness/intents.toml`; roles live in `harness/agents.toml` and
-`.claude/agents/`. Read only the selected command, procedure, role, or protocol.
+`agents/`. Read only the selected skill, procedure, role, or protocol.
 
 Claude Code uses `.claude/`; Codex uses `AGENTS.md`, `.agents/skills/`, and
 `.codex/`. Shared behavior stays provider-neutral. Portability details are

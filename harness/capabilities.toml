@@ -2,8 +2,8 @@
 #
 # Capability names are referenced by shared protocols (`protocols/*.md`,
 # `AGENTS.md`); this file maps each one to the Codex-side tool that implements
-# it. The Claude Code mapping is authoritative in `.claude/agents/*.md` `tools:`
-# frontmatter, which Claude Code reads natively, so it is not duplicated here.
+# it. The Claude mapping is authoritative in `agents/*.md` `tools:` frontmatter,
+# which the generated `.claude/agents/` edge preserves, so it is not duplicated.
 
 [capabilities.read_file]
 description = "Read local project, protocol, and vault files."

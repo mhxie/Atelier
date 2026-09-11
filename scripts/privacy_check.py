@@ -204,8 +204,8 @@ def tracked_files(repo_root: Path = REPO_ROOT) -> list[str]:
     """Files tracked by git PLUS untracked-but-not-ignored files.
 
     The privacy gate cares about content about to enter the repo, not just
-    content already in HEAD. A brand-new file (e.g., a fresh command under
-    .claude/commands/) must be scanned before it is staged, otherwise the
+    content already in HEAD. A brand-new file (e.g., a canonical skill under
+    skills/) must be scanned before it is staged, otherwise the
     gate has a trivial bypass: add a leak in a new file and it is invisible
     to `git ls-files`.
     """

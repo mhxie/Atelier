@@ -72,19 +72,19 @@ necessarily a correct one; the ledger records what happened, not a verdict.
    secondary and informational.
 2. **Add a row.** The request is a workflow `/hi` does not model yet. Write
    the procedure first, then the row; decide whether it also deserves a direct
-   command in `harness/commands.toml`.
-3. **Add a private row.** The request is a private feature or private
-   command the public catalog cannot name. In `harness/intents.local.toml`:
+   skill in `harness/skills.toml`.
+3. **Add a private row.** The request is a private component the public
+   catalog cannot name. In `harness/intents.local.toml`:
 
    ```toml
-   [intents.my-feature]
+   [intents.my-skill]
    description = "One line the classifier routes on."
-   procedure = "my-feature/SKILL.md"   # absolute, $OV-relative, or under <paths.private_features>
+   procedure = "my-skill/SKILL.md"   # absolute, $OV-relative, or under <paths.private_skills>
    examples = ["optional phrasing"]
    ```
 
    The row appears in the catalog marked `(private)` with the defaults of a
-   solo, script-free route (`mode = "private-feature"`, no profile reads);
+   solo, script-free route (`mode = "private"`, no profile reads);
    `mode`, `agents`, `profile_reads`, `context_budget_tokens` may be set.
    Requests for private capabilities that reach `general` are the largest
    source of false hits into neighbouring public rows; this is the fix.
@@ -97,5 +97,5 @@ fix is to narrow one description, never to add priority machinery.
 ## Related
 
 - `harness/intents.toml`: the catalog; `description` is the routing contract.
-- `.claude/commands/hi.md` § Contextual routing: when to clarify, what to log.
+- `skills/hi/SKILL.md` § Contextual routing: when to clarify, what to log.
 - `scripts/intent_coverage.py`: `catalog`, `intent-log`, `intent-misses`.

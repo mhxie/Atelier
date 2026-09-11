@@ -18,10 +18,10 @@ from tests.support import (  # noqa: E402
 
 def check_privacy_scanner() -> None:
     """Catch staged-only leaks and the boundary cases that previously escaped."""
-    privacy_role = (ROOT / ".claude" / "agents" / "privacy-reviewer.md").read_text(
+    privacy_role = (ROOT / "agents" / "privacy-reviewer.md").read_text(
         encoding="utf-8"
     )
-    push_command = (ROOT / ".claude" / "commands" / "push.md").read_text(
+    push_skill = (ROOT / "skills" / "push" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     allowlist = privacy_check.load_allowlist()
@@ -33,12 +33,12 @@ def check_privacy_scanner() -> None:
         "native semantic privacy role does not honor deliberate public opt-outs",
     )
     expect(
-        "--- PRIVACY ALLOWLIST ---" in push_command
-        and "cat scripts/privacy_allowlist.txt" in push_command,
+        "--- PRIVACY ALLOWLIST ---" in push_skill
+        and "cat scripts/privacy_allowlist.txt" in push_skill,
         "direct semantic privacy prompt does not receive deliberate public opt-outs",
     )
     expect(
-        'git log -p "$RANGE"' in push_command,
+        'git log -p "$RANGE"' in push_skill,
         "direct semantic privacy prompt reads the net diff, missing a name that "
         "was added and later removed but still ships in history",
     )

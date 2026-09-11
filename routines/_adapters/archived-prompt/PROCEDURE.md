@@ -2,23 +2,18 @@
 description: Bot-only adapter for one archived private local-routine prompt.
 ---
 
-## /run-routine
+## Archived-prompt routine adapter
 
-Bot-only adapter for local scheduled routines. Invocation shape:
-
-```text
-/run-routine <routine-name>
-```
-
-The orchestrator must execute this procedure sequentially and without asking
+Bot-only adapter for local scheduled routines. Prefect supplies one validated
+routine identity to the adapter. Execute sequentially and without asking
 for interactive input.
 
 ## Preflight
 
-1. Require exactly one argument matching
+1. Require the supplied routine identity to match
    `[A-Za-z0-9][A-Za-z0-9._-]*`. Call it `ROUTINE`.
 2. Require a non-empty `ATELIER_ROUTINE_PROFILE`. The Prefect adapter has
-   already validated exactly one local watch-registry row, its schedule and
+   already validated exactly one private registry row, its schedule and
    timezone, capability profile, required CLIs/plugins, and output declaration.
    Do not repeat that harness validation inside the model session.
 3. Require a non-empty comma-separated `ATELIER_ROUTINE_PERMISSIONS`. It is the
@@ -60,7 +55,7 @@ than a filesystem read. Apply the action-authorization contract in
 `ATELIER_ROUTINE_PERMISSIONS`.
 
 Honor the archived prompt's single-pass, cost-ceiling, idempotency, output-path,
-and graceful-degradation rules. Do not modify `routine_watch.toml` or Prefect
+and graceful-degradation rules. Do not modify the private routine registry or Prefect
 deployment/state data during the routine.
 
 ## Finish

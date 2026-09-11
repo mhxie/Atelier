@@ -14,7 +14,7 @@ This map is not a second per-script specification.
 | Retrieval and knowledge validation | `semantic.py` calls the pinned QMD SDK through `qmd.mjs`; `trust.py` and `lint.py` validate knowledge under the [wiki schema](../protocols/wiki-schema.md) |
 | Reading feedback and decisions | `decisions.py` (including `reading-*` commands), `precedent.py`; `reading_feedback.py` owns pure reading-event validation and evaluation |
 | Hosted-model calls | `chat_completion.py`, bound through `harness/models.toml`; `precedent.py` is its caller |
-| Scheduled execution and recovery | `routine_prefect.py` owns Prefect flows/deployments; `routine_adapter.py` owns the fixed Codex/process boundary and domain receipts; `routine_status.py` reads recent native state. Deployment and recovery: `launchd/README.md` |
+| Scheduled execution and recovery | `routine_prefect.py` owns Prefect flows/deployments; `routine_adapter.py` owns fixed execution, receipt writes, and replay decisions; `routine_receipts.py` owns shared ordinary artifact validation; `routine_status.py` reads native state. Contracts: `../protocols/remote-routines.md`; operations: `launchd/README.md` |
 | Knowledge maintenance | `decay_scan.py`, `autoevo_run.py`; queue, preflight, commit, and verification helpers preserve separate safety boundaries |
 | Daily brief and optional life-area applications | `routine_digest.py`, `daily_brief.py`, `dining_audit.py`, `dine_rank.py`, `interests.py` |
 | Public-repo privacy | `privacy_check.py`, `privacy_index.py`, `hooks/pre-push`; approval contract below |
@@ -36,7 +36,7 @@ after harness edits to verify those mappings and lifecycle hooks without
 touching `$OV/`.
 
 `scripts/atelier_runtime.py` is optional for direct interactive use. It ships
-with Codex selected, launches `$<command>` or `/<command>` unchanged, and lets
+with Codex selected, launches `$<skill>` or `/<skill>` unchanged, and lets
 the user persist Claude with `python3 scripts/atelier_runtime.py use claude`.
 
 ## Public-repo privacy gate
@@ -56,7 +56,7 @@ exact-term sidecar is absent; a clean hit count does not erase that warning.
 A skipped scan is not privacy clearance. Before committing, also obtain the
 required semantic review of the proposed changes; the scanner does not grant
 commit authority. Only when publishing existing, authorized local commits,
-invoke `$push` (Claude: `/push`). The [publish procedure](../.claude/commands/push.md)
+invoke `$push` (Claude: `/push`). The [publish procedure](../skills/push/SKILL.md)
 owns mechanical and independent semantic review of the same unpushed history,
 including intermediate commits, and then performs the push. It does not commit
 working-tree changes. Missing semantic coverage must not be reported as clean.

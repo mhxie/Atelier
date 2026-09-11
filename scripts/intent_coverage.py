@@ -27,7 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ROUTE_LOG_FALLBACK_DIR = Path.home() / ".cache" / "atelier" / "intent_routes"
 ROUTE_KINDS = ("routed", "general", "clarified", "corrected")
 PRIVATE_ROW_DEFAULTS = {
-    "mode": "private-feature",
+    "mode": "private",
     "context_budget_tokens": 2048,
     "agents": [],
     "profile_reads": [],
@@ -62,7 +62,7 @@ def _load_intents_canonical() -> dict[str, dict[str, Any]]:
 
 def resolve_private_procedure(value: Any) -> Path | None:
     """Where a private row's procedure lives: absolute, `$OV`-relative, or
-    `<paths.private_features>`-relative (so `my-feature/SKILL.md` works)."""
+    `<paths.private_skills>`-relative (so `my-skill/SKILL.md` works)."""
     if not isinstance(value, str) or not value.strip():
         return None
     raw = Path(value.strip()).expanduser()
@@ -73,7 +73,7 @@ def resolve_private_procedure(value: Any) -> Path | None:
         try:
             from _paths import tier_segments
 
-            candidates.append(Path(ov) / tier_segments().get("private_features", "_tools/features") / raw)
+            candidates.append(Path(ov) / tier_segments().get("private_skills", "_tools/skills") / raw)
         except Exception:  # noqa: BLE001  (registry problems must not break routing)
             pass
     for candidate in candidates:
@@ -90,7 +90,7 @@ def validate_private_row(name: str, row: Any) -> list[str]:
     if not isinstance(row.get("description"), str) or not row["description"].strip():
         problems.append(f"{name}: needs a one-line description")
     if resolve_private_procedure(row.get("procedure")) is None:
-        problems.append(f"{name}: procedure must be an existing file (absolute, $OV-relative, or under the private features tier)")
+        problems.append(f"{name}: procedure must be an existing file (absolute, $OV-relative, or under the private skills tier)")
     for key, default in {**PRIVATE_ROW_DEFAULTS, "examples": []}.items():
         value = row.get(key, default)
         if type(value) is not type(default):

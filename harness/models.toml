@@ -8,8 +8,8 @@
 #
 # Three orthogonal axes — kept separate by design:
 #
-#   1. Role            (researcher, reader, scribe, ...)  -> .claude/agents/*.md
-#                                                          + .codex/agents/*.toml
+#   1. Role            (researcher, reader, scribe, ...)  -> agents/*.md
+#                                                          + generated runtime edges
 #                                                          + harness/agents.toml
 #   2. Model identity  (opus, sonnet, deepseek_pro, ...)  -> THIS FILE
 #   3. Voices         (available model legs for a role) -> harness/agents.toml

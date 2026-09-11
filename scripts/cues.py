@@ -37,6 +37,7 @@ import cron_spec  # noqa: E402
 import intent_coverage  # noqa: E402
 import autoevo_verify  # noqa: E402
 import routine_status  # noqa: E402
+import routine_receipts  # noqa: E402
 
 
 @dataclass
@@ -75,12 +76,12 @@ def _format_runtime_message(message: str, runtime: str) -> str:
     if runtime != "codex":
         return message
     try:
-        from registries import load_commands
+        from registries import load_skills
 
-        commands = load_commands()
+        skills = load_skills()
     except Exception:  # noqa: BLE001  (cosmetic rendering stays fail-open)
         return message
-    for name, entry in sorted(commands.items(), key=lambda item: -len(item[0])):
+    for name, entry in sorted(skills.items(), key=lambda item: -len(item[0])):
         if not isinstance(entry, dict):
             continue
         replacement = (
@@ -94,6 +95,10 @@ def _format_runtime_message(message: str, runtime: str) -> str:
 def _meta_dir(ov: Path) -> Path:
     """Operational-state root under the caller's vault, registry-renamable."""
     return ov / tier_segments().get("meta", "_meta")
+
+
+def _routine_registry(ov: Path) -> Path:
+    return ov / tier_segments().get("private_routines", "_tools/routines") / "registry.toml"
 
 
 def _touch_session_lock(verbose: bool, context: str) -> None:
@@ -136,7 +141,7 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
             Cue(
                 key="weekly",
                 severity="hard",
-                command_path=".claude/commands/weekly.md",
+                command_path="skills/weekly/SKILL.md",
                 message=(
                     "还没跑过 weekly. 这周已经积累了 Apple Health / 信号 / "
                     "健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?"
@@ -158,7 +163,7 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
             Cue(
                 key="weekly",
                 severity="hard",
-                command_path=".claude/commands/weekly.md",
+                command_path="skills/weekly/SKILL.md",
                 message=(
                     f"上次 weekly 是 {days_since} 天前. 这周已经积累了 Apple Health / "
                     f"信号 / 健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?"
@@ -173,7 +178,7 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
             Cue(
                 key="weekly",
                 severity="soft",
-                command_path=".claude/commands/weekly.md",
+                command_path="skills/weekly/SKILL.md",
                 message=(
                     f"提示: 上次 weekly 是 {days_since} 天前. "
                     f"想现在跑 `/weekly` 把这周补齐吗?"
@@ -222,7 +227,7 @@ def check_zettelm(ov: Path, today: date) -> tuple[Cue | None, str]:
             Cue(
                 key="zettelm",
                 severity="hard",
-                command_path=".claude/commands/sync.md",
+                command_path="skills/sync/SKILL.md",
                 message=(
                     f"zettelm 有 {n} 条待 digest{local_hint} (最老 {oldest_age_days} 天). "
                     f"建议先跑 `/sync` 把内容归位再继续. 现在跑吗?"
@@ -235,7 +240,7 @@ def check_zettelm(ov: Path, today: date) -> tuple[Cue | None, str]:
         Cue(
             key="zettelm",
             severity="soft",
-            command_path=".claude/commands/sync.md",
+            command_path="skills/sync/SKILL.md",
             message=f"提示: zettelm 有 {n} 条待 digest{local_hint}. 想现在跑 `/sync`?",
         ),
         f"n={n} oldest_age={oldest_age_days}; soft cue",
@@ -335,17 +340,17 @@ def check_aggregate_freshness(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def _routine_rows(ov: Path) -> tuple[list[dict[str, Any]], str | None]:
-    """Load `routine_watch.toml` rows once; return (rows, skip reason)."""
-    config_path = _meta_dir(ov) / "routine_watch.toml"
+    """Load private routine rows once; return (rows, skip reason)."""
+    config_path = _routine_registry(ov)
     if not config_path.is_file():
-        return [], "_meta/routine_watch.toml missing; skip"
+        return [], "private routine registry missing; skip"
     try:
         config = tomllib.loads(config_path.read_text())
     except (tomllib.TOMLDecodeError, OSError) as exc:
-        return [], f"routine_watch.toml parse failed: {exc!r}"
+        return [], f"private routine registry parse failed: {exc!r}"
     rows = config.get("routine", [])
     if not isinstance(rows, list) or not rows:
-        return [], "no routines declared in routine_watch.toml"
+        return [], "no routines declared in private registry"
     return rows, None
 
 
@@ -360,7 +365,7 @@ def _routine_files(ov: Path, row: dict[str, Any]) -> list[Path] | None:
 def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Unreviewed outputs from remote cron routines.
 
-    Vault-agnostic mechanism: reads `$OV/_meta/routine_watch.toml` to learn
+    Vault-agnostic mechanism: reads the private routine registry to learn
     which output directories belong to which routine. Each routine entry
     declares its `output_dir`, `file_pattern`, and human `label`. User policy
     lives in the TOML; this function is the engine.
@@ -437,7 +442,7 @@ def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
 
     Per `protocols/remote-routines.md` § Policy, every routine MUST persist
     canonical output to $OV. Each routine entry in
-    `$OV/_meta/routine_watch.toml` should declare either:
+    the private routine registry should declare either:
       - `drive_write_enforced = true`  (compliant), OR
       - `needs_drive_write_update = true`  (acknowledged migration debt)
     A routine missing both flags violates the policy without acknowledgment.
@@ -451,7 +456,7 @@ def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
     for r in routines:
         # Local routines write to $OV directly via the filesystem; the Drive-write
         # policy applies only to remote (claude.ai) routines that persist over MCP.
-        # Per protocols/remote-routines.md § routine_watch.toml: local entries
+        # Per protocols/remote-routines.md: local entries
         # carry no drive_write_enforced flag.
         if r.get("execution") == "local":
             continue
@@ -475,14 +480,14 @@ def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
                 f"(neither `drive_write_enforced` nor `needs_drive_write_update` set): "
                 f"{listing}. Per `protocols/remote-routines.md` § Policy: every "
                 f"routine MUST persist to $OV. Set the appropriate flag in "
-                f"`$OV/_meta/routine_watch.toml`."
+                "the private routine registry."
             ),
         ),
         f"violators={len(violators)}/{len(routines)}; soft cue",
     )
 
 
-def _latest_local_receipt(ov: Path, routine: str) -> tuple[date, dict, Path] | None:
+def _latest_local_receipt(ov: Path, routine: str, declaration: dict | None = None) -> tuple[date, dict, Path] | None:
     """Load the latest compact domain receipt for one local routine."""
     routine_dir = _meta_dir(ov) / "routine_receipts" / routine
     if not routine_dir.is_dir():
@@ -509,17 +514,17 @@ def _latest_local_receipt(ov: Path, routine: str) -> tuple[date, dict, Path] | N
                            "verification": "passed" if verified else receipt.get("status"),
                            "result_summary": f"{len(receipt.get('pending', []))} findings queued; structured result {receipt.get('status')}"}
             else:
-                receipt = tomllib.loads(receipt_path.read_text(encoding="utf-8"))
+                if declaration is None:
+                    raise ValueError("receipt has no output declaration")
+                receipt = routine_receipts.read(receipt_path, routine=routine, cycle=receipt_path.stem,
+                                               vault=ov, output_dir=declaration.get("output_dir"),
+                                               file_pattern=declaration.get("file_pattern", "*.md"))
+        except routine_receipts.IdentityMismatch:
+            continue
         except (OSError, ValueError, autoevo_verify.VerificationError):
             if is_autoevo:
                 return None
-            continue
-        if (
-            receipt.get("contract_version") != 3
-            or receipt.get("routine") != routine
-            or receipt.get("cycle_id") != receipt_path.stem
-        ):
-            continue
+            return receipt_date, {"verification": "needs_review"}, receipt_path
         return receipt_date, receipt, receipt_path
     return None
 
@@ -542,7 +547,7 @@ def _scheduled_dates(cron: object, start: date, now: datetime, timezone_name: st
 def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Detect routines that fire but produce no output.
 
-    For each routine in routine_watch.toml, estimates expected cadence from
+    For each private routine, estimates expected cadence from
     the cron field, then checks whether the latest output file is older than
     cadence + tolerance. Catches silent Drive-write failures that
     check_routine_outputs (which only reports *new* files) cannot see.
@@ -572,7 +577,7 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
 
         tolerance = max(2, cadence_days)
         threshold = cadence_days + tolerance
-        latest_receipt = _latest_local_receipt(ov, str(name)) if is_local else None
+        latest_receipt = _latest_local_receipt(ov, str(name), r) if is_local else None
 
         files = _routine_files(ov, r)
         if files is None:
@@ -623,10 +628,10 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
         Cue(
             key="routine_staleness",
             severity="hard",
-            command_path="_meta/routine_watch.toml",
+            command_path="_tools/routines/registry.toml",
             message=(
                 f"{len(stale)} routine(s) with missing/stale output: {listing}. "
-                f"Check the active scheduler in routine_watch.toml, then inspect its "
+                f"Check the active scheduler in the private routine registry, then inspect its "
                 f"local Prefect state or cloud session and connector logs."
             ),
         ),
@@ -727,7 +732,7 @@ def check_routine_hitrate(
         Cue(
             key="routine_hitrate",
             severity="soft",
-            command_path="_meta/routine_watch.toml",
+            command_path="_tools/routines/registry.toml",
             message=(
                 f"{len(degraded)} routine(s) with degraded output rate: {listing}. "
                 f"The active scheduler is firing but output is intermittent. "
@@ -772,7 +777,7 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
                 message=(
                     f"Autoevo pending queue file is corrupted "
                     f"(`_meta/autoevo_pending.toml`): {type(exc).__name__}. "
-                    f"`/autoevo-review` and `/autoevo-nightly` queue ops cannot proceed. "
+                    f"`/autoevo-review` and the Autoevo routine cannot proceed. "
                     f"Repair by hand (TOML syntax), or back up + restart with an empty file."
                 ),
             ),
@@ -847,7 +852,7 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
         Cue(
             key="autoevo_pending",
             severity=severity,
-            command_path=".claude/commands/autoevo-review.md",
+            command_path="skills/autoevo-review/SKILL.md",
             message=(
                 f"{len(pending)} pending autoevo decisions ({listing}; {age_note}{corrupt_note}{skip_note}). "
                 f"`/autoevo-review` to triage.{default_note}"
@@ -988,11 +993,13 @@ def _recap_local_runs(ov: Path, today: date, verbose: bool = False) -> list[str]
     runs_dir = _meta_dir(ov) / "routine_receipts"
     if not runs_dir.is_dir():
         return []
+    rows, _ = _routine_rows(ov)
+    declarations = {row.get("name"): row for row in rows if isinstance(row, dict)}
     recaps = []
     for routine in sorted(runs_dir.iterdir()):
         if not routine.is_dir():
             continue
-        latest = _latest_local_receipt(ov, routine.name)
+        latest = _latest_local_receipt(ov, routine.name, declarations.get(routine.name))
         if latest is None:
             continue
         cycle, receipt, _ = latest
@@ -1002,6 +1009,8 @@ def _recap_local_runs(ov: Path, today: date, verbose: bool = False) -> list[str]
         summary = receipt.get("result_summary", "")
         when = "today" if cycle == today else "yesterday"
         recap = f"{routine.name} ran {when} via Prefect"
+        if routine.name != "autoevo-nightly" and receipt.get("contract_version") == 3:
+            recap += " (v3: content unbound)"
         recap += f" ({duration}s)" if duration else ""
         recap += f": {summary}" if summary else ""
         recaps.append(recap)
@@ -1025,14 +1034,14 @@ def check_local_routine_missed(
     now = now or datetime.now().astimezone()
     if now.hour < 6:
         return None, "before 06:00 local; skip"
-    config_path = _meta_dir(ov) / "routine_watch.toml"
+    config_path = _routine_registry(ov)
     try:
         config = tomllib.loads(config_path.read_text())
     except FileNotFoundError:
-        return None, "_meta/routine_watch.toml missing; skip"
+        return None, "private routine registry missing; skip"
     except (tomllib.TOMLDecodeError, OSError) as exc:
-        return None, f"routine_watch.toml parse failed: {exc!r}"
-    routines = [r for r in config.get("routine", []) if r.get("execution") == "local" and r.get("kind", "model") == "model"]
+        return None, f"private routine registry parse failed: {exc!r}"
+    routines = [r for r in config.get("routine", []) if r.get("execution") == "local" and r.get("runner") == "model"]
     receipts = _meta_dir(ov) / "routine_receipts"
     if not routines or not receipts.is_dir():
         return None, "no local model receipts; skip"
@@ -1051,7 +1060,7 @@ def check_local_routine_missed(
         if not due:
             continue
         expected = due[-1]
-        latest = _latest_local_receipt(ov, name)
+        latest = _latest_local_receipt(ov, name, row)
         if latest is None or latest[0] < expected:
             missed.append(f"{label} (no verified receipt for {expected})")
             debug_parts.append(f"{label}: expected={expected}; receipt absent or old")
@@ -1413,7 +1422,7 @@ def main(argv: list[str] | None = None) -> int:
     #
     # Critical: the scheduled headless runtime invocation is itself a
     # UserPromptSubmit event. Without the env-var guard below,
-    # the hook would touch the lock right before /autoevo-nightly's
+    # the hook would touch the lock right before the Autoevo routine's
     # pre-flight gate checks the lock, causing the bot to abort every
     # night with "session-active lock fresh." The Prefect adapter exports
     # ATELIER_SKIP_LOCK_TOUCH=1 so the scheduled run bypasses the refresh.
@@ -1424,7 +1433,7 @@ def main(argv: list[str] | None = None) -> int:
     snoozes = _load_snoozes(ov)
 
     # Session-active lock: when invoked as a SessionStart hook, touch a
-    # marker file so the 5am `/autoevo-nightly` bot can detect a recent
+    # marker file so the 5am Autoevo routine can detect a recent
     # session and bail out per `protocols/autoevo.md` § Pre-flight gates.
     # SessionStart catches the start of a fresh session; the dedicated
     # `--touch-lock` path (above) handles the UserPromptSubmit per-prompt

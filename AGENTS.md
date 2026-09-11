@@ -6,18 +6,19 @@ session start for the shared safety, knowledge, and writing contract. Load
 
 ## Runtime edge
 
-- Shared behavior lives in `CLAUDE.md`, `protocols/`, command specs, registries,
+- Shared behavior lives in `CLAUDE.md`, `protocols/`, canonical skills and agents, registries,
   and scripts. Runtime syntax stays in `.claude/`, `.codex/`, and this adapter.
-- User commands are Claude `/name` and Codex `$name`. A Codex command skill
-  reads the matching `.claude/commands/<name>.md`; never start nested Codex.
+- User skills are Claude `/name` and Codex `$name`. Both runtime edges read
+  `skills/<name>/SKILL.md`; never start nested Codex.
 - `$hi` classifies against the `harness/intents.toml` catalog, then reads
   only the selected `procedure`. Direct skills skip the universal router.
-- Native roles use `.codex/agents/<role>.toml`, which points to the shared
-  `.claude/agents/<role>.md` brief. If dispatch is unavailable, run that brief
+- Native roles use `.codex/agents/<role>.toml`, which points to the canonical
+  `agents/<role>.md` brief. If dispatch is unavailable, run that brief
   sequentially and disclose the downgrade.
-- Private feature sources live under `<paths.private_features>/` and are linked
-  into user-level Claude and Codex skill discovery. Never commit their names to
-  public registries.
+- Private skills live under `<paths.private_skills>/` and may be linked into
+  user-level skill discovery. Deterministic private tools and routines live
+  under their own registered roots and never enter skill discovery. Never
+  commit private names to public registries.
 
 | Claude construct | Codex adaptation |
 |---|---|
@@ -36,8 +37,8 @@ configuration; it does not bypass approvals or the sandbox.
 
 Keep workflows provider-neutral and runtime adapters thin. Update the relevant
 `harness/*.toml` registry and `.agents/skills/atelier/SKILL.md` when behavior
-changes. `.codex/agents/` and the `$command` skills (except `atelier`) are
-rendered: after a registry edit run
-`uv run scripts/render_runtime_edges.py --runtime codex --apply` instead of
+changes. Claude and Codex runtime edges (except `$atelier`) are rendered:
+after a registry edit run
+`uv run scripts/render_runtime_edges.py --runtime all --apply` instead of
 hand-editing them. Run `python3 scripts/harness_lint.py` and
 `.venv/bin/python scripts/harness_smoke.py` before finishing.

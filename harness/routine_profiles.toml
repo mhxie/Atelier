@@ -1,7 +1,7 @@
 version = 1
 
 # Public, routine-agnostic capability profiles. Private routine names and
-# output paths stay in $OV/_meta/routine_watch.toml and reference these rows.
+# output paths stay in the private routine registry and reference these rows.
 #
 # Unattended local model routines always use the fixed Codex adapter. Runtime
 # selection and fallback belong only to interactive launches.
@@ -26,7 +26,7 @@ permissions = [
 required_clis = ["git", "node"]
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/autoevo-nightly"]
+allowed_adapters = ["autoevo"]
 
 [profiles.local-research]
 surface = "local"
@@ -45,7 +45,7 @@ permissions = [
 required_clis = []
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/run-routine"]
+allowed_adapters = ["archived-prompt"]
 
 [profiles.local-synthesis]
 surface = "local"
@@ -63,7 +63,7 @@ permissions = [
 required_clis = []
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/run-routine"]
+allowed_adapters = ["archived-prompt"]
 
 [profiles.local-gmail-synthesis]
 surface = "local"
@@ -82,7 +82,7 @@ permissions = [
 required_clis = []
 required_plugins = ["gmail@openai-curated-remote"]
 optional_plugins = []
-allowed_commands = ["/run-routine"]
+allowed_adapters = ["archived-prompt"]
 
 [profiles.local-digest]
 surface = "local"
@@ -101,7 +101,7 @@ permissions = [
 required_clis = []
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/run-routine"]
+allowed_adapters = ["archived-prompt"]
 
 # Readwise and optional CodexBar OAuth reads plus deterministic self-mail need
 # shell egress; retain the filesystem fence, disabled web search, and no plugins.
@@ -124,7 +124,7 @@ permissions = [
 required_clis = ["python3", "readwise", "security"]
 required_plugins = []
 optional_plugins = []
-allowed_commands = ["/run-routine"]
+allowed_adapters = ["archived-prompt"]
 
 [profiles.cloud-drive-research]
 surface = "cloud"

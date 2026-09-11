@@ -95,8 +95,11 @@ def _uv(args: list[str]) -> bool:
 
 
 def _ruff(args: list[str]) -> bool:
-    return args[:1] == ["check"] and not any(
-        a.startswith(("--fix", "--unsafe-fixes")) or a == "--diff-only-if-fix" for a in args[1:])
+    # Both flags override config-driven writes; a fixed prefix cannot be mistaken for option values.
+    return args[:3] == ["check", "--no-fix", "--no-fix-only"] and not any(
+        a.startswith(("--fix", "--unsafe-fixes")) or a == "--diff-only-if-fix"
+        or (_banned_long(a, ("output-file",)) if a.startswith("--") else a.startswith("-") and "o" in a[1:])
+        for a in args[3:])
 
 
 def _uvx(args: list[str]) -> bool:
@@ -175,8 +178,9 @@ RULES["git"] = (_git, "not a read-only git form. Reading subcommands (status, di
                       "and only --no-pager and -C <path> before them. Read a baseline with `git show <rev>:<path>`")
 RULES["uv"] = (_uv, "uv is allowed only as `uv run [--offline] [--no-sync] python3 <allowed python form>` or "
                     "`uv run [--offline] scripts/<vetted script>`")
-RULES["uvx"] = (_uvx, "uvx is allowed only as `uvx [--offline] ruff check ...`, without --fix or --unsafe-fixes")
-RULES["ruff"] = (_ruff, "ruff is allowed only as `ruff check ...` without --fix; `ruff format` rewrites its files")
+RULES["uvx"] = (_uvx, "use `uvx [--offline] ruff check --no-fix --no-fix-only ...`, without mutation/output flags")
+RULES["ruff"] = (_ruff, "use `ruff check --no-fix --no-fix-only ...` to override config-driven writes; --fix, "
+                        "--unsafe-fixes and -o/--output-file are forbidden. --output-format still works")
 
 
 def _expansion(text: str) -> str | None:

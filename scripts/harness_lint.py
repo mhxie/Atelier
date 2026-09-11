@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import stat
 import subprocess
@@ -20,11 +21,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 from render_runtime_edges import TIER_TO_EFFORT  # noqa: E402  (single owner of the tier map)
 from _git import git_paths  # noqa: E402
+import component_taxonomy  # noqa: E402
 
 SEVERITY_ORDER = {"ERROR": 0, "WARN": 1, "INFO": 2}
 PUBLIC_CONFIGS = (
-    *(f"harness/{name}.toml" for name in ("models", "agents", "commands", "capabilities", "runtimes", "intents", "paths")),
-    ".codex/hooks.json", ".claude/settings.json",
+    *(f"harness/{name}.toml" for name in ("models", "agents", "skills", "capabilities", "runtimes", "intents", "paths")),
+    "routines/registry.toml", ".codex/hooks.json", ".claude/settings.json",
 )
 
 
@@ -137,13 +139,13 @@ def parse_agent_frontmatter(path: Path) -> dict[str, str]:
     return fields
 
 
-def load_claude_agents() -> tuple[dict[str, dict[str, str]], list[Finding]]:
+def load_canonical_agents() -> tuple[dict[str, dict[str, str]], list[Finding]]:
     findings: list[Finding] = []
     agents: dict[str, dict[str, str]] = {}
-    agent_dir = ROOT / ".claude" / "agents"
+    agent_dir = ROOT / "agents"
     if not agent_dir.exists():
         return agents, [
-            Finding("ERROR", "missing-agent-dir", ".claude/agents", "Claude agent directory is missing")
+            Finding("ERROR", "missing-agent-dir", "agents", "canonical agent directory is missing")
         ]
 
     for path in sorted(agent_dir.glob("*.md")):
@@ -171,30 +173,18 @@ def git_list(paths: list[str], *, others: bool = False) -> tuple[list[str], Find
         return [], Finding("ERROR", "git-ls-files", "git", str(exc))
 
 
-def load_claude_commands() -> tuple[dict[str, str], list[Finding]]:
-    tracked, err = git_list([".claude/commands"])
-    if err:
-        return {}, [err]
-    untracked, err = git_list([".claude/commands"], others=True)
-    if err:
-        return {}, [err]
-
-    command_paths = sorted(
-        p for p in set(tracked) | set(untracked)
-        if p.endswith(".md")
-        and p.startswith(".claude/commands/")
-        and (ROOT / p).is_file()
-    )
-    commands: dict[str, str] = {}
+def load_canonical_skills() -> tuple[dict[str, str], list[Finding]]:
+    skills: dict[str, str] = {}
     findings: list[Finding] = []
-    for path in command_paths:
-        name = Path(path).stem
-        if name in commands:
-            _add(findings, "ERROR", "command-duplicate", path,
-                     f"duplicate command stem `{name}` also appears at `{commands[name]}`")
+    for source in sorted((ROOT / "skills").glob("*/SKILL.md")):
+        path = rel(source)
+        name = source.parent.name
+        if name in skills:
+            _add(findings, "ERROR", "skill-duplicate", path,
+                     f"duplicate skill name `{name}` also appears at `{skills[name]}`")
             continue
-        commands[name] = path
-    return commands, findings
+        skills[name] = path
+    return skills, findings
 
 
 def check_root_files() -> list[Finding]:
@@ -277,7 +267,7 @@ def _check_model_bindings(
             cc = binding.get("claude_code")
             expected_native = cc if isinstance(cc, str) else native_id
             if fm_model != expected_native:
-                _add(findings, "WARN", "models-claude-drift", frontmatter.get("path", f".claude/agents/{name}.md"),
+                _add(findings, "WARN", "models-claude-drift", frontmatter.get("path", f"agents/{name}.md"),
                      f"frontmatter model `{fm_model}` differs from native voice `{native_id}` (expected `{expected_native}` per profile/models.toml)")
     return findings
 
@@ -342,10 +332,6 @@ def check_agent_registry(
         if source != fields["path"]:
             _add(findings, "ERROR", "agents-registry-source-drift", "harness/agents.toml",
                      f"agent `{name}` source `{source}` differs from discovered path `{fields['path']}`")
-        prompt = entry["codex_prompt"]
-        if source not in prompt:
-            _add(findings, "WARN", "agents-registry-prompt-source", "harness/agents.toml",
-                     f"agent `{name}` Codex prompt does not mention `{source}`")
         if name == "forgetter":
             canonical_marker = "---forgetter-result---"
             legacy_marker = "---begin-result---"
@@ -353,11 +339,8 @@ def check_agent_registry(
                 ROOT / str(source),
                 ROOT / "protocols" / "agent-handoff.md",
                 ROOT / "protocols" / "intent-forget.md",
-                ROOT / ".claude" / "commands" / "autoevo-nightly.md",
+                ROOT / "routines" / "_adapters" / "autoevo" / "PROCEDURE.md",
             )
-            if canonical_marker not in prompt or legacy_marker in prompt:
-                _add(findings, "ERROR", "forgetter-envelope-registry", "harness/agents.toml",
-                         "Forgetter Codex prompt must use only `---forgetter-result---` as its opening marker")
             for contract_path in contract_paths:
                 try:
                     contract = contract_path.read_text(encoding="utf-8")
@@ -374,7 +357,7 @@ def check_agent_registry(
         is_script_driven = entry["status"] == "script-driven"
         if name not in agents and not is_script_driven:
             _add(findings, "WARN", "agents-registry-entry-extra", "harness/agents.toml",
-                     f"registry agent `{name}` has no .claude agent source")
+                     f"registry agent `{name}` has no canonical agent source")
         for leg, model_ref in entry["voices"].items():
             if model_ref not in models:
                 _add(findings, "ERROR", "agents-voices-unknown-model", "harness/agents.toml",
@@ -389,7 +372,7 @@ def check_agent_registry(
     return findings
 
 
-def check_codex_edges(config: dict[str, Any]) -> list[Finding]:
+def check_runtime_edges(config: dict[str, Any]) -> list[Finding]:
     """Compare generated bytes; source/schema checks remain independent above.
 
     Template semantics have independent fixtures in tests/test_render_edges.py.
@@ -398,40 +381,40 @@ def check_codex_edges(config: dict[str, Any]) -> list[Finding]:
     """
     import render_runtime_edges as edges
 
-    registries = {name: config[f"harness/{name}.toml"] for name in ("agents", "commands", "models")}
-    for name in edges.HAND_WRITTEN_SKILLS & registries["commands"]["commands"].keys():
-        row = registries["commands"]["commands"][name]
-        if isinstance(row, dict) and row.get("user_facing", True) is not False:
-            return [Finding("ERROR", "codex-command-reserved", "harness/commands.toml",
-                            f"user-facing command `{name}` collides with a handwritten skill")]
+    registries = {name: config[f"harness/{name}.toml"] for name in ("agents", "skills", "models")}
+    for name in edges.HAND_WRITTEN_SKILLS & registries["skills"]["skills"].keys():
+        return [Finding("ERROR", "skill-reserved", "harness/skills.toml",
+                        f"public skill `{name}` collides with a handwritten runtime skill")]
     try:
         expected = {ROOT / path.relative_to(edges.ROOT): content.encode("utf-8")
-                    for path, content in edges.render_codex(
-                        registries["agents"], registries["commands"], registries["models"]
+                    for path, content in edges.render_all(
+                        registries["agents"], registries["skills"], registries["models"]
                     ).items()}
     except (SystemExit, AttributeError, KeyError, TypeError, ValueError) as exc:
-        return [Finding("ERROR", "codex-edge-render", "harness/", str(exc))]
+        return [Finding("ERROR", "runtime-edge-render", "harness/", str(exc))]
 
     skills = ROOT / ".agents" / "skills"
     actual = set((ROOT / ".codex" / "agents").glob("*.toml"))
+    actual.update((ROOT / ".claude" / "agents").glob("*.md"))
+    actual.update((ROOT / ".claude" / "commands").glob("*.md"))
     for pattern in ("*/SKILL.md", "*/agents/openai.yaml"):
         actual.update(path for path in skills.glob(pattern)
                       if path.relative_to(skills).parts[0] not in edges.HAND_WRITTEN_SKILLS)
-    findings = [Finding("ERROR", "codex-edge-unregistered", rel(path),
+    findings = [Finding("ERROR", "runtime-edge-unregistered", rel(path),
                         "unexpected generated edge; remove it or register its owner")
                 for path in sorted(actual - expected.keys())]
     for path, content in sorted(expected.items()):
         try:
             current = path.read_bytes()
         except FileNotFoundError:
-            _add(findings, "ERROR", "codex-edge-missing", rel(path),
+            _add(findings, "ERROR", "runtime-edge-missing", rel(path),
                      "generated edge is missing; re-render the registries")
         except OSError as exc:
-            _add(findings, "ERROR", "codex-edge-read", rel(path), str(exc))
+            _add(findings, "ERROR", "runtime-edge-read", rel(path), str(exc))
         else:
             if current != content:
-                _add(findings, "ERROR", "codex-edge-drift", rel(path),
-                         "generated edge differs; run render_runtime_edges.py --runtime codex --apply")
+                _add(findings, "ERROR", "runtime-edge-drift", rel(path),
+                         "generated edge differs; run render_runtime_edges.py --runtime all --apply")
             elif path.suffix == ".toml":
                 try:
                     adapter = tomllib.loads(current.decode("utf-8"))
@@ -441,7 +424,7 @@ def check_codex_edges(config: dict[str, Any]) -> list[Finding]:
                     row = registries["agents"]["agents"][path.stem]
                     if (adapter.get("name") != path.stem
                             or adapter.get("description") != str(row.get("description", ""))):
-                        _add(findings, "ERROR", "codex-edge-values", rel(path),
+                        _add(findings, "ERROR", "runtime-edge-values", rel(path),
                                  "parsed name/description differs from the registry")
     return findings
 
@@ -474,7 +457,7 @@ def check_agent_hooks(agent_dir: Path | None = None) -> list[Finding]:
     """Agent-frontmatter hooks (Claude Code only) name supported events and
     scripts that exist."""
     findings: list[Finding] = []
-    for path in sorted((agent_dir or ROOT / ".claude" / "agents").glob("*.md")):
+    for path in sorted((agent_dir or ROOT / "agents").glob("*.md")):
         match = FRONTMATTER_RE.match(_read(path))
         if not match:
             continue
@@ -512,37 +495,46 @@ def check_agent_hooks(agent_dir: Path | None = None) -> list[Finding]:
     return findings
 
 
-def check_commands(commands: dict[str, str], command_map: dict[str, Any]) -> list[Finding]:
+def check_skills(skills: dict[str, str], skill_map: dict[str, Any]) -> list[Finding]:
     findings: list[Finding] = []
-    for name, path in sorted(commands.items()):
-        entry = command_map.get(name)
+    for name, path in sorted(skills.items()):
+        entry = skill_map.get(name)
         if entry is None:
-            _add(findings, "ERROR", "commands-entry-missing", "harness/commands.toml",
-                     f"command `{name}` from `{path}` has no manifest entry")
+            _add(findings, "ERROR", "skills-entry-missing", "harness/skills.toml",
+                     f"skill `{name}` from `{path}` has no registry entry")
             continue
         source = entry["source"]
         if source != path:
-            _add(findings, "ERROR", "commands-source-drift", "harness/commands.toml",
-                     f"command `{name}` source `{source}` differs from discovered path `{path}`")
-        # Alias prompts reference their target's source, not their own shim.
-        if entry["status"] != "alias" and source not in entry["codex_prompt"]:
-            _add(findings, "WARN", "commands-prompt-source", "harness/commands.toml",
-                     f"command `{name}` Codex prompt does not mention `{source}`")
+            _add(findings, "ERROR", "skills-source-drift", "harness/skills.toml",
+                     f"skill `{name}` source `{source}` differs from discovered path `{path}`")
 
-    for name, entry in sorted(command_map.items()):
+    for name, entry in sorted(skill_map.items()):
         source = entry["source"]
-        if name not in commands:
-            _add(findings, "WARN", "commands-entry-extra", "harness/commands.toml",
-                     f"manifest command `{name}` has no tracked .claude command source")
+        if name not in skills:
+            _add(findings, "WARN", "skills-entry-extra", "harness/skills.toml",
+                     f"registry skill `{name}` has no canonical source")
         source_path = ROOT / source
         if not source_path.exists():
-            _add(findings, "ERROR", "commands-source-missing", "harness/commands.toml",
-                     f"command `{name}` source `{source}` does not exist")
-        if Path(source).stem != name:
-            _add(findings, "WARN", "commands-name-drift", "harness/commands.toml",
-                     f"manifest key `{name}` differs from source stem `{Path(source).stem}`")
+            _add(findings, "ERROR", "skills-source-missing", "harness/skills.toml",
+                     f"skill `{name}` source `{source}` does not exist")
+        if Path(source).parent.name != name:
+            _add(findings, "WARN", "skills-name-drift", "harness/skills.toml",
+                     f"registry key `{name}` differs from source directory `{Path(source).parent.name}`")
 
     return findings
+
+
+def check_component_taxonomy(
+    skills: dict[str, str],
+    agents: dict[str, dict[str, str]],
+    public_routines: dict[str, Any],
+    paths: dict[str, Any],
+) -> list[Finding]:
+    ov_raw = os.environ.get("OV")
+    return component_taxonomy.check(
+        ROOT, skills, agents, public_routines, paths,
+        vault=Path(ov_raw).expanduser().resolve() if ov_raw else None,
+    )
 
 
 def check_harness_readme() -> list[Finding]:
@@ -558,7 +550,7 @@ def check_harness_readme() -> list[Finding]:
         ]
     text = _read(path)
     findings: list[Finding] = []
-    for needle in ("commands.toml", "agents.toml", "models.toml", "capabilities.toml", "runtimes.toml", ".agents/skills"):
+    for needle in ("skills.toml", "agents.toml", "models.toml", "capabilities.toml", "runtimes.toml", "routines/registry.toml", ".agents/skills"):
         if needle not in text:
             _add(findings, "ERROR", "harness-readme-reference", rel(path), f"harness README must reference `{needle}`")
     return findings
@@ -629,10 +621,10 @@ def check_atelier_skill() -> list[Finding]:
 
     text = _read(path)
     for needle in (
-        "harness/commands.toml",
+        "harness/skills.toml",
         "harness/agents.toml",
         "harness/runtimes.toml",
-        ".claude/commands/",
+        "skills/",
         "protocols/runtime-adapters.md",
         "protocols/repo-conventions.md",
     ):
@@ -696,13 +688,15 @@ def check_path_registry_drift(reg: dict[str, Any]) -> list[Finding]:
         ROOT / "AGENTS.md",
         ROOT / "README.md",
         ROOT / "protocols",
-        ROOT / ".claude",
+        ROOT / "skills",
+        ROOT / "agents",
+        ROOT / "routines",
         ROOT / "harness",
         ROOT / "scripts",
         ROOT / "sources",
     ]
     # Scan `.md` (docs read by the model), `.toml` (description / comment
-    # fields in commands.toml, intents.toml, etc.), AND `.py` (script
+    # fields in skills.toml, intents.toml, etc.), AND `.py` (script
     # docstrings + comments). A stale `$OV/<seg>/` literal anywhere is the
     # same drift class — silent rename-breakage when the registry moves.
     # Scope via git (tracked + untracked-but-not-ignored), matching the
@@ -832,7 +826,7 @@ def check_intents_registry(
         for agent_name in entry.get("agents", []):
             if agent_name not in claude_agents:
                 _add(findings, "ERROR", "intents-agent-missing-claude", "harness/intents.toml",
-                     f"intent `{intent_name}` references agent `{agent_name}` not in .claude/agents/ (Claude Code dispatch will fail)")
+                     f"intent `{intent_name}` references agent `{agent_name}` without a canonical source")
             if agent_name not in harness_agents:
                 _add(findings, "ERROR", "intents-agent-missing-harness", "harness/intents.toml",
                      f"intent `{intent_name}` references agent `{agent_name}` not in harness/agents.toml (Codex parity broken)")
@@ -896,8 +890,8 @@ def check_autoevo_band_sync() -> list[Finding]:
             _add(findings, "ERROR", "autoevo-band-drift", rel(protocol_path),
                      f"§ Trust bands does not state `{needle}` as scripts/autoevo_run.py BAND_RULES defines it",)
     restating = (
-        ROOT / ".claude" / "commands" / "autoevo-nightly.md",
-        ROOT / ".claude" / "agents" / "forgetter.md",
+        ROOT / "routines" / "_adapters" / "autoevo" / "PROCEDURE.md",
+        ROOT / "agents" / "forgetter.md",
     )
     markers = (f"≥ {high['min_score']}", f">= {high['min_score']}", f"> {low['cold_days']}d", f"{low['cold_days']}d ago")
     for path in restating:
@@ -986,7 +980,7 @@ def check_intents_profile_reads(
 
 
 MAX_DOC_INDIRECTION_DEPTH = 4
-DOC_LINT_ROOTS = (".claude/", "protocols/", "harness/", "scripts/")
+DOC_LINT_ROOTS = ("skills/", "agents/", "routines/", "protocols/", "harness/", "scripts/")
 DOC_LINT_TOPS = ("AGENTS.md", "CLAUDE.md", "README.md")
 
 # Instruction-level cross-document references. We only count refs that LOOK
@@ -1087,12 +1081,12 @@ def check_doc_indirection_depth() -> list[Finding]:
     return findings
 
 
-def check_commands_intent_coverage(command_map: dict[str, Any], intents: dict[str, Any]) -> list[Finding]:
-    """Require public commands to be routed, aliased, or direct-only."""
+def check_skills_intent_coverage(skill_map: dict[str, Any], intents: dict[str, Any]) -> list[Finding]:
+    """Require public skills to be routed, aliased, or direct-only."""
     findings: list[Finding] = []
     routed_sources = {entry["procedure"] for entry in intents.values()}
 
-    for name, entry in sorted(command_map.items()):
+    for name, entry in sorted(skill_map.items()):
         if entry.get("status") == "alias":
             continue
         if entry.get("direct_only") is True:
@@ -1103,15 +1097,15 @@ def check_commands_intent_coverage(command_map: dict[str, Any], intents: dict[st
         source = str(entry.get("source", ""))
         if source and source in routed_sources:
             continue
-        _add(findings, "WARN", "commands-routing-undeclared", "harness/commands.toml",
-                 f"command `{name}` has no intent procedure and no `direct_only = true`")
+        _add(findings, "WARN", "skills-routing-undeclared", "harness/skills.toml",
+                 f"skill `{name}` has no intent procedure and no `direct_only = true`")
     return findings
 
 
 def check_decision_record_contract() -> list[Finding]:
     """Keep durable decisions on stable, topic-addressed paths."""
     contracts = {
-        ".claude/commands/decision.md": "<paths.gtd>/decisions/<slugified-topic>.md",
+        "skills/decision/SKILL.md": "<paths.gtd>/decisions/<slugified-topic>.md",
         "protocols/session-continuity.md": "<paths.gtd>/decisions/*.md",
     }
     forbidden = "<paths.reflections>/YYYY-MM-DD-decision-"
@@ -1128,8 +1122,8 @@ def check_workflow_contract_owners() -> list[Finding]:
     """Keep routing and migrated recovery rules in their existing owners."""
     contracts = {
         "protocols/orchestrator.md": ("`harness/intents.toml` selects the procedure",),
-        ".claude/commands/read.md": ("Start with one **Reader**, or one **Scholar**",),
-        ".claude/commands/sync.md": ("Snapshot the source", "protocols/agent-handoff.md"),
+        "skills/read/SKILL.md": ("Start with one **Reader**, or one **Scholar**",),
+        "skills/sync/SKILL.md": ("Snapshot the source", "protocols/agent-handoff.md"),
         "protocols/intent-capture.md": (
             "`/dine` Intent C", "Never infer trip association",
             "ask the user once for a default GTD filename",
@@ -1154,18 +1148,13 @@ def check_workflow_contract_owners() -> list[Finding]:
     return findings
 
 
-def check_command_frontmatter(commands: dict[str, str], command_map: dict[str, Any]) -> list[Finding]:
-    """Every `.claude/commands/*.md` carries `description:` frontmatter that
-    mirrors its `harness/commands.toml` entry.
+def check_skill_frontmatter(skills: dict[str, str], skill_map: dict[str, Any]) -> list[Finding]:
+    """Every canonical skill carries matching name and description frontmatter.
 
-    The Claude Code runtime reads the file frontmatter for the slash-command
-    list; Codex and intent dispatch read the registry. Without this check the
-    two surfaces drift independently (the original failure mode: no
-    frontmatter at all, so the runtime degraded descriptions to heading
-    text like `/dine — Purpose`).
+    The generated runtime edges derive their descriptions from the registry.
     """
     findings: list[Finding] = []
-    for name, path in sorted(commands.items()):
+    for name, path in sorted(skills.items()):
         fpath = ROOT / path
         try:
             lines = fpath.read_text(encoding="utf-8").splitlines()
@@ -1179,36 +1168,39 @@ def check_command_frontmatter(commands: dict[str, str], command_map: dict[str, A
                 if line.startswith("description:"):
                     desc = line[len("description:"):].strip()
         if desc is None:
-            _add(findings, "WARN", "command-frontmatter", path,
-                     "missing `description:` frontmatter — the runtime degrades "
-                    "the slash-command description to heading text")
+            _add(findings, "WARN", "skill-frontmatter", path,
+                     "missing `description:` frontmatter")
             continue
-        entry = command_map.get(name)
+        fields = parse_agent_frontmatter(fpath)
+        if fields.get("name") != name:
+            _add(findings, "ERROR", "skill-frontmatter-name", path,
+                     f"frontmatter name must be `{name}`")
+        entry = skill_map.get(name)
         if entry is not None:
             toml_desc = entry["description"].strip()
             if toml_desc and desc.strip("\"'") != toml_desc:
-                _add(findings, "WARN", "command-frontmatter-drift", path,
+                _add(findings, "WARN", "skill-frontmatter-drift", path,
                          f"frontmatter description differs from the "
-                        f"harness/commands.toml entry for `{name}` — "
+                        f"harness/skills.toml entry for `{name}` — "
                         "mirror the registry prose (or update both)")
     return findings
 
 
 def check_reader_scholar_sync() -> list[Finding]:
     """Scholar reuses Reader's behavior while keeping its own runtime identity."""
-    reader_path = ROOT / ".claude" / "agents" / "reader.md"
-    scholar_path = ROOT / ".claude" / "agents" / "scholar.md"
+    reader_path = ROOT / "agents" / "reader.md"
+    scholar_path = ROOT / "agents" / "scholar.md"
     try:
         reader = FRONTMATTER_RE.sub("", _read(reader_path), count=1)
         scholar = FRONTMATTER_RE.sub("", _read(scholar_path), count=1)
     except OSError as exc:
-        return [Finding("ERROR", "reader-scholar-sync", ".claude/agents/scholar.md",
+        return [Finding("ERROR", "reader-scholar-sync", "agents/scholar.md",
                         f"cannot read the shared reading contract: {exc}")]
     if (not reader.partition("## Shared reading contract")[2].strip()
-            or ".claude/agents/reader.md" not in scholar
+            or "agents/reader.md" not in scholar
             or "own frontmatter" not in scholar.lower()
             or re.search(r"(?m)^## (Reading Lenses|(?:Reading )?Workflow|How You Work|Output Format)\b", scholar)):
-        return [Finding("ERROR", "reader-scholar-sync", ".claude/agents/scholar.md",
+        return [Finding("ERROR", "reader-scholar-sync", "agents/scholar.md",
                         "Scholar must read Reader's shared behavior, preserve its own frontmatter, "
                         "and not duplicate the Reading Lenses, Workflow, or Output Format body")]
     return []
@@ -1393,25 +1385,24 @@ def source_footprint() -> tuple[dict, list[Finding]]:
 # Instruction budget, split by what the text serves. Harness plumbing competes
 # with knowledge work for the same reader attention, so they do not share a
 # pool: plumbing is capped at its measured size and may only shrink, while the
-# note-facing surface (autoevo, wiki schema, tiers, the agents and commands
+# note-facing surface (autoevo, wiki schema, tiers, the agents and skills
 # that act on $OV) carries the headroom. A file absent from PROSE_PLUMBING
 # counts as note-facing, so a new knowledge doc never lands in the frozen half
 # by accident.
-PROSE_BUDGET_ROOTS = ("protocols", ".claude/agents", ".claude/commands")
+PROSE_BUDGET_ROOTS = ("protocols", "agents", "skills", "routines/_adapters")
 PROSE_PLUMBING = frozenset({
     "protocols/agent-handoff.md", "protocols/atelier.md", "protocols/hi-menu.md",
     "protocols/intent-capture.md", "protocols/intent-coverage.md",
     "protocols/intent-forget.md", "protocols/intent-general.md",
     "protocols/intent-meeting.md", "protocols/orchestrator.md",
-    "protocols/private-features.md", "protocols/README.md",
+    "protocols/components.md", "protocols/README.md",
     "protocols/remote-routines.md", "protocols/repo-conventions.md",
     "protocols/runtime-adapters.md", "protocols/session-continuity.md",
     "protocols/session-log.md",
-    ".claude/agents/reviewer.md", ".claude/agents/precedent-judge.md",
-    ".claude/agents/privacy-reviewer.md",
-    ".claude/commands/hi.md", ".claude/commands/lint.md", ".claude/commands/push.md",
-    ".claude/commands/reflect.md", ".claude/commands/run-routine.md",
-    ".claude/commands/sync.md", ".claude/commands/triage.md",
+    "agents/reviewer.md", "agents/precedent-judge.md", "agents/privacy-reviewer.md",
+    "skills/hi/SKILL.md", "skills/lint/SKILL.md", "skills/push/SKILL.md",
+    "skills/reflect/SKILL.md", "routines/_adapters/archived-prompt/PROCEDURE.md",
+    "skills/sync/SKILL.md", "skills/triage/SKILL.md",
 })
 PROSE_PLUMBING_CEILING = 165_000   # frozen at the 2026-09-09 measurement, rounded up to the
                                    # next 1k; lower it after a cut, never raise it
@@ -1420,7 +1411,7 @@ PROSE_NOTES_ERROR = 420_000
 
 
 def check_prose_budget(roots: tuple[str, ...] | None = None) -> list[Finding]:
-    """protocols/ + .claude/agents/ grew 2.3x in four months unnoticed."""
+    """Bound the canonical workflow and role prose loaded by runtimes."""
     plumbing = notes = 0
     for root in (roots or PROSE_BUDGET_ROOTS):
         base = ROOT / root
@@ -1451,9 +1442,9 @@ def check_prose_budget(roots: tuple[str, ...] | None = None) -> list[Finding]:
 # subtracting elsewhere on the same hot path.
 HOT_PATH_CEILINGS = {
     "protocols/wiki-schema.md": 25600,
-    ".claude/commands/autoevo-nightly.md": 24576,
-    ".claude/agents/forgetter.md": 15360,
-    ".claude/agents/curator.md": 20480,
+    "routines/_adapters/autoevo/PROCEDURE.md": 24576,
+    "agents/forgetter.md": 15360,
+    "agents/curator.md": 20480,
 }
 
 
@@ -1480,7 +1471,7 @@ def check_bot_trailer_banned(roots: list[str] | None = None) -> list[Finding]:
     template reintroducing the trailer would attribute bot ops to the user;
     scripts/autoevo_commit.py is the sole committer."""
     findings: list[Finding] = []
-    for root in roots or (".claude/commands", ".claude/agents", "protocols"):
+    for root in roots or ("skills", "agents", "routines/_adapters", "protocols"):
         base = ROOT / root
         if not base.is_dir():
             continue
@@ -1541,29 +1532,32 @@ def run_lints() -> list[Finding]:
         return sorted(findings, key=lambda f: (SEVERITY_ORDER.get(f.severity, 99), f.code, f.where, f.message))
     model_registry = config["harness/models.toml"]["models"]
     agent_registry = config["harness/agents.toml"]["agents"]
-    command_registry = config["harness/commands.toml"]["commands"]
+    skill_registry = config["harness/skills.toml"]["skills"]
     intents = config["harness/intents.toml"]["intents"]
     findings.extend(check_root_files())
-    agents, agent_findings = load_claude_agents()
+    agents, agent_findings = load_canonical_agents()
     findings.extend(agent_findings)
-    commands, command_findings = load_claude_commands()
-    findings.extend(command_findings)
+    skills, skill_findings = load_canonical_skills()
+    findings.extend(skill_findings)
     model_findings, models = check_models(agents, model_registry, agent_registry)
     findings.extend(model_findings)
     findings.extend(check_runtime_registry(config["harness/runtimes.toml"]))
     findings.extend(check_agent_registry(agents, models, agent_registry))
-    findings.extend(check_codex_edges(config))
+    findings.extend(check_runtime_edges(config))
     findings.extend(check_hooks(config[".codex/hooks.json"], "codex"))
     findings.extend(check_hooks(config[".claude/settings.json"], "claude"))
     findings.extend(check_agent_hooks())
-    findings.extend(check_commands(commands, command_registry))
-    findings.extend(check_command_frontmatter(commands, command_registry))
+    findings.extend(check_skills(skills, skill_registry))
+    findings.extend(check_skill_frontmatter(skills, skill_registry))
+    findings.extend(check_component_taxonomy(
+        skills, agents, config["routines/registry.toml"], config["harness/paths.toml"]["paths"]
+    ))
     findings.extend(check_reader_scholar_sync())
     findings.extend(check_harness_readme())
     findings.extend(check_atelier_skill())
     findings.extend(check_scripts_zk_paths())
     findings.extend(check_path_registry_drift(config["harness/paths.toml"]["paths"]))
-    findings.extend(check_commands_intent_coverage(command_registry, intents))
+    findings.extend(check_skills_intent_coverage(skill_registry, intents))
     findings.extend(check_decision_record_contract())
     findings.extend(check_workflow_contract_owners())
     findings.extend(check_intents_registry(intents, agents, agent_registry))

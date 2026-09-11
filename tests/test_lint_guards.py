@@ -6,6 +6,7 @@ import copy
 import contextlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -21,11 +22,12 @@ import harness_lint as h  # noqa: E402
 PUBLIC_CONFIG_PATHS = (
     "harness/models.toml",
     "harness/agents.toml",
-    "harness/commands.toml",
+    "harness/skills.toml",
     "harness/capabilities.toml",
     "harness/runtimes.toml",
     "harness/intents.toml",
     "harness/paths.toml",
+    "routines/registry.toml",
     ".codex/hooks.json",
     ".claude/settings.json",
 )
@@ -89,16 +91,17 @@ class RegistrySchemaGuardTest(unittest.TestCase):
         with patch.object(h, "ROOT", self.root):
             return h.validate_harness_config(data)
 
-    def test_all_nine_documents_are_clean_and_each_schema_branch_rejects_bad_data(self) -> None:
+    def test_all_ten_documents_are_clean_and_each_schema_branch_rejects_bad_data(self) -> None:
         data, findings = self.load()
         self.assertEqual(findings, [])
         self.assertEqual(set(data), set(PUBLIC_CONFIG_PATHS))
 
         model = next(iter(data["harness/models.toml"]["models"]))
         agent = next(iter(data["harness/agents.toml"]["agents"]))
-        command = next(iter(data["harness/commands.toml"]["commands"]))
+        skill = next(iter(data["harness/skills.toml"]["skills"]))
         capability = next(iter(data["harness/capabilities.toml"]["capabilities"]))
         intent = next(iter(data["harness/intents.toml"]["intents"]))
+        routine = data["routines/registry.toml"]["routine"][0]
         path_name = next(
             name for name, value in data["harness/paths.toml"]["paths"].items()
             if isinstance(value, str)
@@ -109,13 +112,15 @@ class RegistrySchemaGuardTest(unittest.TestCase):
         faults = (
             ("harness/models.toml", ("models", model, "reasoning_tier"), 7),
             ("harness/agents.toml", ("agents", agent, "source"), 7),
-            ("harness/commands.toml", ("commands", command, "source"), 7),
+            ("harness/skills.toml", ("skills", skill, "source"), 7),
             ("harness/capabilities.toml", ("capabilities", capability, "codex"), []),
             ("harness/runtimes.toml", ("runtime", "default"), "claude"),
             ("harness/intents.toml", ("intents", intent, "context_budget_tokens"), 0),
             ("harness/intents.toml", ("intents", intent, "context_budget_tokens"), 16385),
             ("harness/intents.toml", ("intents", intent, "context_budget_bytes"), 8192),
             ("harness/paths.toml", ("paths", path_name), 7),
+            ("routines/registry.toml", ("routine", 0, "runner"), "model"),
+            ("routines/registry.toml", ("routine", 0, "name"), routine["name"] + "_bad"),
             (".codex/hooks.json", ("hooks",), []),
             (".claude/settings.json", ("hooks",), []),
             ("harness/models.toml", ("models", model, "reasoning_tier"), temporal["date"]),
@@ -123,7 +128,7 @@ class RegistrySchemaGuardTest(unittest.TestCase):
             ("harness/intents.toml", ("intents", intent, "procedure"), temporal["datetime"]),
         )
         for name, keys, value in faults:
-            with self.subTest(name=name, field=".".join(keys)):
+            with self.subTest(name=name, field=".".join(map(str, keys))):
                 broken = copy.deepcopy(data)
                 cursor = broken[name]
                 for key in keys[:-1]:
@@ -243,8 +248,45 @@ class HarnessLintCliContractTest(unittest.TestCase):
     def test_schema_failure_gates_domain_checks(self) -> None:
         failure = h.Finding("ERROR", "registry-schema", "harness/models.toml:$", "bad")
         with patch.object(h, "load_harness_config", return_value=({}, [failure])), \
-             patch.object(h, "load_claude_agents", side_effect=AssertionError("domain checks ran")):
+             patch.object(h, "load_canonical_agents", side_effect=AssertionError("domain checks ran")):
             self.assertEqual(h.run_lints(), [failure])
+
+
+class ComponentTaxonomyGuardTest(unittest.TestCase):
+    def test_public_and_private_kinds_are_rooted_and_legacy_fields_fail(self) -> None:
+        with _lint_root() as root, tempfile.TemporaryDirectory(prefix="atelier-components-") as tmp:
+            vault = Path(tmp)
+            _write(root, "skills/sample/SKILL.md", "---\nname: sample\n---\n")
+            _write(root, "agents/sample.md", "---\nname: sample\n---\n")
+            private_skill = vault / "_tools/skills/private-sample"
+            private_skill.mkdir(parents=True)
+            (private_skill / "SKILL.md").write_text("---\nname: private-sample\n---\n")
+            (vault / "_tools/agents").mkdir(parents=True)
+            private_routines = vault / "_tools/routines"
+            private_routines.mkdir(parents=True)
+            registry = private_routines / "registry.toml"
+            registry.write_text(
+                'version = 1\n[[routine]]\nname = "sample"\nrunner = "model"\n', encoding="utf-8"
+            )
+            private_tool = vault / "_tools/tools/sample"
+            private_tool.mkdir(parents=True)
+            (private_tool / "README.md").write_text("tool\n", encoding="utf-8")
+            arguments = (
+                {"sample": "skills/sample/SKILL.md"},
+                {"sample": {"path": "agents/sample.md"}},
+                {"routine": [{"name": "public-sample"}]},
+                {f"private_{kind}": f"_tools/{kind}" for kind in ("skills", "agents", "routines", "tools")},
+            )
+            with patch.dict(os.environ, {"OV": str(vault)}):
+                self.assertEqual(h.check_component_taxonomy(*arguments), [])
+                _write(root, "skills/unregistered/SKILL.md", "---\nname: unregistered\n---\n")
+                self.assertIn("component-skill-unregistered", [f.code for f in h.check_component_taxonomy(*arguments)])
+                (root / "skills/unregistered/SKILL.md").unlink()
+                registry.write_text(
+                    'version = 1\n[[routine]]\nname = "sample"\nrunner = "model"\nkind = "model"\n',
+                    encoding="utf-8",
+                )
+                self.assertIn("component-private-routine-legacy", [f.code for f in h.check_component_taxonomy(*arguments)])
 
 
 class FlatTierGlobGuardTest(unittest.TestCase):
@@ -310,11 +352,11 @@ class IntentAgentsInProcedureGuardTest(unittest.TestCase):
 class DecisionRecordPathGuardTest(unittest.TestCase):
     def test_dated_reflection_output_is_rejected(self) -> None:
         with _lint_root() as root:
-            _write(root, ".claude/commands/decision.md",
+            _write(root, "skills/decision/SKILL.md",
                    "<paths.reflections>/YYYY-MM-DD-decision-<slugified-topic>.md\n")
             _write(root, "protocols/session-continuity.md", "<paths.gtd>/decisions/*.md\n")
             findings = h.check_decision_record_contract()
-        self.assertIn(("decision-record-path", ".claude/commands/decision.md"),
+        self.assertIn(("decision-record-path", "skills/decision/SKILL.md"),
                       [(f.code, f.where) for f in findings])
 
 
@@ -433,10 +475,8 @@ class SourceBudgetGuardTest(unittest.TestCase):
 
 
 class ProseBudgetGuardTest(unittest.TestCase):
-    def test_command_procedures_are_inside_the_budget(self) -> None:
-        """`.claude/commands/` is the largest routed prose surface and sat
-        outside every aggregate budget until 2026-09."""
-        self.assertIn(".claude/commands", h.PROSE_BUDGET_ROOTS)
+    def test_canonical_skill_procedures_are_inside_the_budget(self) -> None:
+        self.assertIn("skills", h.PROSE_BUDGET_ROOTS)
 
     def test_a_new_doc_counts_as_note_facing_not_plumbing(self) -> None:
         """The frozen half is an explicit list, so an unlisted file must land
@@ -493,9 +533,9 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
         from intent_coverage import catalog_rows
         import context_bundle as cb
 
-        agents, intents, commands, models = (
+        agents, intents, skills, models = (
             tomllib.loads((REPO_ROOT / 'harness' / f'{name}.toml').read_text())
-            for name in ('agents', 'intents', 'commands', 'models')
+            for name in ('agents', 'intents', 'skills', 'models')
         )
         metadata = {'pattern': 'obsolete', 'used_by': ['obsolete'], 'kinds': ['obsolete'],
                     'dispatch_rationale': ['obsolete']}
@@ -511,16 +551,16 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
 
         self.assertTrue(all(not set(row).intersection(metadata) for row in agents['agents'].values()))
         self.assertTrue(all('pattern' not in row for row in intents['intents'].values()))
-        self.assertEqual(render_codex(agents, commands, models), render_codex(annotated_agents, commands, models))
+        self.assertEqual(render_codex(agents, skills, models), render_codex(annotated_agents, skills, models))
         self.assertEqual(catalog_rows(intents['intents']), catalog_rows(annotated_intents['intents']))
         self.assertEqual(routes(intents['intents']), routes(annotated_intents['intents']))
 
     def test_metadata_is_optional_but_live_registry_errors_still_fail(self) -> None:
         with _lint_root() as root:
-            source = '.claude/agents/sample.md'
+            source = 'agents/sample.md'
             _write(root, source, 'Sample role.')
-            row = {'source': source, 'voices': {'native': 'known'}, 'status': 'portable-adapted',
-                   'description': 'Sample role.', 'codex_prompt': source}
+            row = {'source': source, 'voices': {'native': 'known'}, 'status': 'canonical',
+                   'description': 'Sample role.'}
 
             def check_agent(entry):
                 return [f.code for f in h.check_agent_registry(
@@ -540,8 +580,8 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
 
 class WorkflowContractOwnerGuardTest(unittest.TestCase):
     def test_retired_router_and_missing_migrated_boundaries_fail(self) -> None:
-        paths = ('protocols/orchestrator.md', '.claude/commands/read.md',
-                 '.claude/commands/sync.md', 'protocols/intent-capture.md')
+        paths = ('protocols/orchestrator.md', 'skills/read/SKILL.md',
+                 'skills/sync/SKILL.md', 'protocols/intent-capture.md')
 
         def assert_broken():
             self.assertEqual([f.code for f in h.check_workflow_contract_owners()], ['workflow-contract-owner'])
@@ -556,8 +596,8 @@ class WorkflowContractOwnerGuardTest(unittest.TestCase):
             retired.unlink()
             mutations = (
                 ('protocols/orchestrator.md', '`harness/intents.toml` selects the procedure'),
-                ('.claude/commands/read.md', 'Start with one **Reader**, or one **Scholar**'),
-                ('.claude/commands/sync.md', 'protocols/agent-handoff.md'),
+                ('skills/read/SKILL.md', 'Start with one **Reader**, or one **Scholar**'),
+                ('skills/sync/SKILL.md', 'protocols/agent-handoff.md'),
                 ('protocols/intent-capture.md', '`/dine` Intent C'),
                 ('protocols/intent-capture.md', 'ask the user once for a default GTD filename'),
                 ('protocols/intent-capture.md', 'Do not pass an empty `target_file`'),
@@ -579,13 +619,13 @@ class WorkflowContractOwnerGuardTest(unittest.TestCase):
 class SharedReadingContractGuardTest(unittest.TestCase):
     def test_missing_shared_source_or_reintroduced_duplicate_body_fails(self) -> None:
         body = '## Shared reading contract\n## Reading Lenses\nOne shared body.\n## How You Work\nRead.\n## Output Format\nBrief.\n'
-        adapter = "Read `.claude/agents/reader.md`; preserve this role's own frontmatter.\n"
+        adapter = "Read `agents/reader.md`; preserve this role's own frontmatter.\n"
         with _lint_root() as root:
-            reader = _write(root, '.claude/agents/reader.md', '---\nname: reader\n---\n' + body)
+            reader = _write(root, 'agents/reader.md', '---\nname: reader\n---\n' + body)
             for name, value in (('clean', adapter), ('missing_pointer', 'Preserve own frontmatter.'),
-                                ('missing_identity', 'Read .claude/agents/reader.md.'), ('duplicate', adapter + body)):
+                                ('missing_identity', 'Read agents/reader.md.'), ('duplicate', adapter + body)):
                 with self.subTest(case=name):
-                    scholar = _write(root, '.claude/agents/scholar.md', '---\nname: scholar\n---\n' + value)
+                    scholar = _write(root, 'agents/scholar.md', '---\nname: scholar\n---\n' + value)
                     expected = [] if name == 'clean' else ['reader-scholar-sync']
                     self.assertEqual([f.code for f in h.check_reader_scholar_sync()], expected)
             scholar.write_text(adapter)

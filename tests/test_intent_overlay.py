@@ -85,7 +85,7 @@ class IntentOverlayTest(unittest.TestCase):
             )
             self.assertTrue(out["rows"]["gizmo"]["private"])
             self.assertEqual(out["rows"]["gizmo"]["procedure"], str(proc))
-            self.assertEqual(out["rows"]["gizmo"]["mode"], "private-feature")
+            self.assertEqual(out["rows"]["gizmo"]["mode"], "private")
             self.assertEqual(out["rows"]["gizmo"]["profile_reads"], [])
             self.assertIsNone(out["rows"]["ghost"])
             self.assertIsNone(out["rows"]["broken"])

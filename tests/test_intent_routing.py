@@ -53,7 +53,7 @@ class IntentCatalogTest(unittest.TestCase):
                 self.assertFalse(row["parallel"])
 
     def test_reading_backup_preserves_separate_external_authority(self) -> None:
-        text = (REPO_ROOT / ".claude/commands/read.md").read_text()
+        text = (REPO_ROOT / "skills/read/SKILL.md").read_text()
         backup = text.split("## Backup to Readwise", 1)[1].split("## Initial-analysis", 1)[0]
         self.assertIn("Approval to save the local reflection does not authorize this external write", backup)
         self.assertIn("The user has not explicitly authorized this Readwise backup", backup)
@@ -68,7 +68,7 @@ class IntentCatalogTest(unittest.TestCase):
                          "remaining_work", "gaps"} <= fields)
 
     def test_dashboard_framework_is_private_configuration(self) -> None:
-        text = (REPO_ROOT / ".claude/commands/civ.md").read_text()
+        text = (REPO_ROOT / "skills/civ/SKILL.md").read_text()
         self.assertIn("## Private Framework", text)
         self.assertIn("private source referenced by", text)
         self.assertIn("Missing configuration remains\nunknown", text)

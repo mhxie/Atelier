@@ -9,7 +9,7 @@ The system's narrative register draws from the impressionist atelier (master + s
 | system / repo | **the Atelier** | `atelier/` |
 | user | **the Painter** | (you) |
 | vault root | **the œuvre** | `$OV/` |
-| agents collectively | **le cercle** | `.claude/agents/` |
+| agents collectively | **le cercle** | `agents/` |
 | daily reflection | **impression** | `<paths.daily_notes>/YYYY/MM/YYYY-MM-DD.md` |
 | weekly review | **étude** | `<paths.reflections>/*-weekly.md` |
 | wiki entry (L4) | **tableau** | `<paths.wiki>/<Title>.md` |

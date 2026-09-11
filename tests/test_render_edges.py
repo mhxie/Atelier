@@ -17,6 +17,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 import harness_lint as lint  # noqa: E402
 import render_runtime_edges as edges  # noqa: E402
@@ -32,19 +34,19 @@ class RenderCheckTest(unittest.TestCase):
             patched.start()
             self.addCleanup(patched.stop)
         self.agents = {"agents": {name: {
-            "source": f".claude/agents/{name}.md", "voices": {"native": "sample"},
-            "description": f"{name} role.", "status": "portable-adapted",
+            "source": f"agents/{name}.md", "voices": {"native": "sample"},
+            "description": f"{name} role.", "status": "canonical",
         } for name in ("sample", "forgetter")}}
         self.agents["agents"]["external"] = {
             "source": "scripts/sample_leg.sh", "status": "script-driven",
             "voices": {"direct": "sample"}, "description": "External review.",
         }
-        self.commands = {"commands": {name: {
-            "source": f".claude/commands/{name}.md", "description": f"{name} command.",
-            "user_facing": name == "sample",
-        } for name in ("sample", "hidden", "atelier")}}
+        self.skills = {"skills": {"sample": {
+            "source": "skills/sample/SKILL.md", "description": "sample skill.",
+            "status": "canonical",
+        }}}
         self.models = {"models": {"sample": {"reasoning_tier": "xdeep"}}}
-        for name, document in (("agents", self.agents), ("commands", self.commands)):
+        for name, document in (("agents", self.agents), ("skills", self.skills)):
             lines = []
             for key, row in document[name].items():
                 lines.append(f"[{name}.{key}]")
@@ -55,6 +57,12 @@ class RenderCheckTest(unittest.TestCase):
                     lines.append(f"{field} = {rendered}")
             self.write(f"harness/{name}.toml", "\n".join(lines))
         self.write("harness/models.toml", '[models.sample]\nreasoning_tier = "xdeep"\n')
+        for name in ("sample", "forgetter"):
+            self.write(f"agents/{name}.md", (
+                f"---\nname: {name}\ndescription: {name} role.\ntools: Read\nmodel: sample\n---\n\n"
+                + ("---forgetter-result---\n---end-result---\n" if name == "forgetter" else "Role body.\n")
+            ))
+        self.write("skills/sample/SKILL.md", "---\nname: sample\ndescription: sample skill.\n---\n\nWorkflow.\n")
 
     def write(self, path: str | Path, text: str) -> Path:
         target = self.root / path
@@ -63,12 +71,12 @@ class RenderCheckTest(unittest.TestCase):
         return target
 
     def rendered(self) -> dict[Path, str]:
-        return edges.render_codex(self.agents, self.commands, self.models)
+        return edges.render_all(self.agents, self.skills, self.models)
 
     def findings(self) -> list[lint.Finding]:
-        return lint.check_codex_edges({
+        return lint.check_runtime_edges({
             "harness/agents.toml": self.agents,
-            "harness/commands.toml": self.commands,
+            "harness/skills.toml": self.skills,
             "harness/models.toml": self.models,
         })
 
@@ -76,6 +84,8 @@ class RenderCheckTest(unittest.TestCase):
         expected = {self.root / path for path in (
             ".codex/agents/sample.toml", ".codex/agents/forgetter.toml",
             ".agents/skills/sample/SKILL.md", ".agents/skills/sample/agents/openai.yaml",
+            ".claude/agents/sample.md", ".claude/agents/forgetter.md",
+            ".claude/commands/sample.md",
         )}
         self.assertEqual(set(files), expected)  # no script-driven/bot-only/handwritten edges
         for name in ("sample", "forgetter"):
@@ -84,7 +94,7 @@ class RenderCheckTest(unittest.TestCase):
             self.assertEqual(adapter["description"], f"{name} role.")
             self.assertEqual(adapter["model_reasoning_effort"], effort)
             self.assertNotIn("model", adapter)  # inherit the selected native model
-            for needle in ("AGENTS.md", "CLAUDE.md", f".claude/agents/{name}.md",
+            for needle in ("AGENTS.md", "CLAUDE.md", f"agents/{name}.md",
                            "role's write boundary", "never take orchestrator-owned write, approval, or commit actions"):
                 self.assertIn(needle, adapter["developer_instructions"])
         forgetter = files[self.root / ".codex/agents/forgetter.toml"]
@@ -93,7 +103,7 @@ class RenderCheckTest(unittest.TestCase):
         self.assertNotIn("---begin-result---", forgetter)
         skill = files[self.root / ".agents/skills/sample/SKILL.md"]
         for needle in ("name: sample", "$sample", "AGENTS.md", "CLAUDE.md",
-                       ".claude/commands/sample.md", "Do not start a nested Codex process"):
+                       "skills/sample/SKILL.md", "Do not start a nested Codex process"):
             self.assertIn(needle, skill)
         for retired in ("scripts/atelier.py", "scripts/intent_coverage.py"):
             self.assertNotIn(retired, skill)
@@ -109,6 +119,17 @@ class RenderCheckTest(unittest.TestCase):
                 self.models["models"]["sample"]["reasoning_tier"] = tier
                 self.assert_template_contract(self.rendered(), effort)
 
+    def test_skill_descriptions_roundtrip_yaml(self) -> None:
+        for description in ('Daily digest: JSON collection.', 'A "quoted" path: C:\\tools',
+                            'first line\nsecond line', 'true', '中文说明'):
+            with self.subTest(description=description):
+                self.skills["skills"]["sample"]["description"] = description
+                files = self.rendered()
+                for relative in (".claude/commands/sample.md", ".agents/skills/sample/SKILL.md"):
+                    parsed = yaml.safe_load(files[self.root / relative].split("---\n", 2)[1])
+                    self.assertIsInstance(parsed["description"], str)
+                    self.assertTrue(parsed["description"].endswith(description))
+
     def test_missing_drifted_unreadable_and_unexpected_edges_fail(self) -> None:
         files = self.rendered()
         for path, text in files.items():
@@ -118,23 +139,24 @@ class RenderCheckTest(unittest.TestCase):
         for path, text in files.items():
             with self.subTest(path=path):
                 path.unlink()
-                self.assertEqual([f.code for f in self.findings()], ["codex-edge-missing"])
+                self.assertEqual([f.code for f in self.findings()], ["runtime-edge-missing"])
                 with contextlib.redirect_stdout(io.StringIO()):
-                    self.assertEqual(edges.main(["--runtime", "codex", "--check"]), 1)
+                    self.assertEqual(edges.main(["--runtime", "all", "--check"]), 1)
                 self.write(path, "invalid or hand-edited\n")
-                self.assertEqual([f.code for f in self.findings()], ["codex-edge-drift"])
+                self.assertEqual([f.code for f in self.findings()], ["runtime-edge-drift"])
                 self.write(path, text)
         for path in (".codex/agents/obsolete.toml", ".agents/skills/obsolete/SKILL.md",
-                     ".agents/skills/orphan/agents/openai.yaml"):
+                     ".agents/skills/orphan/agents/openai.yaml", ".claude/commands/obsolete.md",
+                     ".claude/agents/obsolete.md"):
             extra = self.write(path, "unregistered")
-            self.assertEqual([f.code for f in self.findings()], ["codex-edge-unregistered"])
+            self.assertEqual([f.code for f in self.findings()], ["runtime-edge-unregistered"])
             extra.unlink()
         with patch.object(Path, "read_bytes", side_effect=PermissionError("unreadable")):
-            self.assertEqual({f.code for f in self.findings()}, {"codex-edge-read"})
+            self.assertEqual({f.code for f in self.findings()}, {"runtime-edge-read"})
 
     def test_reasoning_tier_errors_remain_independent_of_renderer(self) -> None:
         self.models["models"]["sample"]["reasoning_tier"] = "invalid"
-        self.assertEqual([f.code for f in self.findings()], ["codex-edge-render"])
+        self.assertEqual([f.code for f in self.findings()], ["runtime-edge-render"])
         findings, _ = lint.check_models(
             {},
             self.models["models"],
@@ -145,7 +167,7 @@ class RenderCheckTest(unittest.TestCase):
     def test_self_consistent_generated_native_toml_must_roundtrip(self) -> None:
         path = self.root / "harness/agents.toml"
         original = path.read_text()
-        for description, code in ((r"Role \q", "invalid-toml"), (r"Role \tools", "codex-edge-values")):
+        for description, code in ((r"Role \q", "invalid-toml"), (r"Role \tools", "runtime-edge-values")):
             with self.subTest(description=description):
                 self.write(path, original.replace('description = "sample role."',
                                                    f"description = '{description}'"))
@@ -155,22 +177,21 @@ class RenderCheckTest(unittest.TestCase):
                 self.assertEqual([(f.code, f.where) for f in self.findings()],
                                  [(code, ".codex/agents/sample.toml")])
 
-    def test_user_facing_command_cannot_claim_handwritten_skill(self) -> None:
-        self.commands["commands"]["atelier"]["user_facing"] = True
-        self.assert_template_contract(self.rendered())  # rendering never overwrites handwritten skills
-        with patch.object(edges, "render_codex", side_effect=AssertionError("rendered reserved command")):
-            self.assertEqual([f.code for f in self.findings()], ["codex-command-reserved"])
+    def test_registry_cannot_claim_handwritten_skill(self) -> None:
+        self.skills["skills"]["atelier"] = {
+            "source": "skills/atelier/SKILL.md", "description": "reserved", "status": "canonical"
+        }
+        self.assertEqual([f.code for f in self.findings()], ["skill-reserved"])
 
     def test_committed_codex_edge_is_render_clean(self) -> None:
         result = subprocess.run(
-            [sys.executable, "scripts/render_runtime_edges.py", "--runtime", "codex", "--check"],
+            [sys.executable, "scripts/render_runtime_edges.py", "--runtime", "all", "--check"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("byte-for-byte", result.stdout)
-        commands = tomllib.loads((REPO_ROOT / "harness/commands.toml").read_text())["commands"]
-        self.assertGreaterEqual(sum(row.get("user_facing", True) is not False
-                                    for row in commands.values()), 10)
+        skills = tomllib.loads((REPO_ROOT / "harness/skills.toml").read_text())["skills"]
+        self.assertGreaterEqual(len(skills), 10)
 
 
 if __name__ == "__main__":

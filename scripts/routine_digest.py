@@ -1,6 +1,6 @@
 """Collect routine outputs as JSON, then write, check, mail, or acknowledge a digest.
 
-Workflow and setup: `.claude/commands/digest.md`. Shared persistence and delivery
+Workflow and setup: `skills/digest/SKILL.md`. Shared persistence and delivery
 rules: `protocols/remote-routines.md`. See `--help` for subcommands and flags.
 
 Daily collection covers the effective day plus undelivered files from yesterday;
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         "--routine",
         help=(
             "Routine whose output_dir receives the artifact. Defaults to the one "
-            "routine_watch.toml row carrying digest = { include = false }."
+            "private routine row carrying digest = { include = false }."
         ),
     )
     p_write.add_argument("--out", help="Explicit destination, overriding --routine.")

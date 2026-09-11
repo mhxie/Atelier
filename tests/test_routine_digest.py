@@ -140,6 +140,8 @@ def _restore_vault(previous: str | None) -> None:
 
 
 WATCH_TOML = """
+version = 1
+
 [coordination]
 backend = "owner"
 
@@ -261,7 +263,8 @@ UPDATE_LEDGER = """# Status Tracker
 def build_vault(root: Path) -> Path:
     vault = root / "vault"
     (vault / "_meta").mkdir(parents=True)
-    (vault / "_meta" / "routine_watch.toml").write_text(WATCH_TOML, encoding="utf-8")
+    (vault / "_tools/routines").mkdir(parents=True)
+    (vault / "_tools/routines/registry.toml").write_text(WATCH_TOML, encoding="utf-8")
     (vault / "_meta" / "digest_updates.toml").write_text(UPDATE_CONFIG, encoding="utf-8")
 
     (vault / "personal").mkdir(parents=True)
@@ -534,7 +537,7 @@ class CollectTests(VaultCase):
                 self.assertEqual("maintenance output" in manifest["skipped_routines"], not included)
 
     def test_declared_digest_overrides(self):
-        watch = self.vault / "_meta" / "routine_watch.toml"
+        watch = self.vault / "_tools/routines/registry.toml"
         cases = (
             ("lane override", '*-feed.md', 'digest = { lane = "Research" }', "Research", True, None),
             ("declared exclusion", 'role_scan_*.md', "digest = { include = false }", "Career", False, "role scan"),
@@ -886,7 +889,7 @@ class CollectTests(VaultCase):
 
 class ContextSourceTests(VaultCase):
     def _declare(self, extra: str = '') -> None:
-        watch = self.vault / "_meta/routine_watch.toml"
+        watch = self.vault / "_tools/routines/registry.toml"
         watch.write_text(WATCH_TOML + '\n[[routine]]\nname = "sweep"\nlabel = "Lab sweep"\n'
                          'output_dir = "research/sweeps"\nfile_pattern = "*.md"\n'
                          'digest = { context = "frontier_labs", lane = "Research" }\n' + extra,
@@ -988,7 +991,7 @@ class ContextSourceTests(VaultCase):
         self.assertTrue(any("outside vault" in warning for warning in warnings))
 
     def test_context_declarations_validate_keys_uniqueness_and_count(self):
-        watch = self.vault / "_meta/routine_watch.toml"
+        watch = self.vault / "_tools/routines/registry.toml"
         for value in ('"../escape"', '""', '"UPPER"', '7'):
             watch.write_text(WATCH_TOML.replace('file_pattern = "*-feed.md"',
                 'file_pattern = "*-feed.md"\ndigest = { context = ' + value + ' }'), encoding="utf-8")
@@ -1463,7 +1466,7 @@ class WriteTests(VaultCase):
                 self.assertEqual(written.read_text(encoding="utf-8"), html)
 
     def test_writer_refusals(self):
-        registry = self.vault / "_meta" / "routine_watch.toml"
+        registry = self.vault / "_tools/routines/registry.toml"
         original = registry.read_text(encoding="utf-8")
         cases = (
             ("self ingestion", original, "feed-digest", ("not excluded",)),
@@ -1626,7 +1629,7 @@ class CliTests(VaultCase):
                 self.assertIn("usage:", proc.stderr)
 
     def test_missing_registry_fails_loudly(self):
-        (self.vault / "_meta" / "routine_watch.toml").unlink()
+        (self.vault / "_tools/routines/registry.toml").unlink()
         proc = self._run("collect", "--json")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("routine registry missing", proc.stderr)
@@ -2133,7 +2136,7 @@ class SharedDirectoryTests(VaultCase):
 
     def setUp(self):
         super().setUp()
-        registry = self.vault / "_meta" / "routine_watch.toml"
+        registry = self.vault / "_tools/routines/registry.toml"
         registry.write_text(
             registry.read_text(encoding="utf-8")
             + '\n[[routine]]\nname = "extra-scan"\nlabel = "extra scan"\n'

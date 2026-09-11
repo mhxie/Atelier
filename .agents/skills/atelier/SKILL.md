@@ -1,12 +1,12 @@
 ---
 name: atelier
-description: Run or modify Atelier workflows, commands, agents, intent routing, and harness portability in this repo. Use for broad Atelier harness work or to adapt Claude commands such as `/hi` to native Codex skills such as `$hi`.
+description: Run or modify Atelier skills, routines, agents, tools, intent routing, and harness portability in this repo. Use for broad Atelier harness work or to adapt Claude `/hi` to native Codex `$hi`.
 ---
 
 ## Atelier
 
-Use this skill when the user asks to run or modify Atelier workflows, commands,
-agents, or harness portability. It is the one hand-written Codex edge file; it
+Use this skill when the user asks to run or modify Atelier workflows,
+components, or harness portability. It is the one hand-written Codex edge file; it
 points at the canonical sources and adds only what is Codex-native.
 
 ## Quick Start
@@ -16,9 +16,9 @@ points at the canonical sources and adds only what is Codex-native.
    here; they are the source.
 2. Read `protocols/runtime-adapters.md` only when changing or debugging
    cross-runtime behavior.
-3. Invoke known commands through their explicit repo skills (`$hi`, `$weekly`,
+3. Invoke known workflows through their explicit repo skills (`$hi`, `$weekly`,
    `$review`, `$triage`, `$lint`, and so on). Each reads the matching
-   `.claude/commands/<command>.md` source and runs it in the current thread.
+   `skills/<name>/SKILL.md` source and runs it in the current thread.
    For `$hi`, classify the request against `scripts/intent_coverage.py
    catalog` and read only the selected row's `procedure`. No fit is a
    semantic handoff through `intents.general`, never implicit reflection.
@@ -27,7 +27,7 @@ points at the canonical sources and adds only what is Codex-native.
 5. Discover native roles under `.codex/agents/` and inspect them with `/agent`.
    `Agent(...)` in a command means dispatch the matching project agent; if
    dispatch is unavailable, run the role sequentially from
-   `.claude/agents/<role>.md` and disclose the downgrade.
+   `agents/<role>.md` and disclose the downgrade.
 6. For external launches, `scripts/atelier_runtime.py` resolves the committed
    Codex default from `harness/runtimes.toml`, the gitignored local
    preference, and one-process overrides.
@@ -52,7 +52,7 @@ points at the canonical sources and adds only what is Codex-native.
 - Route context packs selected repository profiles and registered session logs
   with pinned Repomix; `protocols/session-continuity.md` owns selection and ceilings.
 - Reflection's energy and exploration intents share
-  `.claude/commands/daily-reflection.md` while keeping their selected context.
+  `skills/daily-reflection/SKILL.md` while keeping their selected context.
   That procedure and `protocols/session-log.md` own the branches and compact logs.
 - `$digest` uses `collect --json` then `write` with preinstalled markdown-it-py
   and local MJML; optional quota comes from CodexBar OAuth JSON. The shared
@@ -78,25 +78,25 @@ points at the canonical sources and adds only what is Codex-native.
   `scripts/cron_spec.py` uses Prefect's cron engine for health-check dates and cadence.
   The transfer procedure is in `scripts/launchd/README.md`: stop every source
   scheduler before loading the Prefect deployment service. Runtime and adapter
-  ownership is documented in `protocols/runtime-adapters.md`.
+  ownership is documented in `protocols/runtime-adapters.md`; ordinary artifact
+  evidence and shared receipt validation live in `protocols/remote-routines.md`.
   Autoevo drafts only in its isolated workspace; the trusted parent owns
   publication and its single structured result (`protocols/autoevo.md`).
-- Private routine mappings, digest ledger declarations, and private skill
-  sources stay under `$OV` and `<paths.private_features>/`; the contracts are
-  `protocols/remote-routines.md` (including staged RSS and latest digest context)
-  and `protocols/private-features.md`.
+- Private routine mappings, tools, routines, digest declarations, and skills
+  stay under their registered `$OV` roots. Classification and activation live
+  in `protocols/components.md`; remote execution and digest context live
+  in `protocols/remote-routines.md`.
 - `$civ` loads framework definitions from the private source referenced by the profile.
 
 ## Harness Changes
 
 Follow the checklist in `AGENTS.md` and `harness/README.md`. The registries
-are `harness/commands.toml`, `harness/agents.toml`, `harness/intents.toml`,
+are `harness/skills.toml`, `harness/agents.toml`, `harness/intents.toml`,
 `harness/models.toml`, `harness/capabilities.toml`, `harness/retrieval.toml`, `harness/paths.toml`, and
-`harness/runtimes.toml`; edit them, never the generated `.codex/` or
-`.agents/` files. Run `python3 scripts/harness_lint.py` before finishing and
-`scripts/harness_smoke.py` after helper or registry edits. Keep command
-skills thin: they point to shared Claude command specifications and must not
-copy workflow bodies into the Codex edge.
+`harness/runtimes.toml`, and `routines/registry.toml`; edit them, never the
+generated runtime edges. Run `python3 scripts/harness_lint.py` before finishing and
+`scripts/harness_smoke.py` after helper or registry edits. Keep runtime edges
+thin: they point to canonical sources and do not copy workflow bodies.
 Public configuration shape lives in `harness/registry.schema.json`; lint uses
 the pinned validator in the project `.venv`. Setup and error codes are documented
 in `harness/README.md`; lint never installs missing dependencies itself.

@@ -37,7 +37,7 @@ The trusted adapter performs these phases:
    lint, derive reports, and verify the structured result against Git.
 
 The model never writes the live queue, ledger, quarantine, reports or notes;
-runs commits; repairs Git; or performs lint/finalize. The command owns its
+runs commits; repairs Git; or performs lint/finalize. The routine adapter owns its
 judgment work, not the parent phases above. Runtime permissions and time
 limits remain in `harness/routine_profiles.toml` and
 `protocols/runtime-adapters.md`.
@@ -220,9 +220,9 @@ remain mandatory for merges and stale-banner defaults.
 
 ## Related
 
-- `.claude/commands/autoevo-nightly.md`: model proposal procedure.
-- `.claude/agents/forgetter.md` and `.claude/agents/curator.md`: heuristic
+- `routines/_adapters/autoevo/PROCEDURE.md`: model proposal procedure.
+- `agents/forgetter.md` and `agents/curator.md`: heuristic
   and preservation contracts.
-- `.claude/commands/autoevo-review.md`: approved human triage.
+- `skills/autoevo-review/SKILL.md`: approved human triage.
 - `protocols/runtime-adapters.md` and `protocols/remote-routines.md`:
   execution boundary, scheduling and operational recovery.

@@ -27,11 +27,18 @@ OV = vault_root()
 
 # Registered non-ingestion tiers have no working-domain raw/digest contract.
 _NON_INGESTION_DOMAINS = {"assets", "profile", "readwise"}
-for _path in [tier(name) for name in (
+_PRIVATE_COMPONENT_TIERS = {"private_skills", "private_agents", "private_routines", "private_tools"}
+for _name in (
     "meta", "agent_findings", "archive", "cache", "daily_notes", "gtd",
     "papers", "preprints", "reflections", "research", "sessions", "wip", "zettelm",
-    "inbox", "routine_prompts", "private_features",
-)] + wiki_dirs():
+    "inbox", "routine_prompts", "private_skills", "private_agents", "private_routines", "private_tools",
+):
+    _path = tier(_name)
+    if _path.is_relative_to(OV) and _path.relative_to(OV).parts:
+        _parts = _path.relative_to(OV).parts
+        if len(_parts) == 1 or _name in _PRIVATE_COMPONENT_TIERS:
+            _NON_INGESTION_DOMAINS.add(_parts[0])
+for _path in wiki_dirs():
     if _path.is_relative_to(OV) and len(_path.relative_to(OV).parts) == 1:
         _NON_INGESTION_DOMAINS.add(_path.relative_to(OV).parts[0])
 

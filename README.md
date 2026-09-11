@@ -90,42 +90,68 @@ then `/hi`. The generated personal context stays in gitignored `profile/`.
 
 ## Design
 
-Shared workflows and agent briefs define the work. Provider-neutral registries
-and thin adapters make those same specifications available in either runtime.
-Each session selects the context it needs and draws on [**le cercle**](protocols/atelier.md),
-the circle of specialist agents. You, **the Painter**, set the direction;
-substantive note changes are proposed for your approval.
+The architecture separates declarative policy, execution mechanisms, and
+knowledge state. Skills and routines specify work; agent briefs define reusable
+judgment roles. Runtime bindings connect these specifications to interactive
+or scheduled execution while the knowledge store remains runtime-independent.
 
 ```text
-+----------------------------------+
-|     Atelier: shared harness      |
-|                                  |
-| +------------------------------+ |                  +----------------------------+
-| |   Workflows + agent briefs   | | specs / results  |                            |
-| +------------------------------+ |----------------->|                            |
-|                                  |                  |                            |
-| +------------------------------+ |                  |       Agent session        |
-| |    Registries + adapters     | |                  |  Codex CLI or Claude Code  |
-| +------------------------------+ |                  |                            |
-|                                  |   tool calls     |                            |
-| +------------------------------+ |<-----------------|                            |
-| |   Protocols + local tools    | |                  |                            |
-| +------------------------------+ |                  +----------------------------+
-+----------------------------------+                       ^                |
-                                                           | notes          | writes
-                                                           |                |
-                                                           |                v
-                                                      +----------------------------+
-                                                      |        Your oeuvre         |
-                                                      |       Markdown vault       |
-                                                      |           ($OV)            |
-                                                      +----------------------------+
++------------------------------------------------------------------------------------------------+
+|                          Declarative specification (public / private)                          |
+|                                                                                                |
+|  +--------------------------+    +------------------------+    +----------------------------+  |
+|  | Workflow specifications  |    |  Role specifications   |    |   Bindings & constraints   |  |
+|  |    skills / routines     |    |      agent briefs      |    |   registries / protocols   |  |
+|  +--------------------------+    +------------------------+    +----------------------------+  |
+|                                                                                                |
+|                                                                                                |
++------------------------------------------------------------------------------------------------+
+                            |
+                            | specifications / bindings
+                            |
+                            v
++--------------------------------------------------------+            +--------------------------+
+|                  Execution substrates                  |            |     Knowledge state      |
+|                                                        |            |                          |
+|                                                        |            |                          |
+|  +----------------------+   +-----------------------+  |            | +----------------------+ |
+|  | Interactive runtime  |   |   Scheduled runtime   |  |            | |                      | |
+|  |    Codex / Claude    |   |   Prefect + adapter   |  | evidence   | | Markdown vault ($OV) | |
+|  |                      |   |                       |  |<-----------| |  notes / decisions   | |
+|  +----------------------+   +-----------------------+  |            | | sources / artifacts  | |
+|              ^                          ^              | artifacts  | |                      | |
+|              |                          |              |----------->| +----------------------+ |
+|              | tool I/O                 | tool I/O     |            |            |             |
+|              |                          |              |            |            | files       |
+|              |                          |              |            |            |             |
+|              v                          v              |            |            v             |
+|  +--------------------------------------------------+  |            | +----------------------+ |
+|  |             Deterministic mechanisms             |  |  context   | |    Derived views     | |
+|  |  retrieval / context / validation / publication  |  |<-----------| |      QMD index       | |
+|  |                                                  |  |            | |    context packs     | |
+|  +--------------------------------------------------+  |            | +----------------------+ |
+|                                                        |            |                          |
+|                                                        |            |                          |
++--------------------------------------------------------+            +--------------------------+
+               ^                                     ^
+               |                                     |
+               | prompts / completions               | queries / evidence
+               |                                     |
+               v                                     v
++----------------------------------------+     +-------------------------------------------------+
+|            Model providers             |     |                 Source services                 |
+|             inference APIs             |     |                web / connectors                 |
+|                                        |     |                                                 |
++----------------------------------------+     +-------------------------------------------------+
 ```
 
-Logical boundaries for an interactive session, not separate services. Arrows
-carry specifications, tool calls, and note data; writes follow the selected
-workflow's authorization rules. The vault lives outside this repository.
-Storage and retrieval are local-first; model calls may use remote providers.
+*Figure 1. Logical component architecture.* Containment denotes responsibility,
+not physical co-location or a security boundary. Interactive and scheduled
+runtimes are alternative execution modes, not sequential stages. Arrows carry
+the labeled specifications or data; double-headed arrows indicate exchanges.
+Artifact writes remain subject to workflow authorization. Execution and evidence
+contracts are detailed in [runtime adapters](protocols/runtime-adapters.md) and
+[routine verification](protocols/remote-routines.md).
 
 The architecture rests on four principles:
 

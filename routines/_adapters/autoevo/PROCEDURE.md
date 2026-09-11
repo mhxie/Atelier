@@ -1,7 +1,7 @@
 ---
 description: Prefect-only nightly decay proposal; trusted parent owns live publication and verification.
 ---
-# /autoevo-nightly
+# Autoevo routine adapter
 
 Produce one structured proposal for the trusted Prefect parent. Follow
 `protocols/autoevo.md` for authority, trust bands and recovery. Do not launch

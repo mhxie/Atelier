@@ -304,4 +304,4 @@ Edit the English source first, then regenerate the localized shadow in the same 
 - Tag taxonomy and the validation-depth principle: `epistemic-hygiene.md`
 - Where wiki entries live: `local-first-architecture.md`
 - Trust engine implementation: `scripts/trust.py`
-- Lint integration: `.claude/commands/lint.md`
+- Lint integration: `skills/lint/SKILL.md`

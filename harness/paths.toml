@@ -65,9 +65,12 @@ routine_prompts = "_routine_prompts"
 inbox           = "inbox"
 cache           = "cache"
 
-# Private operational extensions. This surface is excluded from semantic
+# Private operational extensions. These surfaces are excluded from semantic
 # retrieval because `_tools` is an operational directory at any depth.
-private_features = "_tools/features"
+private_skills   = "_tools/skills"
+private_agents   = "_tools/agents"
+private_routines = "_tools/routines"
+private_tools    = "_tools/tools"
 
 [paths.wiki_localized]
 # Empty by default. OSS users add their second-language wiki here, e.g.:

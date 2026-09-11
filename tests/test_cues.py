@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -211,8 +212,8 @@ class RoutineCueTest(unittest.TestCase):
     def test_oldest_unreviewed_output_gets_a_visible_slot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = Path(tmp)
-            meta = vault / "_meta"
-            meta.mkdir()
+            registry_dir = vault / "_tools/routines"
+            registry_dir.mkdir(parents=True)
             rows = []
             for index, day in enumerate(("28", "27", "26", "01"), start=1):
                 output_dir = f"reports/{index}"
@@ -223,7 +224,7 @@ class RoutineCueTest(unittest.TestCase):
                 report_dir = vault / output_dir
                 report_dir.mkdir(parents=True)
                 (report_dir / f"report-2026-08-{day}.md").write_text("ok\n")
-            (meta / "routine_watch.toml").write_text("\n".join(rows))
+            (registry_dir / "registry.toml").write_text("version = 1\n\n" + "\n".join(rows))
 
             out = _run_py(
                 vault,
@@ -266,15 +267,25 @@ def _write_receipt(
 ) -> None:
     directory = root / "_meta" / "routine_receipts" / routine
     directory.mkdir(parents=True, exist_ok=True)
+    output = root / "x" / f"{cycle}.md"
+    output.parent.mkdir(exist_ok=True)
+    output.write_text("fixture artifact\n", encoding="utf-8")
+    binding = (
+        f'artifact_sha256 = "{hashlib.sha256(output.read_bytes()).hexdigest()}"\n'
+        'verification_scope = "artifact-bytes"\n'
+    ) if contract_version == 4 else ""
     (directory / f"{cycle}.toml").write_text(
         f"contract_version = {contract_version}\n"
         f'routine = "{recorded_routine or routine}"\n'
-        f'cycle_id = "{cycle}"\nverification = "{verification}"\n',
+        f'cycle_id = "{cycle}"\nverification = "{verification}"\n'
+        f'output_file = "x/{cycle}.md"\n{binding}',
         encoding="utf-8",
     )
 
 
 class LocalReceiptTests(unittest.TestCase):
+    DECLARATION = {"name": "sample", "output_dir": "x", "file_pattern": "*.md"}
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="atelier-cues-owner-")
         self.root = Path(self.temp.name)
@@ -283,15 +294,63 @@ class LocalReceiptTests(unittest.TestCase):
     def test_latest_receipt_skips_a_mismatched_identity(self):
         _write_receipt(self.root, "sample", "2026-08-01")
         _write_receipt(self.root, "sample", "2026-08-05", recorded_routine="other")
-        found = cues._latest_local_receipt(self.root, "sample")
+        found = cues._latest_local_receipt(self.root, "sample", self.DECLARATION)
         self.assertIsNotNone(found)
         receipt_date, receipt, _ = found
         self.assertEqual(receipt_date.isoformat(), "2026-08-01")
         self.assertEqual(receipt["routine"], "sample")
 
-    def test_latest_receipt_rejects_the_legacy_contract(self):
+    def test_latest_receipt_surfaces_an_unsupported_contract(self):
         _write_receipt(self.root, "sample", "2026-08-20", contract_version=2)
-        self.assertIsNone(cues._latest_local_receipt(self.root, "sample"))
+        found = cues._latest_local_receipt(self.root, "sample", self.DECLARATION)
+        self.assertEqual(found[1]["verification"], "needs_review")
+
+    def test_v3_remains_unbound_without_rewriting_evidence(self):
+        _write_receipt(self.root, "sample", "2026-08-20")
+        path = self.root / "_meta/routine_receipts/sample/2026-08-20.toml"
+        before = path.read_bytes()
+        (self.root / "x/2026-08-20.md").write_text("changed contents", encoding="utf-8")
+        found = cues._latest_local_receipt(self.root, "sample", self.DECLARATION)
+        self.assertEqual(found[1]["verification"], "passed")
+        self.assertNotIn("artifact_sha256", found[1])
+        self.assertNotIn("verification_scope", found[1])
+        self.assertEqual(path.read_bytes(), before)
+        with mock.patch.object(cues, "_routine_rows", return_value=([self.DECLARATION], None)):
+            self.assertIn("v3: content unbound", cues._recap_local_runs(self.root, date(2026, 8, 20))[0])
+
+    def test_invalid_latest_evidence_never_falls_back_to_an_older_success(self):
+        _write_receipt(self.root, "sample", "2026-08-19", contract_version=4)
+        for problem in ("changed", "empty", "missing", "hash", "scope", "version", "corrupt", "declaration"):
+            with self.subTest(problem=problem):
+                _write_receipt(self.root, "sample", "2026-08-20", contract_version=4)
+                path = self.root / "_meta/routine_receipts/sample/2026-08-20.toml"
+                output = self.root / "x/2026-08-20.md"
+                declaration = self.DECLARATION
+                valid = cues._latest_local_receipt(self.root, "sample", declaration)
+                self.assertEqual(valid[1]["verification"], "passed")
+                if problem == "changed":
+                    original = output.read_bytes()
+                    output.write_bytes(b"!" + original[1:])
+                elif problem == "empty":
+                    output.write_bytes(b"")
+                elif problem == "missing":
+                    output.unlink()
+                elif problem == "declaration":
+                    declaration = {**declaration, "file_pattern": "*.html"}
+                else:
+                    text = path.read_text()
+                    text = {
+                        "hash": text.replace("artifact_sha256", "ignored_hash"),
+                        "scope": text.replace("artifact-bytes", "business-outcome"),
+                        "version": text.replace("contract_version = 4", "contract_version = 99"),
+                        "corrupt": "not valid toml",
+                    }[problem]
+                    path.write_text(text, encoding="utf-8")
+                found = cues._latest_local_receipt(self.root, "sample", declaration)
+                self.assertEqual(found[0], date(2026, 8, 20))
+                self.assertEqual(found[1]["verification"], "needs_review")
+                with mock.patch.object(cues, "_routine_rows", return_value=([declaration], None)):
+                    self.assertEqual(cues._recap_local_runs(self.root, date(2026, 8, 20)), [])
 
     def test_autoevo_consumers_use_verified_json_and_do_not_hide_latest_failure(self):
         path = _autoevo_result(self.root, "2026-08-20")
@@ -377,11 +436,13 @@ class RoutineFailureCueTests(unittest.TestCase):
 
 class LocalRoutineMissedTests(unittest.TestCase):
     WATCH = textwrap.dedent("""
+        version = 1
+
         [[routine]]
         name = "r"
         label = "demo routine"
         execution = "local"
-        kind = "model"
+        runner = "model"
         output_dir = "x"
         cron = "0 6 * * *"
     """).strip()
@@ -390,7 +451,9 @@ class LocalRoutineMissedTests(unittest.TestCase):
         vault = Path(tmp)
         meta = vault / "_meta"
         meta.mkdir(parents=True)
-        (meta / "routine_watch.toml").write_text(self.WATCH, encoding="utf-8")
+        registry_dir = vault / "_tools/routines"
+        registry_dir.mkdir(parents=True)
+        (registry_dir / "registry.toml").write_text(self.WATCH, encoding="utf-8")
         (meta / "routine_receipts" / "r").mkdir(parents=True)
         (vault / "x").mkdir()
         return vault
@@ -434,7 +497,7 @@ class LocalRoutineMissedTests(unittest.TestCase):
     def test_cron_array_uses_one_cycle_date(self):
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = self._vault(tmp)
-            watch = vault / "_meta/routine_watch.toml"
+            watch = vault / "_tools/routines/registry.toml"
             watch.write_text(
                 watch.read_text(encoding="utf-8").replace(
                     'cron = "0 6 * * *"', 'cron = ["0 6 * * *", "0 18 * * *"]'
@@ -449,7 +512,7 @@ class LocalRoutineMissedTests(unittest.TestCase):
     def test_explicit_timezone_reaches_receipt_and_hitrate_checks(self):
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = self._vault(tmp)
-            watch = vault / "_meta/routine_watch.toml"
+            watch = vault / "_tools/routines/registry.toml"
             watch.write_text(self.WATCH.replace(
                 'cron = "0 6 * * *"', 'cron = ["0 0 * * *", "0 12 * * *"]\ntimezone = "UTC"'
             ), encoding="utf-8")
@@ -459,7 +522,9 @@ class LocalRoutineMissedTests(unittest.TestCase):
             self.assertIn("2026-09-01", cue.message)
             _write_receipt(vault, "r", "2026-09-01")
             self.assertIsNone(cues.check_local_routine_missed(vault, now.date(), now=now)[0])
-            for day in ("2026-08-29", "2026-08-30", "2026-09-01"):
+            # The receipt fixtures already create artifacts for 08-31 and 09-01.
+            # Add one earlier delivery so this remains a deliberate 3/4 window.
+            for day in ("2026-08-29",):
                 (vault / "x" / (day + ".md")).write_text("delivered", encoding="utf-8")
             cue, debug = cues.check_routine_hitrate(vault, now.date(), now=now)
             self.assertIsNone(cue, debug)
