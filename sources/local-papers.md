@@ -33,7 +33,7 @@ the PDF. The text is an L1 derivative, not L3 evidence, so it does not sit next
 to the canonical PDF.
 
 Page images and other one-session renderings follow the shared scratch rule in
-`CLAUDE.md`: create them under `mktemp -d`. Promote an image into `$OV/` only
+`AGENTS.md`: create them under `mktemp -d`. Promote an image into `$OV/` only
 when it becomes a durable reading artifact.
 
 Use a stable, descriptive slug (kebab-case title or `<venue>-<id>`) as the

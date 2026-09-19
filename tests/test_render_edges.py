@@ -87,6 +87,8 @@ class RenderCheckTest(unittest.TestCase):
             ".claude/agents/sample.md", ".claude/agents/forgetter.md",
             ".claude/commands/sample.md",
         )}
+        self.assertTrue(all("CLAUDE.md" not in text for text in files.values()))
+        self.assertIn("Read `AGENTS.md`", files[self.root / ".claude/agents/sample.md"])
         self.assertEqual(set(files), expected)  # no script-driven/bot-only/handwritten edges
         for name in ("sample", "forgetter"):
             adapter = tomllib.loads(files[self.root / f".codex/agents/{name}.toml"])
@@ -94,7 +96,7 @@ class RenderCheckTest(unittest.TestCase):
             self.assertEqual(adapter["description"], f"{name} role.")
             self.assertEqual(adapter["model_reasoning_effort"], effort)
             self.assertNotIn("model", adapter)  # inherit the selected native model
-            for needle in ("AGENTS.md", "CLAUDE.md", f"agents/{name}.md",
+            for needle in ("AGENTS.md", f"agents/{name}.md",
                            "role's write boundary", "never take orchestrator-owned write, approval, or commit actions"):
                 self.assertIn(needle, adapter["developer_instructions"])
         forgetter = files[self.root / ".codex/agents/forgetter.toml"]
@@ -102,7 +104,7 @@ class RenderCheckTest(unittest.TestCase):
             self.assertIn(marker, forgetter)
         self.assertNotIn("---begin-result---", forgetter)
         skill = files[self.root / ".agents/skills/sample/SKILL.md"]
-        for needle in ("name: sample", "$sample", "AGENTS.md", "CLAUDE.md",
+        for needle in ("name: sample", "$sample", "AGENTS.md",
                        "skills/sample/SKILL.md", "Do not start a nested Codex process"):
             self.assertIn(needle, skill)
         for retired in ("scripts/atelier.py", "scripts/intent_coverage.py"):
@@ -184,6 +186,7 @@ class RenderCheckTest(unittest.TestCase):
         self.assertEqual([f.code for f in self.findings()], ["skill-reserved"])
 
     def test_committed_codex_edge_is_render_clean(self) -> None:
+        self.assertEqual((REPO_ROOT / "CLAUDE.md").read_text(), "@AGENTS.md\n")
         result = subprocess.run(
             [sys.executable, "scripts/render_runtime_edges.py", "--runtime", "all", "--check"],
             cwd=REPO_ROOT, capture_output=True, text=True, timeout=120,

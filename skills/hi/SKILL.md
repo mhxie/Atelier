@@ -73,4 +73,4 @@ unless the procedure requests a specific source.
 Read only the row's `procedure` file and execute it as the selected workflow.
 When the row is parallel, dispatch the declared initial agents in one native
 batch. Procedure-level parallel steps follow the same rule. All writes retain
-the approvals and daily-note boundaries from `CLAUDE.md`.
+the approvals and daily-note boundaries from `AGENTS.md`.

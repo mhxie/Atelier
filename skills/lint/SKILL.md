@@ -45,7 +45,7 @@ Bash: python3 scripts/harness_lint.py --json
 
 Read `counts` and `findings` (`severity`, `code`, `where`, `message`). Any ERROR
 blocks the run until fixed; WARN and INFO are advisory. This pass owns the
-CLAUDE.md size and bold-marker checks; do not repeat them manually.
+AGENTS.md size and bold-marker checks; do not repeat them manually.
 
 `registry-schema` identifies the source file and failing field. A
 `registry-validator` setup error requires installing the pinned dependencies

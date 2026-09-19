@@ -607,7 +607,7 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
     permissions = ",".join(profile["permissions"])
     if spec.adapter == "autoevo":
         return (
-            f"Read {root}/AGENTS.md and {root}/CLAUDE.md, then {root / source} completely. "
+            f"Read {root}/AGENTS.md, then {root / source} completely. "
             "This unattended Autoevo invocation authorizes candidate drafting only. The vault and Atelier are "
             "read-only; only AUTOEVO_WORKSPACE is writable. Do not run a publisher, commit, alter live state, "
             "inspect scheduler state, use network/connectors, or follow unrelated session cues. "
@@ -627,7 +627,7 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
         f"Effective action permission allowlist: `{permissions}`. Treat it as a strict model-level allowlist: skip "
         "every connector, CLI, web, or filesystem action not listed, even if an optional integration is installed. "
         "This is not a shell-level connector ACL. "
-        f"Read `{root}/AGENTS.md` and `{root}/CLAUDE.md` first, then read `{root / source}` completely and execute "
+        f"Read `{root}/AGENTS.md` first, then read `{root / source}` completely and execute "
         "it in this process using the Codex adaptation table. Treat the Atelier repository as read-only unless "
         "atelier_access is read-write. Do not inspect scheduler state or the private routine registry; Prefect owns "
         "scheduling and run state. Load only files required by the adapter and archived prompt after the mandatory "

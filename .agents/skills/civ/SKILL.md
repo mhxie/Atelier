@@ -7,4 +7,4 @@ description: "Run the Atelier `/civ` workflow in Codex using the canonical publi
 
 ## Atelier Skill
 
-Run the explicit Codex `$civ` skill. Read `AGENTS.md`, `CLAUDE.md`, and `skills/civ/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.
+Run the explicit Codex `$civ` skill. Read `AGENTS.md` and `skills/civ/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.

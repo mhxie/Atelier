@@ -7,4 +7,4 @@ description: "Run the Atelier `/daily-reflection` workflow in Codex using the ca
 
 ## Atelier Skill
 
-Run the explicit Codex `$daily-reflection` skill. Read `AGENTS.md`, `CLAUDE.md`, and `skills/daily-reflection/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.
+Run the explicit Codex `$daily-reflection` skill. Read `AGENTS.md` and `skills/daily-reflection/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.

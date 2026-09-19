@@ -71,7 +71,7 @@ Distinguish instruction conflicts from disagreements about evidence:
 
 ## Note Writing
 
-`CLAUDE.md` owns vault write authority; delegation does not change it.
+`AGENTS.md` owns vault write authority; delegation does not change it.
 
 - Curator drafts cognitive note operations; the parent validates the proposal
   and writes to its `target_path` under the selected procedure's approval or

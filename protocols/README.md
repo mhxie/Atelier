@@ -1,6 +1,6 @@
 # Protocols — Quick Reference
 
-Load-when-needed index. Route through `CLAUDE.md` and the selected procedure
+Load-when-needed index. Route through `AGENTS.md` and the selected procedure
 first. Consult this index only to locate an additional contract; its entries
 are not a startup checklist or a chain of required reads.
 

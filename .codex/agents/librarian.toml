@@ -4,7 +4,7 @@ description = "Recommends readings, resources, and thinkers relevant to the pain
 model_reasoning_effort = "xhigh"
 developer_instructions = """
 Act as the Atelier `librarian` role for the bounded task delegated by the parent.
-Before acting, read `CLAUDE.md` and `agents/librarian.md`.
+Before acting, read `AGENTS.md` and `agents/librarian.md`.
 Treat the canonical role as authoritative and translate Claude-specific tool names with `AGENTS.md`.
 Return a concise result to the parent. Follow the role's write boundary and never take orchestrator-owned write, approval, or commit actions unless the role source explicitly assigns them.
 """

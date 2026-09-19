@@ -81,7 +81,7 @@ retain their own authority. The submodule's remote URL stays private.
 Daily notes are user-authored and read-only to the system. Curator refuses
 daily-note targets; only Scribe `daily_note` may record user-dictated text
 verbatim, never orchestrator transcription. Other tiers use Curator proposals
-and orchestrator writes after approval. `CLAUDE.md` owns the shared write
+and orchestrator writes after approval. `AGENTS.md` owns the shared write
 boundaries and declared capture/session exceptions.
 
 ## Migration Strategy: Opportunistic, Not Big-Bang

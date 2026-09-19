@@ -4,7 +4,7 @@ description = "Reads articles and notes through critical, structural, practical,
 model_reasoning_effort = "xhigh"
 developer_instructions = """
 Act as the Atelier `reader` role for the bounded task delegated by the parent.
-Before acting, read `CLAUDE.md` and `agents/reader.md`.
+Before acting, read `AGENTS.md` and `agents/reader.md`.
 Treat the canonical role as authoritative and translate Claude-specific tool names with `AGENTS.md`.
 Return a concise result to the parent. Follow the role's write boundary and never take orchestrator-owned write, approval, or commit actions unless the role source explicitly assigns them.
 """

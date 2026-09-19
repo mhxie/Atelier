@@ -13,15 +13,15 @@ ROOT = Path(__file__).resolve().parent.parent
 
 def check_paper_cache() -> None:
     gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    claude = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+    instructions = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     source_doc = (ROOT / "sources" / "local-papers.md").read_text(encoding="utf-8")
     read_skill = (ROOT / "skills" / "read" / "SKILL.md").read_text(
         encoding="utf-8"
     )
     expect("/tmp/" in gitignore.splitlines(), "repo tmp containment rule is missing")
     expect(
-        "Never write repo-relative `tmp/`" in claude,
-        "shared scratch boundary is missing from CLAUDE.md",
+        "Never write repo-relative `tmp/`" in instructions,
+        "shared scratch boundary is missing from AGENTS.md",
     )
     for document, label in (
         (source_doc, "local paper source doc"),

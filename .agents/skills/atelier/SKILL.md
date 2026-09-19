@@ -11,9 +11,8 @@ points at the canonical sources and adds only what is Codex-native.
 
 ## Quick Start
 
-1. Read `AGENTS.md` (Codex adaptation rules, harness-change checklist) and
-   `CLAUDE.md` (always-on invariants, write boundaries). Do not restate them
-   here; they are the source.
+1. Read `AGENTS.md` for the shared contract, runtime adaptations, and harness
+   checklist. It is the single instruction source for Claude Code and Codex.
 2. Read `protocols/runtime-adapters.md` only when changing or debugging
    cross-runtime behavior.
 3. Invoke known workflows through their explicit repo skills (`$hi`, `$weekly`,

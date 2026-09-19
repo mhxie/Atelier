@@ -7,4 +7,4 @@ description: "Run the Atelier `/triage` workflow in Codex using the canonical pu
 
 ## Atelier Skill
 
-Run the explicit Codex `$triage` skill. Read `AGENTS.md`, `CLAUDE.md`, and `skills/triage/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.
+Run the explicit Codex `$triage` skill. Read `AGENTS.md` and `skills/triage/SKILL.md` completely, then execute the canonical workflow in this thread. Treat following text as context or arguments. Do not start a nested Codex process.

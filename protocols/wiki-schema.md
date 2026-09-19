@@ -14,7 +14,7 @@ Wiki entries are structured around claims, not paragraphs: each claim has its ow
 
 A wiki entry has three required sections and lives in `<paths.wiki>/`. The full layer model is documented in `protocols/local-first-architecture.md`.
 
-A wiki entry MUST begin with an `# <Title>` H1 line matching the filename. `scripts/trust.py` derives the note title from the first `# ` heading and reports `missing H1 title` (a structural-integrity failure that blocks the trust floor) when it is absent. This is the one documented exception to the global no-H1 writing rule in `CLAUDE.md`: that rule governs non-wiki markdown (daily notes, research, reflections), but wiki entries require the H1 so the trust engine can identify and cross-cite them. After the H1, the body may carry an optional one-line `>` blockquote primer, then opens with `## Summary`. (The skeleton example below elides the H1 line for brevity; in a real entry it is required and is line 1.)
+A wiki entry MUST begin with an `# <Title>` H1 line matching the filename. `scripts/trust.py` derives the note title from the first `# ` heading and reports `missing H1 title` (a structural-integrity failure that blocks the trust floor) when it is absent. This is the one documented exception to the global no-H1 writing rule in `AGENTS.md`: that rule governs non-wiki markdown (daily notes, research, reflections), but wiki entries require the H1 so the trust engine can identify and cross-cite them. After the H1, the body may carry an optional one-line `>` blockquote primer, then opens with `## Summary`. (The skeleton example below elides the H1 line for brevity; in a real entry it is required and is line 1.)
 
 ```markdown
 ## Summary

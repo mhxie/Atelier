@@ -191,31 +191,25 @@ def check_root_files() -> list[Finding]:
     findings: list[Finding] = []
 
     agents_path = ROOT / "AGENTS.md"
-    claude_path = ROOT / "CLAUDE.md"
     runtime_path = ROOT / "protocols" / "runtime-adapters.md"
 
     if not agents_path.exists():
-        _add(findings, "ERROR", "missing-agents-md", "AGENTS.md", "Codex root instructions are missing")
+        _add(findings, "ERROR", "missing-agents-md", "AGENTS.md", "Shared root instructions are missing")
     else:
         text = _read(agents_path)
-        if "CLAUDE.md" not in text:
-            _add(findings, "ERROR", "agents-contract", "AGENTS.md", "AGENTS.md must point Codex to CLAUDE.md")
         if "protocols/runtime-adapters.md" not in text:
             _add(findings, "ERROR", "agents-contract", "AGENTS.md",
-                     "AGENTS.md must point Codex to protocols/runtime-adapters.md")
+                     "AGENTS.md must point to protocols/runtime-adapters.md")
 
-    if not claude_path.exists():
-        _add(findings, "ERROR", "missing-claude-md", "CLAUDE.md", "Claude Code root instructions are missing")
-    else:
-        size = claude_path.stat().st_size
+        size = agents_path.stat().st_size
         if size > 15_000:
-            _add(findings, "ERROR", "claude-size", "CLAUDE.md",
-                     f"CLAUDE.md is {size} bytes; hard ceiling is 15000 bytes")
+            _add(findings, "ERROR", "agents-size", "AGENTS.md",
+                     f"AGENTS.md is {size} bytes; hard ceiling is 15000 bytes")
         elif size > 8_192:
-            _add(findings, "WARN", "claude-size", "CLAUDE.md", f"CLAUDE.md is {size} bytes; target is under 8192 bytes")
-        bold_count = _read(claude_path).count("**")
+            _add(findings, "WARN", "agents-size", "AGENTS.md", f"AGENTS.md is {size} bytes; target is under 8192 bytes")
+        bold_count = text.count("**")
         if bold_count:
-            _add(findings, "INFO", "claude-bold", "CLAUDE.md", f"CLAUDE.md contains {bold_count} bold markers")
+            _add(findings, "INFO", "agents-bold", "AGENTS.md", f"AGENTS.md contains {bold_count} bold markers")
 
     if not runtime_path.exists():
         _add(findings, "ERROR", "missing-runtime-adapters", rel(runtime_path), "runtime adapter protocol is missing")
@@ -677,14 +671,13 @@ def check_path_registry_drift(reg: dict[str, Any]) -> list[Finding]:
         valid_names.add(f"wiki_localized.{k}")
 
     literal_pat = re.compile(r"\$OV/([A-Za-z_][A-Za-z0-9_-]*)/?")
-    # Placeholder form documented in CLAUDE.md "Always-on invariants": match
+    # Placeholder form documented in AGENTS.md "Always-on invariants": match
     # `<paths.X>` where X is either a simple name or a `wiki_localized.<lang>`
     # dotted reference. Underscores are allowed (canonical names like
     # `daily_notes`); hyphens are not (the registry uses snake_case for
     # logical keys, hyphens only in physical segments).
     placeholder_pat = re.compile(r"<paths\.([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)?)>")
     roots = [
-        ROOT / "CLAUDE.md",
         ROOT / "AGENTS.md",
         ROOT / "README.md",
         ROOT / "protocols",
@@ -981,7 +974,7 @@ def check_intents_profile_reads(
 
 MAX_DOC_INDIRECTION_DEPTH = 4
 DOC_LINT_ROOTS = ("skills/", "agents/", "routines/", "protocols/", "harness/", "scripts/")
-DOC_LINT_TOPS = ("AGENTS.md", "CLAUDE.md", "README.md")
+DOC_LINT_TOPS = ("AGENTS.md", "README.md")
 
 # Instruction-level cross-document references. We only count refs that LOOK
 # like an instruction to read another file (markdown link, explicit "see/per/
@@ -1314,7 +1307,7 @@ def _flat_tier_glob_findings() -> list[Finding]:
 # Frozen from the measured implementation total and largest file plus the
 # review allowance. Lower after verified cuts; raising requires user approval.
 SOURCE_GROWTH_REVIEW_LINES = 50
-SOURCE_LINE_CEILING = 31_783
+SOURCE_LINE_CEILING = 31_776
 SOURCE_FILE_LINE_CEILING = 1_654
 
 
@@ -1513,7 +1506,7 @@ def check_legacy_framing(roots: list[str] | None = None) -> list[Finding]:
         if base.is_dir():
             paths.extend(sorted(base.rglob("*.md")))
     if roots is None:
-        paths.extend(ROOT / name for name in ("CLAUDE.md", "AGENTS.md", "README.md"))
+        paths.extend(ROOT / name for name in ("AGENTS.md", "README.md"))
     for path in paths:
         if not path.is_file() or rel(path) in LEGACY_FRAMING_EXEMPT:
             continue

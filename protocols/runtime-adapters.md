@@ -10,16 +10,17 @@ system. The core idea is to separate four concerns:
 | Capability | `harness/capabilities.toml` | `semantic_query`, `write_local_file`, `web_search` |
 | Runtime and model | adapters, local CLI config + `profile/models.toml` (gitignored) | one runtime per call, model bound per profile |
 
-This follows the OpenClaw lesson: the system can use different models when the
-provider and runtime are explicit metadata, not assumptions buried inside the
-workflow.
-
 ## Runtime Surfaces
 
 | Runtime | Reads | Native surface | Status |
 |---|---|---|---|
 | Codex | `AGENTS.md` | `.agents/skills/`, `.codex/agents/`, `.codex/hooks.json`, Codex CLI and review | First-class native harness; shipped default |
-| Claude Code | `CLAUDE.md` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` (entry hints only; not authoritative dispatch) | First-class native harness; selectable default |
+| Claude Code | `CLAUDE.md` imports `AGENTS.md` | `.claude/agents/`, `.claude/commands/`, `.claude/skills/` (entry hints only; not authoritative dispatch) | First-class native harness; selectable default |
+
+The one-line `CLAUDE.md` import keeps `AGENTS.md` authoritative even when
+native fallback is unavailable. Remove it only after a fresh, tools-disabled
+Claude session can report the project rules without it. Documented native
+support and its limits live in the [Claude reference](../sources/runtimes/claude.md).
 
 Private user skills are an exception to the committed project-edge layout.
 Their canonical source is `<paths.private_skills>/<name>/SKILL.md`, and
@@ -193,8 +194,6 @@ on a new provider-neutral capability.
 
 ## Codex Skill Execution
 
-`AGENTS.md` owns native invocation, tool translation, and role fallback;
-`CLAUDE.md` owns retrieval and write boundaries, including Scribe and bounded
-operational-artifact exceptions. Generated `$skill` edges load both before
-the selected canonical skill. Keep launch recipes in user-level CLI
-documentation, not the always-loaded adapter.
+`AGENTS.md` owns the shared contract and runtime translation. Generated
+`$skill` edges load it before the selected canonical skill. Keep launch
+recipes in user-level CLI documentation, not the always-loaded contract.

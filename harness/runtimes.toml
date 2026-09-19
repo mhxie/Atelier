@@ -40,6 +40,7 @@ label = "Claude Code"
 capability_reference = "sources/runtimes/claude.md"
 executable = "claude"
 command_prefix = "/"
+# Compatibility import; shared rules live in AGENTS.md.
 instruction_file = "CLAUDE.md"
 agent_dir = ".claude/agents"
 agent_format = "claude-markdown"

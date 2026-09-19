@@ -49,19 +49,21 @@ def _write(root: Path, name: str, body: str) -> Path:
 
 
 class RootFileGuardsTest(unittest.TestCase):
-    def test_claude_size_boundaries_and_bold_markers(self) -> None:
+    def test_agents_size_boundaries_and_bold_markers(self) -> None:
         with _lint_root() as root:
-            _write(root, "AGENTS.md", "CLAUDE.md protocols/runtime-adapters.md")
             _write(root, "protocols/runtime-adapters.md", "runtime contract")
+            self.assertEqual([f.code for f in h.check_root_files()], ["missing-agents-md"])
+            _write(root, "AGENTS.md", "protocols/runtime-adapters.md")
+            self.assertEqual(h.check_root_files(), [])
             for size, severity in ((8192, None), (8193, "WARN"), (15000, "WARN"), (15001, "ERROR")):
                 with self.subTest(size=size):
-                    _write(root, "CLAUDE.md", "x" * size)
+                    _write(root, "AGENTS.md", "protocols/runtime-adapters.md".ljust(size, "x"))
                     findings = h.check_root_files()
                     self.assertEqual([(f.code, f.severity) for f in findings],
-                                     [("claude-size", severity)] if severity else [])
-            _write(root, "CLAUDE.md", "**bold**")
+                                     [("agents-size", severity)] if severity else [])
+            _write(root, "AGENTS.md", "protocols/runtime-adapters.md **bold**")
             self.assertEqual([(f.code, f.severity) for f in h.check_root_files()],
-                             [("claude-bold", "INFO")])
+                             [("agents-bold", "INFO")])
 
 
 class RegistrySchemaGuardTest(unittest.TestCase):

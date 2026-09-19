@@ -53,7 +53,7 @@ Before prompting, apply any `Capture defaults` declared in `profile/diet.md` to 
 
 | Slot | Derivation |
 |---|---|
-| **Date** | Default today; respect CLAUDE.md late-sleep rule (before 03:00 → previous calendar day). User free text override wins. |
+| **Date** | Default today; respect AGENTS.md late-sleep rule (before 03:00 → previous calendar day). User free text override wins. |
 | **Restaurant** | Use the catalog's canonical name. When the chain has multiple registered branches, store `<餐厅>（<分店>）` so ratings remain branch-specific. |
 | **门店地址** | Exact receipt address → use; else exact branch match in `门店索引`; else ask only when a first/new physical branch must be registered. |
 | **生命周期** | Existing exact branch value → preserve; explicit user statement wins; first observed branch defaults to `active`. Never infer closure or movement from silence. |
