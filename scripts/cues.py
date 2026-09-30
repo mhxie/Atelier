@@ -46,6 +46,8 @@ class Cue:
     severity: str  # "hard" | "soft"
     command_path: str  # relative path to the command file to route into on Yes
     message: str  # user-facing Chinese prompt
+    count: int | None = None  # queue size, when the cue backs a /triage lane
+    items: list[str] | None = None  # that queue's entries, for the lane's batch
 
 
 def _resolve_output_runtime(requested: str) -> str:
@@ -191,59 +193,34 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 
-def check_zettelm(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Zettelm (mobile capture submodule) pending-digest cue.
+def check_reflect_intake(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Notes Reflect created in <paths.notes>/ that still await filing.
 
-    Hard floor: >=3 pending files, or oldest file is >7 days old.
-    Soft cue: >=1 pending file.
-    Silent: empty.
+    Reflect's own notes stay put: the `Links` and `Audio memos` hubs, and
+    transcripts, which pair with `<paths.audio_memos>/<base>.*` by basename.
+    Hard floor: >=5 unfiled notes, or the oldest is >14 days old. Soft: >=1.
     """
-    zm = tier("zettelm")
-    if not zm.is_dir():
-        return None, "zettelm/ missing; skip"
-
-    exts = (".md", ".pdf", ".jpg", ".jpeg", ".png", ".heic", ".m4a", ".mp3")
-    ignored = {"README.md", ".gitignore", ".gitattributes"}
-
-    pending = [
-        p
-        for p in zm.iterdir()
-        if p.is_file() and p.suffix.lower() in exts and p.name not in ignored
-    ]
-
+    notes = tier("notes")
+    if not notes.is_dir():
+        return None, "notes/ missing; skip"
+    memos = tier("audio_memos")
+    kept = {"links", "audio-memos"} | ({p.stem for p in memos.iterdir()} if memos.is_dir() else set())
+    pending = [p for p in notes.glob("*.md") if p.stem not in kept]
     if not pending:
-        return None, "zettelm empty; fresh"
-
+        return None, "notes/ empty; fresh"
     n = len(pending)
-    oldest_mtime = min(p.stat().st_mtime for p in pending)
-    oldest_age_days = (today - date.fromtimestamp(oldest_mtime)).days
-
-    hard = n >= 3 or oldest_age_days > 7
-    # Note: this count is local-only. The remote may have more files
-    # that haven't been pulled yet. /sync pulls before scanning.
-    local_hint = " (本地; remote 可能更多)"
-    if hard:
-        return (
-            Cue(
-                key="zettelm",
-                severity="hard",
-                command_path="skills/sync/SKILL.md",
-                message=(
-                    f"zettelm 有 {n} 条待 digest{local_hint} (最老 {oldest_age_days} 天). "
-                    f"建议先跑 `/sync` 把内容归位再继续. 现在跑吗?"
-                ),
-            ),
-            f"n={n} oldest_age={oldest_age_days}; hard floor",
-        )
-
+    oldest_age_days = (today - date.fromtimestamp(min(p.stat().st_mtime for p in pending))).days
+    hard = n >= 5 or oldest_age_days > 14
     return (
         Cue(
-            key="zettelm",
-            severity="soft",
-            command_path="skills/sync/SKILL.md",
-            message=f"提示: zettelm 有 {n} 条待 digest{local_hint}. 想现在跑 `/sync`?",
+            key="reflect_intake",
+            severity="hard" if hard else "soft",
+            command_path="skills/triage/SKILL.md",
+            message=f"Reflect 新建了 {n} 条笔记待归档 (最老 {oldest_age_days} 天). 想现在跑 `/triage` 归位吗?",
+            count=n,
+            items=sorted(p.name for p in pending),
         ),
-        f"n={n} oldest_age={oldest_age_days}; soft cue",
+        f"n={n} oldest_age={oldest_age_days}; {'hard floor' if hard else 'soft cue'}",
     )
 
 
@@ -253,8 +230,7 @@ def check_recurring(ov: Path, today: date) -> tuple[Cue | None, str]:
     Fires when one or more recurring items in $OV/gtd/recurring.md are overdue
     (today > last-done + every) or due-soon (within 7 days). Severity escalates
     to `hard` when any item is overdue by more than 30 days — a 100-day-overdue
-    health/maintenance task should not register softer than a 7-day-old
-    zettelm capture.
+    health/maintenance task should not register as a soft cue.
     """
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -942,7 +918,6 @@ def check_autoevo_ran(
             streak += 1
         fixes = {
             "dirty_autoevo_state": "commit or restore the changed Autoevo state, then rerun deterministic preflight",
-            "dirty_zettelm_worktree": "finish or commit the mobile-capture digest",
             "session_active": "wait for the active session to finish",
             "git_index_lock_present": "confirm no Git process is running before removing a stale index lock",
             "git_operation_in_progress": "finish or abort the active Git operation",
@@ -1241,7 +1216,7 @@ def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
 CHECKS = [
     ("weekly", check_weekly),
     ("intent_misses", check_intent_misses),
-    ("zettelm", check_zettelm),
+    ("reflect_intake", check_reflect_intake),
     ("recurring", check_recurring),
     ("aggregate_freshness", check_aggregate_freshness),
     ("routine_outputs", check_routine_outputs),
@@ -1497,7 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
         }
         print(json.dumps(payload, ensure_ascii=False))
     elif args.json:
-        print(json.dumps([asdict(c) for c in fired], ensure_ascii=False))
+        print(json.dumps([{k: v for k, v in asdict(c).items() if v is not None} for c in fired], ensure_ascii=False))
     else:
         for c in fired:
             print(f"{c.key}\t{c.severity}\t{c.command_path}\t{c.message}")

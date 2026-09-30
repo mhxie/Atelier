@@ -28,7 +28,7 @@ names when loading context; sharing this procedure does not make them daily revi
    selected intent's current Repomix artifact; otherwise run
    `uv run scripts/context_bundle.py --intent <intent> --effective-date YYYY-MM-DD`.
    Only daily reflection adds its named daily note with
-   `--source daily-notes/YYYY/MM/YYYY-MM-DD.md`. Follow the helper's missing-profile
+   `--source daily/YYYY-MM-DD.md`. Follow the helper's missing-profile
    refusal and selected-profile staleness warnings; do not preload other profiles.
 2. Use the packed continuity and bounded QMD candidates, then read the source
    sections needed for the chosen topic. Missing evidence stays unknown.
@@ -73,7 +73,7 @@ Use a bullet under `## Next Action`; prose there is invisible to `todos.py`.
 ## Energy branch
 
 Search the last 14 days with
-`uv run scripts/semantic.py query "physical mental emotional social energy patterns" --path daily-notes --after YYYY-MM-DD --top 10 --format json`.
+`uv run scripts/semantic.py query "physical mental emotional social energy patterns" --path daily --after YYYY-MM-DD --top 10 --format json`.
 Read 3 to 5 relevant source sections, or fewer when evidence is sparse; use
 targeted follow-up searches for an unresolved pattern rather than reading every day.
 
@@ -150,7 +150,8 @@ and marker glyphs from `todos.py`'s `STATE_MAP` (done `[x]`, killed `[~]`):
 
 Scribe re-reads the line and refuses drift. For promotion, obtain a due date
 and area, resolve the most recently modified Markdown file directly under
-`<paths.gtd>/`, then queue `gtd_entry` with `add`; ask if no target exists.
+`<paths.gtd>/`, then queue `gtd_entry` with `add` in `protocols/intent-capture.md`'s
+new-item format; ask if no target exists.
 Record refusals or skipped closures in the compact log; never silently retry
 against another line or treat a failed capture as completed.
 

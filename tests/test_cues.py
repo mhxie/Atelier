@@ -172,6 +172,33 @@ class AutoevoCueTest(unittest.TestCase):
         recent.assert_not_called()
 
 
+class ReflectIntakeCueTest(unittest.TestCase):
+    def _check(self, vault: Path) -> dict:
+        return _run_py(
+            vault,
+            """
+            cue, debug = cues.check_reflect_intake(vault, date(2099, 1, 10))
+            print(json.dumps({"key": cue.key if cue else None, "count": cue.count if cue else None, "items": cue.items if cue else None, "debug": debug}))
+            """,
+        )
+
+    def test_counts_unfiled_notes_but_not_reflect_hubs_or_transcripts(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = Path(tmp)
+            (vault / "notes").mkdir()
+            (vault / "audio-memos").mkdir()
+            for name in ("sample.md", "links.md", "audio-memos.md", "memo-2099-01-09.md"):
+                (vault / "notes" / name).write_text("# note\n", encoding="utf-8")
+            (vault / "audio-memos" / "memo-2099-01-09.m4a").write_bytes(b"")
+            out = self._check(vault)
+            self.assertEqual((out["key"], out["count"], out["items"]), ("reflect_intake", 1, ["sample.md"]), out)
+
+    def test_missing_notes_folder_is_silent(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            out = self._check(Path(tmp))
+            self.assertIsNone(out["key"], out)
+
+
 class IntentMissCueTest(unittest.TestCase):
     @staticmethod
     def _route(vault: Path, day: str, raw: str, kind: str = "general") -> None:

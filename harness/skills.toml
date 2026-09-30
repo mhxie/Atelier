@@ -88,12 +88,6 @@ category = "knowledge"
 status = "canonical"
 description = "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
 
-[skills.sync]
-source = "skills/sync/SKILL.md"
-category = "knowledge"
-status = "canonical"
-description = "Digest the mobile-capture submodule into the persistent L2 destinations and stage zettelm deletions."
-
 [skills.promote]
 source = "skills/promote/SKILL.md"
 category = "knowledge"

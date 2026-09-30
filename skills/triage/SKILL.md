@@ -72,6 +72,7 @@ work.
 | Aggregate freshness | `aggregate_freshness.py` | one stale aggregate | `stale_count` |
 | Routine health | `routine_status.py` plus fired routine cues | one latest failed, crashed, or cancelled Prefect run per routine | latest run per routine whose `state` is `FAILED`, `CRASHED`, or `CANCELLED` |
 | Intent coverage | `intent_coverage.py` | one recurring unrouted request | `len(proposals)` (`phrases` are observe) |
+| Reflect intake | `cues.py` `reflect_intake` | one note in `<paths.notes>/` | cue `count` |
 
 Dashboard columns: lane, cue severity, actionable count, oldest item or latest
 failure, and the next safe action. Distinguish `actionable`, `observe`, and
@@ -177,6 +178,12 @@ this workflow. Record each accepted or rejected proposal with its one-sentence
 reason: `uv run scripts/decisions.py record --class triage/intent-coverage
 --subject "<phrase>" --verdict <accept|reject> --reason "<sentence>"
 --feature target=<intent>` (`protocols/decision-ledger.md`).
+
+### Reflect intake
+
+Batch the cue's `items` (hubs and transcripts already skipped). Propose a tier
+per note; `mv` only approved ones. Filed notes stop being renamed, `[[Title]]`
+links survive, `relink.py --apply` repairs path links. Snoozing hides the lane.
 
 ## Phase 3: batch close
 

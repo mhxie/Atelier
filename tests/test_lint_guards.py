@@ -582,8 +582,7 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
 
 class WorkflowContractOwnerGuardTest(unittest.TestCase):
     def test_retired_router_and_missing_migrated_boundaries_fail(self) -> None:
-        paths = ('protocols/orchestrator.md', 'skills/read/SKILL.md',
-                 'skills/sync/SKILL.md', 'protocols/intent-capture.md')
+        paths = ('protocols/orchestrator.md', 'skills/read/SKILL.md', 'protocols/intent-capture.md')
 
         def assert_broken():
             self.assertEqual([f.code for f in h.check_workflow_contract_owners()], ['workflow-contract-owner'])
@@ -599,7 +598,6 @@ class WorkflowContractOwnerGuardTest(unittest.TestCase):
             mutations = (
                 ('protocols/orchestrator.md', '`harness/intents.toml` selects the procedure'),
                 ('skills/read/SKILL.md', 'Start with one **Reader**, or one **Scholar**'),
-                ('skills/sync/SKILL.md', 'protocols/agent-handoff.md'),
                 ('protocols/intent-capture.md', '`/dine` Intent C'),
                 ('protocols/intent-capture.md', 'ask the user once for a default GTD filename'),
                 ('protocols/intent-capture.md', 'Do not pass an empty `target_file`'),

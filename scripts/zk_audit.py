@@ -30,8 +30,8 @@ _NON_INGESTION_DOMAINS = {"assets", "profile", "readwise"}
 _PRIVATE_COMPONENT_TIERS = {"private_skills", "private_agents", "private_routines", "private_tools"}
 for _name in (
     "meta", "agent_findings", "archive", "cache", "daily_notes", "gtd",
-    "papers", "preprints", "reflections", "research", "sessions", "wip", "zettelm",
-    "inbox", "routine_prompts", "private_skills", "private_agents", "private_routines", "private_tools",
+    "papers", "preprints", "reflections", "research", "sessions", "wip",
+    "inbox", "notes", "audio_memos", "routine_prompts", "private_skills", "private_agents", "private_routines", "private_tools",
 ):
     _path = tier(_name)
     if _path.is_relative_to(OV) and _path.relative_to(OV).parts:
@@ -316,7 +316,7 @@ def check_suspicious_dirs(root: Path) -> list[Finding]:
             )
             continue
 
-        if _is_hidden(name):
+        if _is_hidden(name) or name in _NON_INGESTION_DOMAINS:
             continue
 
         try:
@@ -325,9 +325,6 @@ def check_suspicious_dirs(root: Path) -> list[Finding]:
             continue
         if not entries:
             out.append(Finding("suspicious_dirs", _rel(child) + "/", "empty directory"))
-            continue
-
-        if name in _NON_INGESTION_DOMAINS:
             continue
 
         has_readme = any(p.name == "README.md" for p in entries)

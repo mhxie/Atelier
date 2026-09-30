@@ -38,7 +38,7 @@ DICTIONARY = Path("/usr/share/dict/words")
 # Tiers whose subdirectories are the atelier's own schema (dated runs, decayed
 # archives, prompt archives), not the user's taxonomy: no path rule there.
 SYSTEM_TIERS = {
-    "meta", "routine_prompts", "cache", "inbox", "agent_findings", "zettelm",
+    "meta", "routine_prompts", "cache", "inbox", "agent_findings",
     "sessions", "archive", "private_skills", "private_agents", "private_tools", "private_routines",
 }
 # Tiers whose direct children are the user's own taxonomy (a topic, a person,

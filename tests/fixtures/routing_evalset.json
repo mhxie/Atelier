@@ -20,7 +20,6 @@
     {"input": "rebuild profile from my notes", "expected": "introspect"},
     {"input": "每日复盘 走起", "expected": "reflection"},
     {"input": "process this meeting transcript", "expected": "meeting"},
-    {"input": "digest zettelm inbox", "expected": "sync"},
     {"input": "scan for decay in my wip", "expected": "forget"},
     {"input": "earnings report for the quarter dropped", "expected": "finance-analysis"},
     {"input": "watch this podcast episode with me", "expected": "talk"},

@@ -65,9 +65,9 @@ Draft an updated version of an existing local note.
 1. Read the current note from the local mirror (`Grep` for the title in `$OV/` → `Read` the file).
 2. Apply the requested changes.
 3. Present the diff to the user.
-4. The orchestrator applies the change via `Edit` (small substring fix) or `Write` (whole-body rewrite). For renames, the orchestrator runs `mv` plus a wikilink-rewrite pass (`scripts/wikilink_to_md.py` or grep + Edit) to fix inbound `[[Old Title]]` references.
+4. The orchestrator applies the change via `Edit` (small substring fix) or `Write` (whole-body rewrite). For renames, the orchestrator runs `mv` plus a grep + Edit pass that rewrites inbound `[[Old Title]]` to `[[New Title]]`; `scripts/wikilink_to_md.py` would turn every wikilink into a path link.
 
-Daily notes (`<paths.daily_notes>/YYYY/MM/YYYY-MM-DD.md`) are user-authored; the Curator does not propose edits to them.
+Daily notes (`<paths.daily_notes>/YYYY-MM-DD.md`) are user-authored; the Curator does not propose edits to them.
 
 ### Merge Notes
 

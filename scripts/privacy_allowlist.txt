@@ -47,3 +47,7 @@ signal-sweep
 
 # Public sample infrastructure identifiers explicitly approved by the user.
 atelier-mbp
+
+# Reflect OSS hub-note names (public product vocabulary, not user content).
+audio memos
+audio-memos

@@ -26,7 +26,7 @@ _LAST_UPDATED_RE = re.compile(r"^Last updated:\s*(\d{4}-\d{2}-\d{2})\s*$")
 _YAML_UPDATED_RE = re.compile(r"^(?:last_updated|updated):\s*(\d{4}-\d{2}-\d{2})\s*$")
 _HEAD_LINES = 20
 _DISCOVER_SKIP_DIRS = {
-    ".git", ".obsidian", "cache", "papers", "preprints", "archive", "zettelm",
+    ".git", ".obsidian", "cache", "papers", "preprints", "archive",
     "node_modules", ".venv", "__pycache__",
 }
 

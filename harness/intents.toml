@@ -126,27 +126,6 @@ profile_reads = ["identity.md"]
 expected_subagent_count = 1
 parallel = false
 
-# Sync digests the mobile-capture submodule $OV/zettelm/ into daily notes and
-# raw attachments, enriches with backlinks, then stages zettelm deletions for
-# the user to commit. Procedure: skills/sync/SKILL.md.
-[intents.sync]
-description = "Ingest the mobile-capture submodule zettelm (fleeting notes from the phone) into the vault and stage its deletions; not the mailed digest report."
-examples = [
-    "sync",
-    "digest zettelm",
-    "digest mobile",
-    "process zettelm",
-    "sync mobile notes",
-    "fleeting digest",
-]
-mode = "sync"
-procedure = "skills/sync/SKILL.md"
-context_budget_tokens = 2048
-agents = ["researcher", "curator", "challenger", "scribe", "reviewer"]
-profile_reads = []
-expected_subagent_count = 5
-parallel = false
-
 # Forget routes to a Forgetter decay sweep over a bounded scope. Default scope
 # is $OV/wip/ unless the user names a path. Forgetter proposes; never deletes.
 [intents.forget]

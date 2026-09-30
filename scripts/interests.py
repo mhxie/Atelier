@@ -29,7 +29,7 @@ LEDGER = "_meta/interests.toml"
 STATE = "_meta/interests_state.json"
 TRACKING_SOURCES = "_meta/brief_sources.toml"
 DIGEST_CONFIG = "_meta/digest.toml"  # [interests] experience_log = "<vault-relative path>"
-DAILY_NOTES = "daily-notes"
+DAILY_NOTES = "daily"
 
 KINDS = ("anime", "artist", "team", "player", "book", "game", "show", "festival", "convention", "other")
 EVENT_WEIGHTS = {

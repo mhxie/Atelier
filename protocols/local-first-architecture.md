@@ -13,7 +13,7 @@ in `protocols/epistemic-hygiene.md`.
 | Layer | Contents and location | Contract |
 |---|---|---|
 | L1: Raw capture | Readwise inbox, `<paths.inbox>/`, `<domain>/raw/`, `<paths.cache>/` | Unstructured input. Raw source artifacts are durable; cache is disposable. Readwise is cloud-only, queried explicitly through its connector or CLI. |
-| L2: Working | `<paths.daily_notes>/`, `<paths.reflections>/`, `<paths.research>/`, `<paths.agent_findings>/`, `<paths.wip>/`, `<paths.gtd>/`, domain notes | Most active thinking: searchable and citable, alloy by default, not certified. Inactive topic notes stay in `<paths.archive>/`. |
+| L2: Working | `<paths.daily_notes>/`, `<paths.reflections>/`, `<paths.research>/`, `<paths.agent_findings>/`, `<paths.wip>/`, `<paths.gtd>/`, Reflect-created `<paths.notes>/`, domain notes | Most active thinking: searchable and citable, alloy by default, not certified. Inactive topic notes stay in `<paths.archive>/`. |
 | L3: External receipts | `<paths.papers>/`, `<paths.preprints>/`, curated reading artifacts | Papers, local PDFs, and externally anchored structured paper reviews. Preprints belong here, not among L2 free-writes. Receipts support L4 `@anchor` markers. |
 | L4: Locally certified | `<paths.wiki>/` | Location, not `#wiki` or `#compiled-truth`, identifies wiki entries. Only this subtree participates in trust propagation, bi-temporal anchoring, and wiki structural lint. |
 | L5: Foundation | Reserved for settled, textbook-level knowledge | No folder or active workflow yet. |
@@ -36,11 +36,7 @@ in `$OV`; private harness configuration is gitignored. `harness/paths.toml`
 and its local override own the path inventory, not a second directory tree here.
 Repo paths are project-relative; `<paths.*>` resolves through that registry.
 
-`<paths.sessions>/` holds process records. `<paths.zettelm>/` is a transient
-mobile-capture submodule, not another tier: `/sync` enriches and routes its
-narratives to daily notes and attachments to domain raw storage, then clears
-the digested sources under its own approval and verification rules. Nothing
-should be expected to survive there long-term; see `skills/sync/SKILL.md`.
+`<paths.sessions>/` holds process records.
 
 ## Search Projections
 
@@ -55,6 +51,9 @@ Operational directories such as nested `cache/`, `_meta/`, `_routine_prompts/`,
 owns collections and exclusions; QMD owns synchronization, chunking, embeddings,
 and retrieval. Custom score adjustments are retired. `sources/semantic.md`
 owns the CLI, exact scope boundaries, setup, and hardware profiles.
+
+Reflect maintains its own index in `$OV/.reflect/index.sqlite` while the desktop
+app runs. Agents reach it only through the bundled `reflect` CLI (see AGENTS.md).
 
 ## Source of Truth
 
@@ -75,8 +74,7 @@ than trusting whichever copy it read first. Staleness markers such as
 The host filesystem handles device sync and backup. `$OV` may also be a private
 Git repo; `protocols/repo-conventions.md` owns its layout. There is no two-way
 note-store sync or mirror ledger. The system does not auto-commit or auto-push
-the vault; user-driven Git and the explicitly invoked `/sync` submodule flow
-retain their own authority. The submodule's remote URL stays private.
+the vault; user-driven Git retains its own authority.
 
 Daily notes are user-authored and read-only to the system. Curator refuses
 daily-note targets; only Scribe `daily_note` may record user-dictated text

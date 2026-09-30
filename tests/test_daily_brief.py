@@ -111,8 +111,8 @@ HEALTH = """# Longitudinal metrics
 
 | Date | Source | Weight (kg) |
 |---|---|---|
-| [2098-09-11](../daily-notes/2098-09-11.md) | scale | 80 |
-| [2098-06-01](../daily-notes/2098-06-01.md) | DEXA | 82 |
+| [2098-09-11](../daily/2098-09-11.md) | scale | 80 |
+| [2098-06-01](../daily/2098-06-01.md) | DEXA | 82 |
 
 ## Thyroid
 

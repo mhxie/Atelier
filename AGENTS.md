@@ -26,6 +26,8 @@ keys, paths, command names, and data fields stay literal.
   are raw. Validation depth outranks origin.
 - Content queries start with bounded `scripts/semantic.py` results. Use `rg`
   for structure, exact titles, and paths. Read source files before quoting.
+  When Reflect is installed, `reflect --graph "$OV" search --json` adds
+  title-ranked lexical hits; the CLI never indexes, so they can be stale.
 - Before declaring a user-named local document absent from `$OV`, rescan the
   raw landing zones per `protocols/drive-zk-ingestion.md` step 0; inventories
   are point-in-time.
@@ -46,7 +48,8 @@ keys, paths, command names, and data fields stay literal.
 - Scribe capture operations may record text the user already authored. Bounded
   session logs follow their protocol. All other `$OV` writes require explicit
   approval and are performed by the orchestrator.
-- Cite L2 files with `[Exact Title](<relative path>)`; wiki uses `[[Title]]`.
+- Cite L2 files with `[Exact Title](<relative path>)`; wiki and Reflect-created
+  `<paths.notes>/` notes use `[[Title]]` (Reflect renames the latter).
   Never attribute a statement to the user without its source.
 - Match the user's language; use Chinese for Chinese topics and
   reading-intensive output. Do not use em dashes.

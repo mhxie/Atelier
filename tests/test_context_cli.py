@@ -70,7 +70,7 @@ def check_context_bundle() -> None:
         for relative in (
             "sessions",
             "reflections/2099-01",
-            "daily-notes/2099/01",
+            "daily",
             "research",
         ):
             (vault / relative).mkdir(parents=True, exist_ok=True)
@@ -103,7 +103,7 @@ def check_context_bundle() -> None:
             "## Next Action\ndo one bounded thing\n",
             encoding="utf-8",
         )
-        daily = vault / "daily-notes" / "2099" / "01" / "2099-01-03.md"
+        daily = vault / "daily" / "2099-01-03.md"
         daily.write_text("## Today\nexplicit daily context\n", encoding="utf-8")
         (vault / "research" / "source.md").write_text(
             "## Alpha\nalpha only\n\n## Beta\nbeta only\n", encoding="utf-8"

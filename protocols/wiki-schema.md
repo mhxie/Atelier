@@ -289,7 +289,7 @@ Translation rules:
 - Translate all prose (Summary, claim text, body paragraphs, Revision Log) into the target language
 - DO NOT translate: technical terms, code identifiers, URLs, file paths, `@anchor`/`@pass`/`@cite` markers, block IDs
 - Shadow filename matches the English source filename exactly; the shadow keeps the English `# <Title>` H1 (see `/promote` Phase 4)
-- Prepend a localized backreference, e.g. for Chinese: `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`
+- Put a localized backreference right below the H1, e.g. for Chinese: `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`
 
 Localized shadows are not part of the trust graph: `scripts/trust.py` only scans `<paths.wiki>/`. The shadow copy is for reading convenience. It does not need its own anchors or reviewer passes.
 

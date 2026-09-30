@@ -50,7 +50,6 @@ limits remain in `harness/routine_profiles.toml` and
 | Git lock/operation | No `index.lock`, merge, rebase, cherry-pick, revert, or bisect in progress. Never remove locks or repair Git automatically. |
 | Session lock | No fresh `<paths.cache>/atelier-session-lock` within six hours. |
 | Managed state | No dirty `_meta/autoevo_*.toml`; dirty working-tier content instead becomes `protected_paths`. |
-| Capture submodule | No dirty `<paths.zettelm>/` worktree. |
 | Privacy | No public-bound privacy hits. |
 | Semantic readiness | QMD status reports ready with stored documents/vectors and cached models. This is not live inference or corpus-freshness proof. |
 | Legacy audit state | An old owned-audit marker requires explicit review/migration; never read, delete, or commit its referenced audit automatically. |

@@ -44,7 +44,7 @@ Reference syntax (relative path from the .md file's directory):
 
 `$OV/.gitignore` whitelists `**/images/*.{png,jpg,jpeg,gif,svg,webp}`. Place an image under any `images/` subdir and it auto-tracks on next `git add`.
 
-`assets/` (auto-paste collectors, hash-named imports from prior tools) is re-excluded; any `assets/images/<hash>.png` style import stays local. To promote an `assets/` image to GitHub, move it to the right `<tier>/images/` path with a semantic name and update the markdown reference.
+Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`assets/x.png`) break on GitHub from nested notes. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference.
 
 ### Legacy image refs
 
@@ -67,7 +67,6 @@ The 32 threshold is hard, not "rough". A directory at 32 should be split before 
 
 | Tier | Split axis | Result example |
 |------|------------|----------------|
-| `daily-notes/` | year, then month (two-level grouping keeps every level under 32; filename carries full ISO date) | `daily-notes/YYYY/MM/YYYY-MM-DD.md` |
 | `reflections/` | year-month | `reflections/YYYY-MM/YYYY-MM-DD-reflection.md` |
 | `agent-findings/` | year-month | `agent-findings/YYYY-MM/<agent>-<slug>.md` |
 | `preprints/<class>/` | venue | `preprints/<class>/<venue><yy>/` |
@@ -75,6 +74,8 @@ The 32 threshold is hard, not "rough". A directory at 32 should be split before 
 | `research/<area>/labs/` | by org type or first-letter | `research/<area>/labs/<X>/<lab>/` |
 | `people/` | first-letter bucket: `A/`, …, `0-9/`, `中/` (CJK) | `people/<X>/<Person Name>.md` |
 | `archive/<subdir>` | first-letter bucket or topical sub-grouping (case-by-case) | `archive/<subdir>/<X>/<Item>.md` |
+
+`daily/` is exempt and flat (`daily/YYYY-MM-DD.md`, attachments in `raw/YYYY/MM/`): Reflect reads dailies only there.
 
 ### Rebuilding refs after any move (canonical workflow)
 
@@ -140,7 +141,7 @@ Vault-side lint for the conventions in this doc (folder fission, image placement
 
 Conventions:
 
-- **Push cadence**: at the user's discretion. Reasonable triggers include after `/sync` (which produces a parent commit absorbing zettelm digests), after a `/promote` that lands a new wiki entry, or at end-of-session if anything material changed.
-- **Scope**: whatever the vault's `.gitignore` permits. `cache/` (L1 ephemera) and `assets/` (auto-paste hash-named imports) are typically excluded. `_meta/` (routine config, drive aliases) is typically pushed because it holds load-bearing user-private config; users with sensitive content in `_meta/<backend>.toml` may prefer to gitignore it and re-derive per device. The atelier does not dictate the vault's gitignore.
+- **Push cadence**: at the user's discretion. Reasonable triggers include after a `/promote` that lands a new wiki entry, or at end-of-session if anything material changed.
+- **Scope**: whatever the vault's `.gitignore` permits. `cache/` (L1 ephemera) and nested `assets/` (auto-paste hash-named imports) are typically excluded. `_meta/` (routine config, drive aliases) is typically pushed because it holds load-bearing user-private config; users with sensitive content in `_meta/<backend>.toml` may prefer to gitignore it and re-derive per device. The atelier does not dictate the vault's gitignore.
 - **Threat model**: the private remote is one credential away from disclosing the entire knowledge base. Treat it like a password vault. On suspected compromise: rotate the GitHub token, audit recent pushes, and consider a fresh repo with selectively replayed history (the rewrite path is destructive; document the recipe before needing it).
 - **Staleness**: no atelier cue surfaces "remote is N commits behind." Users who want that signal wire it as a local cron or shell prompt indicator. Acceptable trade-off because the local $OV is the authoritative copy and Drive sync provides the device-level redundancy.

@@ -37,6 +37,9 @@ INLINE_META = {
     "area": re.compile(r"\barea:(#[\w\-]+)\b"),
 }
 
+# Reflect reads a `+ [ ]` task's first [[YYYY-MM-DD]] as its due date; `due:` still wins.
+REFLECT_DUE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})\]\]")
+
 STATE_MAP = {" ": "open", "x": "done", "X": "done", "~": "killed", "/": "wip"}
 
 NEXT_ACTION_HEADERS = ("## Next Action", "## Next Actions")
@@ -99,11 +102,13 @@ class Todo:
         return Path(self.source).name
 
 
-def extract_metadata(todo: Todo, text: str) -> None:
+def extract_metadata(todo: Todo, text: str, reflect_task: bool = False) -> None:
     for key, regex in INLINE_META.items():
         m = regex.search(text)
         if m:
             setattr(todo, key, m.group(1))
+    if reflect_task and todo.due is None and (m := REFLECT_DUE_RE.search(text)):
+        todo.due = m.group(1)
 
 
 def filename_date(path: Path) -> date | None:
@@ -176,7 +181,7 @@ def scan_gtd_file(path: Path) -> list[Todo]:
             line=i,
             state=state,
         )
-        extract_metadata(todo, content)
+        extract_metadata(todo, content, reflect_task=line.lstrip().startswith("+"))
         out.append(todo)
     return out
 

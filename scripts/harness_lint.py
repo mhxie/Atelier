@@ -1116,7 +1116,6 @@ def check_workflow_contract_owners() -> list[Finding]:
     contracts = {
         "protocols/orchestrator.md": ("`harness/intents.toml` selects the procedure",),
         "skills/read/SKILL.md": ("Start with one **Reader**, or one **Scholar**",),
-        "skills/sync/SKILL.md": ("Snapshot the source", "protocols/agent-handoff.md"),
         "protocols/intent-capture.md": (
             "`/dine` Intent C", "Never infer trip association",
             "ask the user once for a default GTD filename",
@@ -1395,9 +1394,9 @@ PROSE_PLUMBING = frozenset({
     "agents/reviewer.md", "agents/precedent-judge.md", "agents/privacy-reviewer.md",
     "skills/hi/SKILL.md", "skills/lint/SKILL.md", "skills/push/SKILL.md",
     "skills/reflect/SKILL.md", "routines/_adapters/archived-prompt/PROCEDURE.md",
-    "skills/sync/SKILL.md", "skills/triage/SKILL.md",
+    "skills/triage/SKILL.md",
 })
-PROSE_PLUMBING_CEILING = 165_000   # frozen at the 2026-09-09 measurement, rounded up to the
+PROSE_PLUMBING_CEILING = 145_000   # frozen at the 2026-09-30 measurement, rounded up to the
                                    # next 1k; lower it after a cut, never raise it
 PROSE_NOTES_WARN = 390_000
 PROSE_NOTES_ERROR = 420_000

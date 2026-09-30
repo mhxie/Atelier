@@ -227,7 +227,7 @@ def load_closing(ov: Path, today: date, warnings: list[str]) -> list[Group]:
 # subject matter rather than the user's own notes. Resolved through the path
 # registry so a renamed or localized tier stays excluded; the two names that
 # are not registry tiers (cache, inbox) are physical and stay literal.
-RECONCILE_SKIP_TIERS = ("archive", "sessions", "zettelm", "wiki", "papers", "preprints")
+RECONCILE_SKIP_TIERS = ("archive", "sessions", "wiki", "papers", "preprints")
 RECONCILE_SKIP_LITERAL = ("cache", "inbox")
 RECONCILE_MAX_FILES = 400
 RECONCILE_MAX_BYTES = 512 * 1024
@@ -660,7 +660,7 @@ def _tracking_failure_warning(name: str, section: object) -> str | None:
 def latest_table_date(text: str, section: str) -> str | None:
     """Newest ISO date in the first cell of a markdown table under `section`.
 
-    The cell is usually a link (`[2026-04-11](../daily-notes/...)`), so the
+    The cell is usually a link (`[2026-04-11](../daily/...)`), so the
     date is searched for rather than parsed as the whole cell.
     """
     heading = re.compile(rf"^#{{1,6}}\s+{re.escape(section)}\s*$", re.MULTILINE)

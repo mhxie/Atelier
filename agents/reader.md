@@ -93,7 +93,7 @@ This is preprocessing, not a separate lens. The real analysis comes from whichev
 
 1. **Receive the requested perspectives** from the orchestrator.
 2. **Read the full text.** The full vault is on disk.
-   - **Local note:** `Grep` for the title in `$OV/` and `Read` the match (wiki in `<paths.wiki>/`, daily notes in `<paths.daily_notes>/YYYY/MM/YYYY-MM-DD.md`, papers in `<paths.papers>/` or `<paths.preprints>/`).
+   - **Local note:** `Grep` for the title in `$OV/` and `Read` the match (wiki in `<paths.wiki>/`, daily notes in `<paths.daily_notes>/YYYY-MM-DD.md`, papers in `<paths.papers>/` or `<paths.preprints>/`).
    - **URL:** check `<paths.cache>/` first (via `Glob`), then fall back to `WebFetch`.
    - **Paper cache (directory):** if the orchestrator passes `cache_path: <paths.cache>/<slug>/`, read `paper.txt` and `index.md` from that directory; do NOT re-extract the raw PDF. The orchestrator creates this directory through `scripts/paper_cache.py`; follow the shared scratch rule in `AGENTS.md`.
    - **Readwise transcript cache (single file):** if the orchestrator passes `cache_path: <paths.cache>/rw-<doc_id>.md`, read that single file; it contains the transcript `.content` as the orchestrator dumped it. Do not re-fetch from the Readwise CLI; the cache exists so parallel readers share one fetch.

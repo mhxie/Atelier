@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import tier, tier_files  # type: ignore[import-not-found]  # noqa: E402
 
-# L2 directories to scan (daily-notes excluded: capture stream, not working
+# L2 directories to scan (daily notes excluded: capture stream, not working
 # knowledge). health excluded: longitudinal records, different lifecycle.
 # Paths resolve via the canonical path registry so renames in harness/paths.toml
 # propagate automatically.
@@ -145,8 +145,7 @@ def scan(
     if daily_dir.exists():
         for i in range(30):
             d = today - timedelta(days=i)
-            # Daily notes nest as daily-notes/YYYY/MM/YYYY-MM-DD.md.
-            p = daily_dir / f"{d:%Y}" / f"{d:%m}" / f"{d.isoformat()}.md"
+            p = daily_dir / f"{d.isoformat()}.md"
             if p.exists():
                 corpus.append(p)
 

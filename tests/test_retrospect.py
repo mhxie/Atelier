@@ -28,7 +28,7 @@ def build(root: Path) -> Path:
     for tier, names in {
         "reflections": ["2025-01-02-old-thought.md", "2025-02-02-private-conflict.md"],
         "wiki": ["A Pattern.md"],
-        "daily-notes": ["2025-03-03.md"],
+        "daily": ["2025-03-03.md"],
     }.items():
         directory = vault / tier
         directory.mkdir(parents=True)
@@ -72,7 +72,7 @@ class DrawTests(unittest.TestCase):
 
     def test_malformed_cooldown_does_not_permanently_hide_a_note(self):
         target = "reflections/2025-01-02-old-thought.md"
-        valid = "daily-notes/2025-03-03.md"
+        valid = "daily/2025-03-03.md"
         (self.vault / rx.STATE_RELPATH).write_text(json.dumps({target: "unknown", valid: TODAY.isoformat()}))
         paths = {row["path"] for row in rx.draw(self.vault, count=50, today=TODAY, seed=1)}
         self.assertIn(target, paths)

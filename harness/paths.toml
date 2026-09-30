@@ -28,7 +28,7 @@ papers          = "papers"
 preprints       = "preprints"
 
 # L2 — working / half-baked. The persistent surfaces.
-daily_notes     = "daily-notes"
+daily_notes     = "daily"
 reflections     = "reflections"
 research        = "research"
 agent_findings  = "agent-findings"
@@ -50,10 +50,9 @@ dev             = "personal/dev"
 projects        = "personal/projects"
 archive         = "archive"
 sessions        = "sessions"
+# Reflect-created notes awaiting /triage filing.
+notes           = "notes"
 # Note: `profile/` is repo-side gitignored config, NOT a vault tier. Do not register here.
-
-# L2 transient — mobile-capture submodule, digested then cleared by /sync.
-zettelm         = "zettelm"
 
 # Operational state (bot claims, queues, watch registries, miss logs) and
 # archived private routine prompts. Underscore prefix keeps them sorted apart
@@ -64,6 +63,8 @@ routine_prompts = "_routine_prompts"
 # L1: pending or raw capture
 inbox           = "inbox"
 cache           = "cache"
+# Reflect's audio recordings; their transcripts land in notes/.
+audio_memos     = "audio-memos"
 
 # Private operational extensions. These surfaces are excluded from semantic
 # retrieval because `_tools` is an operational directory at any depth.

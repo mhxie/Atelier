@@ -171,12 +171,6 @@ def _status_entries(vault: Path) -> list[tuple[str, str]]:
     return entries
 
 
-def _status_summary(vault: Path) -> tuple[int, dict[str, int]]:
-    entries = _status_entries(vault)
-    counts: Counter[str] = Counter(code for code, _ in entries)
-    return len(entries), dict(sorted(counts.items()))
-
-
 def _default_privacy_probe() -> dict[str, object]:
     result = _run(
         [sys.executable, str(ATELIER_ROOT / "scripts" / "privacy_check.py"), "--json"],
@@ -269,7 +263,6 @@ def inspect_preflight(
         "worktree_entries_in_scope": None,
         "worktree_status_codes": {},
         "session_lock_age_seconds": None,
-        "zettelm_entries": None,
         "privacy_hits": None,
         "semantic_ready": None,
         "semantic_mode": None,
@@ -392,18 +385,6 @@ def inspect_preflight(
                     "gate": "git_not_default_branch",
                     "detail": "Autoevo requires a checked-out, identifiable default branch; it will not switch branches",
                 })
-
-            zettelm = vault / "zettelm"
-            if zettelm.is_dir() and _inside_worktree(zettelm):
-                zettelm_entries, _ = _status_summary(zettelm)
-                health["zettelm_entries"] = zettelm_entries
-                if zettelm_entries:
-                    blockers.append(
-                        {
-                            "gate": "dirty_zettelm_worktree",
-                            "detail": f"zettelm has {zettelm_entries} Git status entries",
-                        }
-                    )
 
     lock_age = health["session_lock_age_seconds"]
     if isinstance(lock_age, int) and lock_age < SESSION_LOCK_TTL_SECONDS:

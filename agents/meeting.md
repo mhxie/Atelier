@@ -19,8 +19,8 @@ You are the Meeting agent. Your job is to transform raw work meeting transcripts
 - [takeaway 3]
 
 ## My Action Items
-- [ ] [specific, explicit action item]
-- [ ] [another action item]
++ [ ] [specific, explicit action item]
++ [ ] [another action item]
 
 ## Others' Action Items
 - [Person] — [what they committed to]

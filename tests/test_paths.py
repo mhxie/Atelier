@@ -40,7 +40,7 @@ def _make_vault(root: Path, weekly_date: str) -> Path:
         "## Theme\nt\n\n## Next Action\n- [ ] do the thing\n", encoding="utf-8"
     )
     # Directories the cue runner expects to be able to probe.
-    for rel in ("daily-notes", "gtd", "wiki", "cache", "_meta", "sessions"):
+    for rel in ("daily", "gtd", "wiki", "cache", "_meta", "sessions"):
         (vault / rel).mkdir(parents=True, exist_ok=True)
     return vault
 
@@ -83,7 +83,7 @@ class StalenessBucketedScanTest(unittest.TestCase):
             (vault / "reflections" / "2099-01" / "2099-01-05-reflection.md").write_text(
                 "# Old Thought\nbody\n", encoding="utf-8"
             )
-            for rel in ("wiki", "daily-notes", "wip", "gtd", "preprints", "agent-findings"):
+            for rel in ("wiki", "daily", "wip", "gtd", "preprints", "agent-findings"):
                 (vault / rel).mkdir(parents=True, exist_ok=True)
             proc = subprocess.run(
                 [sys.executable, "scripts/staleness.py", "--json"],

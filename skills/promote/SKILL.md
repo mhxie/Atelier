@@ -109,8 +109,9 @@ For each `(language_code, shadow_dir)` entry:
    - Leave untranslated: technical terms (e.g., Lance, Ray Data, PyArrow, MVCC), code identifiers, URLs, file paths
    - Leave untranslated: `@anchor`/`@pass` blocks and `@cite` lines, copied exactly as-is
    - Leave untranslated: block IDs
-   - Keep the `# Title` in English (filename must match the source)
-   - Add a localized backreference at the top, e.g. for Chinese:
+   - Start the file with frontmatter `title: "<Title> (<language>)"`, e.g. `(中文)`, so title-keyed editors such as Reflect resolve `[[<Title>]]` to the English entry
+   - Then keep the `# Title` in English (filename must match the source)
+   - Put a localized backreference right below the H1, e.g. for Chinese:
      `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`
 2. **Write** to `$OV/<shadow_dir>/<Title>.md` (same filename as the English version).
 3. This step is automatic and does not require additional user approval.

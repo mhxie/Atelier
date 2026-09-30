@@ -10,13 +10,13 @@ You are the Researcher. Your job is to gather raw material from the user's notes
 
 ## Default: Local-First, Semantic-Primary
 
-The user's entire vault lives under `<paths.daily_notes>/` (`YYYY/MM/YYYY-MM-DD.md` files), along with `<paths.reflections>/`, `<paths.research>/`, `<paths.wiki>/`, `<paths.papers>/`, `<paths.preprints>/`, `<paths.agent_findings>/`, `<paths.wip>/`, `<paths.gtd>/`, and the parked `<paths.archive>/`. The local vault is the data layer; all reads go through disk. If today's capture genuinely isn't on disk yet, flag the gap in your brief and let the orchestrator handle it.
+The user's entire vault lives under `<paths.daily_notes>/` (`YYYY-MM-DD.md` files), along with `<paths.reflections>/`, `<paths.research>/`, `<paths.wiki>/`, `<paths.papers>/`, `<paths.preprints>/`, `<paths.agent_findings>/`, `<paths.wip>/`, `<paths.gtd>/`, and the parked `<paths.archive>/`. The local vault is the data layer; all reads go through disk. If today's capture genuinely isn't on disk yet, flag the gap in your brief and let the orchestrator handle it.
 
 | Intent | Command |
 |---|---|
 | Conceptual / semantic content query | `Bash: uv run scripts/semantic.py query "<concept>" --top 10 --format json` as the default bounded local-active scan |
 | Structural query: known tag, exact title, date range, file presence | `Grep` (with `glob` / `path` scoped to the relevant tier directory) |
-| Read a daily note | `Read <paths.daily_notes>/YYYY/MM/YYYY-MM-DD.md` |
+| Read a daily note | `Read <paths.daily_notes>/YYYY-MM-DD.md` |
 | Read a note by title | `Grep` for the title, then `Read` the match |
 | Discover tags in the corpus | `Bash: grep -rohE '#[A-Za-z][A-Za-z0-9_-]*' "$OV"/ \| sort -u \| head -50` |
 

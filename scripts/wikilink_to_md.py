@@ -20,9 +20,12 @@ from markdown_it import MarkdownIt
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "scripts"))
-from _paths import atomic_write, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, tier, vault_root  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
+DAILY = tier("daily_notes").relative_to(OV)
+# Reflect renames notes/ files on retitle, so links to them stay [[Title]].
+NOTES = tier("notes").relative_to(OV)
 
 # Mirrors zk/.gitignore semantics: dirs that never contain Reflect-bound or
 # GitHub-bound markdown.
@@ -182,16 +185,16 @@ def transform_wikilink(inner: str, source_rel: Path, idx: dict[str, list[Path]])
     parsed = parse_date(target)
     if parsed:
         iso = parsed.strftime("%Y-%m-%d")
-        year = parsed.strftime("%Y")
-        month = parsed.strftime("%m")
-        daily_rel = Path("daily-notes") / year / month / f"{iso}.md"
+        daily_rel = DAILY / f"{iso}.md"
         if (OV / daily_rel).exists():
             display = alias or iso
             return md_link(display, relative_path(daily_rel, source_rel))
-        return alias or iso
+        return f"[[{raw}]]"  # a future daily (often a due date) keeps its date link
 
     # Try resolve as note
     resolved = resolve_target(target, source_rel, idx)
+    if resolved and resolved.parts[: len(NOTES.parts)] == NOTES.parts:
+        return f"[[{raw}]]"
     if resolved:
         display = alias or target
         rel = relative_path(resolved, source_rel)
@@ -271,7 +274,8 @@ def transform_file(path: Path, idx: dict[str, list[Path]]) -> tuple[str, list[tu
     def _link_sub(m: re.Match) -> str:
         old = m.group(0)
         new = transform_wikilink(m.group(1), source_rel, idx)
-        diffs.append((old, new))
+        if new != old:
+            diffs.append((old, new))
         return new
 
     masked = EMBED_RE.sub(_embed_sub, masked)
@@ -343,7 +347,7 @@ def main() -> None:
             stats["image_embed"] += 1
         elif new.startswith("[") and "](" in new:
             # could be link_resolved or date_to_daily
-            if "daily-notes" in new:
+            if f"{DAILY.as_posix()}/" in new:
                 stats["date_to_daily"] += 1
             else:
                 stats["link_resolved"] += 1

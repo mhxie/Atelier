@@ -25,7 +25,6 @@ Trust comes from verbatim preservation, not from clever editing. If you find you
 
 The user expects light polish, not strict character-level fidelity. Anything that improves readability without adding content the user did not say is in scope:
 
-- Add the standard daily-note header matching the existing format under `<paths.daily_notes>/`. Inspect a recent file under the target month directory first to match exactly. Common form: `# <DayOfWeek>, <Month> <Date><suffix>, <Year>` (e.g., `# Sat, May 2nd, 2026`).
 - Insert paragraph breaks at clear paragraph boundaries.
 - Add a single space between adjacent Chinese and Latin characters for readability (e.g., `claude code的cloud agent` → `claude code 的 cloud agent`). Do not change punctuation that carries voice.
 - **Typo correction.** Fix obvious dictation / typing errors where the intended word is unambiguous from context. Examples: repeated characters (`我我去了` → `我去了`), duplicated words (`the the cat` → `the cat`), an obvious wrong character with the right pinyin when context disambiguates (e.g., `订位` typed as `定位` in a restaurant-reservation sentence). Do not "fix" anything that is debatable, idiomatic, or stylistic — when in doubt, preserve. Cross-language proper-name homophone fixes (e.g., a pinyin-homophone surname/given-name swap on a real person mentioned in chat) are the orchestrator's job upstream via `scripts/people.py`, not Scribe's.
@@ -54,7 +53,7 @@ You handle five operation types. The orchestrator picks one in the dispatch prom
 
 Inputs: `target_date` (YYYY-MM-DD), `target_file`, `raw_content`, `mode` (`create` / `append` / `merge`), optional `existing_content` for `merge`.
 
-For `create`: read a recent daily-note file under the same parent directory (e.g., the previous day's file or any nearby file in the same month tree). Match its header style verbatim. Do not invent a header format.
+For `create`: add no date heading (Reflect renders the date above each daily); follow the previous `daily/` file's structure.
 
 For multi-turn input, merge chronologically using event-time signals in the content. Pass through ambiguity to the orchestrator if order cannot be determined.
 

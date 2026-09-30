@@ -23,7 +23,7 @@ EXPERIENCE_LOG = """# Live Events
 |---|---|---|---|---|---|
 | 2099-02-20 | Example Band: Endless Tour | Example City | Concert | | |
 | 2099-01-15 | Example Idol 个人演唱会 | Example City | Concert | | |
-| [2098-11-05](../daily-notes/2098/11/2098-11-05.md) | Example Team vs Other | Example City | NBA | | |
+| [2098-11-05](../daily/2098-11-05.md) | Example Team vs Other | Example City | NBA | | |
 | 2097 | Example Fest | Example City | 音乐节 | | |
 | 2098-06 | Example Park | Example City | Trip | | |
 | not-a-date | Broken Row | | Concert | | |
@@ -67,7 +67,7 @@ def build_vault(root: Path) -> Path:
     cache.write_text(json.dumps(TRACKING_CACHE), encoding="utf-8")
     (vault / "_meta" / "brief_sources.toml").write_text(f'[tracking]\ncache = "{cache}"\n', encoding="utf-8")
     (vault / "_meta" / "digest.toml").write_text('[interests]\nexperience_log = "logs/live-events.md"\n', encoding="utf-8")
-    notes = vault / "daily-notes" / "2099" / "02"
+    notes = vault / "daily"
     notes.mkdir(parents=True)
     (notes / "2099-02-25.md").write_text(NOTE, encoding="utf-8")
     return vault
@@ -210,7 +210,7 @@ class IngestTests(unittest.TestCase):
             # not know which one is about an interest, and must not pretend to.
             self.assertIn("Example Singer", texts)
             self.assertIn("Example Bistro", texts)
-            self.assertTrue(all(r["ref"].startswith("daily-notes/") for r in rows))
+            self.assertTrue(all(r["ref"].startswith("daily/") for r in rows))
             self.assertEqual(ix.note_candidates(vault, TODAY, days=2), [])
 
     def test_readwise_books_only_inside_the_window(self):

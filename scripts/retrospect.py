@@ -32,7 +32,7 @@ CORPUS = {
     "reflections": 4,
     "wiki": 3,
     "research": 2,
-    "daily-notes": 1,
+    "daily": 1,
 }
 
 # Nothing newer than this is a "retrospective"; it is just recent work.
