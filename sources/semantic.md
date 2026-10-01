@@ -1,9 +1,9 @@
 # Local QMD Search
 
-`scripts/semantic.py` is the Atelier boundary around the pinned QMD SDK.
-QMD owns scanning, Markdown chunking, incremental updates and deletions,
-embeddings, keyword/vector fusion, and model reranking. The Python adapter
-owns source scopes, local-only model readiness, bounded output, and callers.
+`scripts/semantic.py` is the Atelier boundary around the Reflect CLI and the
+pinned QMD SDK. QMD owns scanning, Markdown chunking, incremental updates and
+deletions, embeddings, keyword/vector fusion, and model reranking. The Python
+adapter owns source scopes, local-only model readiness, bounded output, and callers.
 The canonical vault is never modified by indexing or querying.
 
 ## Setup and hardware
@@ -59,16 +59,26 @@ or explicitly use lexical mode; do not silently substitute empty results.
 | `index` | QMD incrementally reconciles source files and embeddings. Skipped files or embedding errors fail the command. |
 | `index --lexical-only` | Update text without loading a model. This does not claim vector readiness. |
 | `status [--format json\|text]` | Native QMD counts, pending embeddings, local model presence and `ready`; no corpus freshness scan. |
-| `query TEXT` | Hybrid keyword + vector retrieval and reranking, with bounded JSON results. |
-| `query TEXT --mode lexical` | Explicit model-free keyword search; never an automatic fallback. |
-| `query TEXT --mode vector` | Embedding retrieval without keyword fusion or reranking. |
+| `query TEXT` | Reflect lexical search, else QMD hybrid keyword + vector retrieval and reranking; bounded JSON. |
+| `query TEXT --mode lexical` | Model-free keyword search. |
+| `query TEXT --mode vector` | QMD embedding retrieval without keyword fusion or reranking. |
 
 Query options: `--top 1..100`, `--scope`, repeatable `--path`, `--after`,
-`--before`, `--format json|tsv`, `--no-rerank`, and `--expand`.
+`--before`, `--format json|tsv`, `--backend auto|reflect|qmd`, `--no-rerank`,
+and `--expand`.
 By default the same text is supplied as typed lexical and vector queries,
 without automatic rewriting. `--expand` explicitly enables QMD's local
 query-expansion model. Test Chinese, English and mixed-language framing
 against relevant source documents; a synthetic fixture is not a vault benchmark.
+
+`--backend auto` (default) answers `lexical` and `hybrid` queries with
+`reflect --graph "$OV" search --json`, falling back to QMD, with the reason on
+stderr, when Reflect is missing, fails, emits unexpected JSON, exceeds 10 s, or
+leaves no row after filtering. `--backend reflect|qmd` pins one engine; vector
+search, `--expand`, and `--no-rerank` are QMD-only. Reflect rows report
+`score_kind: lexical` and keep Reflect's order: their bm25 `score` is
+lower-is-better, 0 for title matches. Reflect's CLI never returns `raw/` or
+local-only `secure/` notes, so those come only from QMD.
 
 Path and file-mtime date filters apply to at most 200 retrieved candidates.
 They never broaden source access, but can return fewer results than requested
@@ -90,8 +100,9 @@ symlinks, out-of-vault paths, deleted sources, and scope-mismatched results.
 If `harness/paths.local.toml` sets `raw_store`, the `raw` scope and `secure/`
 notes (searched as `active`) are indexed from that mirror of vault paths; a hit
 may then cross one `raw` or `secure` folder link onto the same path there.
-A secure hit carries only its path, with no title or snippet; agents never
-open it. Read the original source before quoting. Scope is provenance, not certification.
+A secure hit, from QMD or a Reflect hit inside any `secure/` folder, carries
+only its path, with no title or snippet; agents never open it. Read the
+original source before quoting. Scope is provenance, not certification.
 
 Readwise uses its own explicit connector/CLI. Binary raw locator generation,
 custom trust/recency score adjustment, stub fallback, corpus auditing,
@@ -100,10 +111,10 @@ old backend options, and legacy context capsules have been retired.
 ## Results and failures
 
 JSON is always a list of bounded result objects: `path`, `scope`, `title`,
-`line`, `snippet` (up to 600 characters), `score`, `source: local`,
-`backend: qmd`, `score_kind`, and `representation`. `score_kind` names the
-pipeline that produced the score, so `--mode hybrid --no-rerank` reports
-`hybrid-no-rerank` rather than `hybrid`.
+`line` (QMD only), `snippet` (up to 600 characters), `score`, `source: local`,
+`backend` (`reflect` or `qmd`), `score_kind`, and `representation`.
+`score_kind` names the pipeline that produced the score, so
+`--mode hybrid --no-rerank` reports `hybrid-no-rerank` rather than `hybrid`.
 Paths are vault-relative; one row per source file.
 TSV contains path, score and scope. Output goes to stdout; diagnostics to stderr.
 
@@ -121,8 +132,9 @@ run `index` on schedule to reconcile sources, not a homemade manifest scan.
 
 ## Verification and rollout
 
-`tests/test_qmd.py` covers adapter failure and source boundaries, including
-real QMD keyword indexing/update/delete when npm dependencies are installed.
+`tests/test_qmd.py` covers adapter failure, source boundaries, and Reflect
+routing against a fake CLI, including real QMD keyword indexing/update/delete
+when npm dependencies are installed.
 The independent paper-cache extraction checks remain in `tests/test_paper_cache.py`.
 The pinned QMD 2.8.3 bridge shares the SDK and tokenizer model instance (matching
 QMD's CLI), forwards the index deadline to its embed session, and rejects

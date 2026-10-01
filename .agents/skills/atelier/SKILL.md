@@ -45,7 +45,8 @@ points at the canonical sources and adds only what is Codex-native.
 
 ## Operations
 
-- Local retrieval uses `scripts/semantic.py` with the pinned QMD dependency.
+- Local retrieval uses `scripts/semantic.py`: Reflect's lexical index first,
+  then the pinned QMD dependency.
   `sources/semantic.md` owns setup, scopes, and the bounded JSON contract.
   Queries use cached models only; downloads require explicit initialization.
 - Linked ledger tasks use `scripts/todos.py check` and `sync --file <quarter>.md`

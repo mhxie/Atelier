@@ -11,7 +11,7 @@ This map is not a second per-script specification.
 |---|---|
 | Runtime selection, capability evidence, generated edges | `atelier_runtime.py`, `runtime/capabilities.py`, `render_runtime_edges.py`; `harness_lint.py` checks declarations; ownership in `harness/README.md` and `sources/runtimes/README.md` |
 | Route context and session evidence | `intent_coverage.py`, `context_bundle.py` (strict selection + Repomix), `session_log.py` |
-| Retrieval and knowledge validation | `semantic.py` calls the pinned QMD SDK through `qmd.mjs`; `trust.py` and `lint.py` validate knowledge under the [wiki schema](../protocols/wiki-schema.md) |
+| Retrieval and knowledge validation | `semantic.py` tries the Reflect CLI, then calls the pinned QMD SDK through `qmd.mjs`; `trust.py` and `lint.py` validate knowledge under the [wiki schema](../protocols/wiki-schema.md) |
 | Reading feedback and decisions | `decisions.py` (including `reading-*` commands), `precedent.py`; `reading_feedback.py` owns pure reading-event validation and evaluation |
 | Hosted-model calls | `chat_completion.py`, bound through `harness/models.toml`; `precedent.py` is its caller |
 | Scheduled execution and recovery | `routine_prefect.py` owns Prefect flows/deployments; `routine_adapter.py` owns fixed execution, receipt writes, and replay decisions; `routine_receipts.py` owns shared ordinary artifact validation; `routine_status.py` reads native state. Contracts: `../protocols/remote-routines.md`; operations: `launchd/README.md` |

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Evaluate QMD against explicit {query, target} pairs; never manufacture a gold set."""
+"""Evaluate local search against explicit {query, target} pairs; never manufacture a gold set."""
 from __future__ import annotations
 
 import argparse
@@ -24,7 +24,8 @@ def evaluate(gold: list[dict], args: argparse.Namespace) -> dict:
         target = item.get("target")
         if not isinstance(target, str) or not target or target.startswith("/") or ".." in Path(target).parts:
             raise ValueError("each gold row needs a safe vault-relative target")
-        flags = ["query", item["query"], "--top", "10", "--scope", args.scope, "--mode", args.mode]
+        flags = ["query", item["query"], "--top", "10", "--scope", args.scope, "--mode", args.mode,
+                 "--backend", args.backend]
         if args.no_rerank:
             flags.append("--no-rerank")
         rows = semantic.query(semantic.build_parser().parse_args(flags))
@@ -35,7 +36,7 @@ def evaluate(gold: list[dict], args: argparse.Namespace) -> dict:
     if not size:
         raise ValueError("gold set is empty")
     return {
-        "config": {"backend": "qmd", "mode": args.mode, "scope": args.scope,
+        "config": {"backend": args.backend, "mode": args.mode, "scope": args.scope,
                    "rerank": args.mode == "hybrid" and not args.no_rerank},
         "n_queries": size,
         "recall@5": sum(rank is not None and rank <= 5 for rank in ranks) / size,
@@ -69,6 +70,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--gold", type=Path)
     run.add_argument("--scope", choices=semantic.SCOPES + ("all",), default="active")
     run.add_argument("--mode", choices=("hybrid", "lexical", "vector"), default="hybrid")
+    run.add_argument("--backend", choices=semantic.BACKENDS, default="qmd")
     run.add_argument("--no-rerank", action="store_true")
     run.add_argument("--limit", type=int, default=0)
     run.set_defaults(func=cmd_run)

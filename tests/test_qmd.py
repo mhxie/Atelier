@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import closing, redirect_stderr, redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,6 +37,8 @@ class QmdAdapterTest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"OV": str(self.vault), "ATELIER_QMD_HOME": str(self.cache)}))
         os.environ.pop("ATELIER_QMD_PROFILE", None)
         self.enterContext(patch.object(semantic, "CONFIG_PATH", self.temp / "semantic.toml"))
+        # The installed Reflect CLI must never answer a fixture query; Reflect tests install a fake one.
+        self.enterContext(patch.object(semantic, "REFLECT", str(self.temp / "absent-reflect")))
         # A private paths.local.toml (a real raw_store above all) must never reach these fixtures.
         self.registry = self.temp / "atelier/harness"
         self.registry.mkdir(parents=True)
@@ -63,6 +66,35 @@ class QmdAdapterTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
             code = semantic.main(list(argv))
         return code, stdout.getvalue(), stderr.getvalue()
+
+    def fake_reflect(self, hits=(), body=None, stale=False):
+        """Install bin/reflect: it logs its argv, then answers with `hits` in the CLI's JSON or runs `body`."""
+        answer = self.temp / "reflect.json"
+        answer.write_text(json.dumps({"query": "q", "stale": stale, "results": list(hits)}, ensure_ascii=False))
+        script = self.temp / "bin" / "reflect"
+        script.parent.mkdir(exist_ok=True)
+        tail = body or f'cat "{answer}"'
+        script.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{self.temp}/reflect.argv"\n{tail}\n')
+        script.chmod(0o755)
+        self.enterContext(patch.object(semantic, "REFLECT", str(script)))
+        return script
+
+    def reflect_argv(self):
+        """The last fake Reflect argv, consumed so a later "not called" check starts clean."""
+        log = self.temp / "reflect.argv"
+        if not log.exists():
+            return None
+        argv = log.read_text(encoding="utf-8").splitlines()
+        log.unlink()
+        return argv
+
+    @staticmethod
+    def hit(path, score=-1.5):
+        return {"path": path, "title": "Title", "snippet": "matched text", "score": score}
+
+    @staticmethod
+    def qmd_row():
+        return {"path": "wiki/rate-limits.md", "scope": "active", "score": .5, "title": "t", "line": 1, "snippet": "s"}
 
     def fake_index(self):
         directory = semantic.prepare(self.vault)
@@ -553,10 +585,12 @@ class QmdAdapterTest(unittest.TestCase):
 
     def test_evaluation_metrics_and_empty_gold(self):
         args = semantic_eval.build_parser().parse_args(["run", "--mode", "lexical"])
-        with patch.object(semantic, "query", side_effect=[[{"path": "a.md"}], []]):
+        with patch.object(semantic, "query", side_effect=[[{"path": "a.md"}], []]) as search:
             metrics = semantic_eval.evaluate([{"query": "first", "target": "a.md"},
                                               {"query": "second", "target": "b.md"}], args)
         self.assertEqual((metrics["n_queries"], metrics["MRR@10"], metrics["recall@5"]), (2, .5, .5))
+        # The evaluator names the backend it measured; QMD stays its default.
+        self.assertEqual((search.call_args.args[0].backend, metrics["config"]["backend"]), ("qmd", "qmd"))
         with self.assertRaisesRegex(ValueError, "empty"):
             semantic_eval.evaluate([], args)
 
@@ -665,6 +699,153 @@ class QmdAdapterTest(unittest.TestCase):
         self.assertEqual(find("rawsentinel", "--scope", "raw"), [("raw/import/evidence.md", "raw", "raw_text")])
         for sentinel in ("forbiddensentinel", "parkedsentinel"):
             self.assertEqual(find(sentinel, "--scope", "all"), [])
+
+    def test_auto_answers_lexical_and_hybrid_through_reflect_and_vector_through_qmd(self):
+        script = self.fake_reflect([self.hit("wiki/rate-limits.md", 0.0), self.hit("work/任务编排.md")])
+        on_path = {"PATH": f"{script.parent}{os.pathsep}{os.environ.get('PATH', '')}"}
+        for mode in ("lexical", "hybrid"):
+            # The module default resolves `reflect` through PATH, where the fake comes first.
+            with self.subTest(mode=mode), patch.object(semantic, "REFLECT", "reflect"), \
+                 patch.dict(os.environ, on_path), patch.object(semantic, "bridge") as child:
+                code, out, err = self.cli("query", "-rate limits", "--mode", mode, "--top", "5")
+                self.assertEqual(code, 0, err)
+                child.assert_not_called()
+                shared = {"title": "Title", "snippet": "matched text", "scope": "active", "source": "local",
+                          "backend": "reflect", "score_kind": "lexical", "representation": "authored"}
+                self.assertEqual(json.loads(out), [{"path": "wiki/rate-limits.md", "score": 0.0, **shared},
+                                                   {"path": "work/任务编排.md", "score": -1.5, **shared}])
+                self.assertEqual(self.reflect_argv(), ["--graph", str(self.vault), "search", "--json",
+                                                       "--limit", "20", "--", "-rate limits"])
+        self.assertFalse(self.cache.exists(), "a Reflect answer needs no QMD index")
+        self.assertEqual(err, "")
+        # A stale index is announced once; Reflect's routine skipped-symlink note is not relayed.
+        self.fake_reflect([self.hit("wiki/rate-limits.md")], stale=True,
+                          body=f'echo "note: skipped 3 entries" >&2; cat "{self.temp}/reflect.json"')
+        code, out, err = self.cli("query", "retry")
+        self.assertEqual((code, len(json.loads(out))), (0, 1), err)
+        self.assertIn("index is stale", err)
+        self.assertNotIn("skipped", err)
+        self.assertEqual(self.reflect_argv()[-1], "retry")
+        self.fake_index()
+        with patch.object(semantic, "bridge", return_value=[self.qmd_row()]) as child:
+            code, out, err = self.cli("query", "retry", "--mode", "vector")
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(self.reflect_argv())
+        self.assertEqual(child.call_args.kwargs["mode"], "vector")
+        self.assertEqual([(row["backend"], row["score_kind"]) for row in json.loads(out)], [("qmd", "vector")])
+
+    def test_auto_falls_back_to_qmd_when_reflect_cannot_answer(self):
+        self.fake_index()
+        out_of_scope = [self.hit("cache/excluded.md"), self.hit("archive/old-plan.md")]
+        cases = (("missing binary", None, None, "No such file"),
+                 ("nonzero exit", (), 'echo "no search index" >&2; exit 4', "no search index"),
+                 ("invalid JSON", (), "echo not-json", "unexpected JSON"),
+                 ("missing field", (), """echo '{"stale": false, "results": [{"path": "a.md"}]}'""", "unexpected JSON"),
+                 ("invalid score", [{**self.hit("wiki/rate-limits.md"), "score": "high"}], None, "invalid score"),
+                 ("timeout", (), "exec sleep 5", "timed out"),
+                 ("nothing survives the filters", out_of_scope, None, ""))
+        for label, hits, body, reason in cases:
+            with self.subTest(label), patch.object(semantic, "REFLECT_TIMEOUT", .5):
+                if hits is None:
+                    self.enterContext(patch.object(semantic, "REFLECT", str(self.temp / "absent-reflect")))
+                else:
+                    self.fake_reflect(hits, body)
+                with patch.object(semantic, "bridge", return_value=[self.qmd_row()]) as child:
+                    code, out, err = self.cli("query", "retry", "--mode", "lexical")
+                self.assertEqual(code, 0, err)
+                child.assert_called_once()
+                self.assertEqual([row["backend"] for row in json.loads(out)], ["qmd"])
+                self.assertIn(reason, err)
+                self.assertEqual("falling back to QMD" in err, bool(reason))
+
+    def test_reflect_backend_surfaces_failure_and_never_runs_qmd(self):
+        self.fake_index()
+        with patch.object(semantic, "REFLECT_TIMEOUT", .5), patch.object(semantic, "bridge") as child:
+            for label, body in (("nonzero exit", 'echo "no search index" >&2; exit 4'),
+                                ("invalid JSON", "echo not-json"), ("timeout", "exec sleep 5")):
+                self.fake_reflect(body=body)
+                with self.subTest(label):
+                    code, out, err = self.cli("query", "retry", "--backend", "reflect")
+                    self.assertEqual((code, out), (2, ""))
+                    self.assertIn("Reflect", err)
+            with patch.object(semantic, "REFLECT", str(self.temp / "absent-reflect")):
+                self.assertEqual(self.cli("query", "retry", "--backend", "reflect")[:2], (2, ""))
+            code, out, err = self.cli("query", "retry", "--backend", "reflect", "--mode", "vector")
+            self.assertEqual((code, out), (2, ""))
+            self.assertIn("--backend qmd", err)
+            self.fake_reflect([self.hit("cache/excluded.md")])
+            self.assertEqual(self.cli("query", "retry", "--backend", "reflect")[:2], (0, "[]\n"))
+            child.assert_not_called()
+
+    def test_reflect_rows_pass_the_same_filters_as_qmd_rows(self):
+        external = self.temp / "outside.md"
+        external.write_text("not in the vault")
+        (self.vault / "wiki/link.md").symlink_to(external)
+        (self.vault / "wiki/notes.txt").write_text("plain text outside raw")
+        old = datetime(2020, 1, 1).timestamp()
+        os.utime(self.vault / "work/任务编排.md", (old, old))
+        self.fake_reflect([self.hit(path) for path in (
+            "cache/excluded.md", ".hidden/excluded.md", "../outside.md", "wiki/link.md", "wiki/notes.txt",
+            "wiki/absent.md", "archive/old-plan.md", "raw/import/evidence.md", "inbox/pending.md", "sessions/run.md",
+            "wiki/rate-limits.md", "wiki/rate-limits.md", "work/任务编排.md", "reflections/精力管理.md")])
+
+        def search(*flags, limit="20"):
+            code, out, err = self.cli("query", "retry", "--backend", "reflect", *flags)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(self.reflect_argv()[4:6], ["--limit", limit])
+            return [(row["path"], row["scope"], row["representation"]) for row in json.loads(out)]
+        active = [("wiki/rate-limits.md", "active", "authored"), ("work/任务编排.md", "active", "authored"),
+                  ("reflections/精力管理.md", "active", "authored")]
+        self.assertEqual(search(), active)
+        self.assertEqual(search("--top", "2"), active[:2])
+        self.assertEqual(search("--path", "work", "--top", "10", limit="40"), active[1:2])
+        self.assertEqual(search("--after", "2021-01-01", limit="40"), [active[0], active[2]])
+        self.assertEqual(search("--before", "2021-01-01", limit="40"), active[1:2])
+        self.assertEqual(search("--scope", "raw"), [("raw/import/evidence.md", "raw", "raw_text")])
+        self.assertEqual(search("--scope", "all"), [
+            ("archive/old-plan.md", "archive", "authored"), ("raw/import/evidence.md", "raw", "raw_text"),
+            ("inbox/pending.md", "inbox", "authored"), ("sessions/run.md", "process", "authored"), *active])
+
+    def test_reflect_hits_inside_secure_folders_return_paths_only(self):
+        for name in ("personal/secure/ledger.md", "secure/top.md", "archive/secure/parked.md", "wiki/secure.md"):
+            (self.vault / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.vault / name).write_text("secure fixture")
+        self.fake_reflect([self.hit(name) for name in (
+            "personal/secure/ledger.md", "secure/top.md", "archive/secure/parked.md", "wiki/secure.md")])
+
+        def search(*flags):
+            code, out, err = self.cli("query", "ledger", "--backend", "reflect", *flags)
+            self.assertEqual(code, 0, err)
+            return {row["path"]: row for row in json.loads(out)}
+        rows = search()
+        self.assertEqual(list(rows), ["personal/secure/ledger.md", "secure/top.md", "wiki/secure.md"])
+        for name in ("personal/secure/ledger.md", "secure/top.md"):
+            self.assertEqual(rows[name].keys() & {"title", "line", "snippet"}, set())
+            self.assertEqual((rows[name]["representation"], rows[name]["scope"]), ("path_only", "active"))
+        self.assertEqual(rows["wiki/secure.md"]["snippet"], "matched text")  # a note, not a secure folder
+        # Like QMD's secure collection, secure notes never surface outside the active scope.
+        self.assertEqual(search("--scope", "archive"), {})
+        self.assertNotIn("archive/secure/parked.md", search("--scope", "all"))
+        # Should Reflect ever follow the raw-store secure link, the hit is still redacted.
+        shutil.rmtree(self.vault / "personal")
+        self.use_store(self.mirror_store())
+        self.fake_reflect([self.hit("personal/secure/ledger.md")])
+        row = search()["personal/secure/ledger.md"]
+        self.assertEqual((row["representation"], row.keys() & {"title", "snippet"}), ("path_only", set()))
+
+    def test_qmd_backend_keeps_the_qmd_path_and_never_runs_reflect(self):
+        self.fake_reflect([self.hit("wiki/rate-limits.md")])
+        code, out, err = self.cli("query", "retry", "--backend", "qmd", "--mode", "lexical")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("index is absent", err)
+        self.fake_index()
+        with patch.object(semantic, "bridge", return_value=[self.qmd_row()]) as child:
+            code, out, err = self.cli("query", "retry", "--backend", "qmd", "--mode", "lexical")
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(self.reflect_argv())
+        self.assertEqual(child.call_args.kwargs["collections"], ["active"])
+        self.assertEqual(json.loads(out), [{**self.qmd_row(), "source": "local", "backend": "qmd",
+                                            "score_kind": "lexical", "representation": "authored"}])
 
 
 if __name__ == "__main__":

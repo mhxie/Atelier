@@ -71,8 +71,10 @@ class QmdCandidateTest(unittest.TestCase):
             native = subprocess.CompletedProcess([], 0, json.dumps(rows), "")
             with patch.object(decay_scan, "tier", return_value=base), \
                  patch.object(decay_scan, "_tier_of", side_effect=lambda path: path.split("/")[0]), \
-                 patch.object(decay_scan.subprocess, "run", return_value=native):
+                 patch.object(decay_scan.subprocess, "run", return_value=native) as search:
                 findings = decay_scan.scan_redundant(vault, "wip", 15)
+                # Redundancy evidence must be QMD's, so the query pins the backend.
+                self.assertEqual(search.call_args.args[0][-2:], ["--backend", "qmd"])
                 self.assertEqual(len(findings), 1)
                 self.assertEqual(findings[0]["mode"], "qmd")
                 self.assertTrue(findings[0]["requires_content_review"])

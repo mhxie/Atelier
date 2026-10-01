@@ -129,7 +129,7 @@ def scan_redundant(vault: Path, scope: str, max_candidates: int) -> list[dict]:
         title = path.stem
         result = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "semantic.py"), "query", title,
-             "--top", "5", "--format", "json"],
+             "--top", "5", "--format", "json", "--backend", "qmd"],
             cwd=ROOT, capture_output=True, text=True, timeout=120, check=False,
         )
         if result.returncode != 0:

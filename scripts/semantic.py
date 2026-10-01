@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local QMD search. The vault is read-only; all derived state is machine-local."""
+"""Local search: Reflect's lexical index first, then QMD. The vault is read-only; derived state is machine-local."""
 from __future__ import annotations
 
 import argparse
@@ -24,6 +24,8 @@ import _node  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 SCOPES = ("active", "raw", "archive", "inbox", "process")
 SECURE = "secure"  # QMD collection of raw-store secure notes; results report it as `active`
+BACKENDS = ("auto", "reflect", "qmd")
+REFLECT, REFLECT_TIMEOUT = "reflect", 10  # the Reflect CLI on PATH answers lexically; QMD is the fallback
 CONFIG_PATH = ROOT / "semantic.toml"
 HARD_DIRS = ("cache", "_meta", "_routine_prompts", "_tools", "node_modules", ".venv", "__pycache__")
 STAGED_MODEL_DIRECTORY_ENV = "ATELIER_QMD_MODEL_DIRECTORY"
@@ -408,9 +410,31 @@ def store_mirror(path: str, vault: Path, store: Path | None) -> bool:
             if vault.joinpath(*parts[:depth]).is_symlink()] in (["raw"], ["secure"])
 
 
+def reflect_rows(vault: Path, text: str, limit: int) -> list[dict]:
+    """Reflect's ranked lexical hits as QMD-shaped rows; a hit inside a secure/ folder joins SECURE."""
+    command = [REFLECT, "--graph", str(vault), "search", "--json", "--limit", str(limit), "--", text]
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=REFLECT_TIMEOUT,
+                                stdin=subprocess.DEVNULL)
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise SearchError(f"Reflect search unavailable: {exc}") from exc
+    if result.returncode:  # a successful search's stderr only notes skipped symlinks; do not relay it
+        raise SearchError(f"Reflect search exited {result.returncode}: {result.stderr.strip()[:300]}")
+    try:
+        payload = json.loads(result.stdout)
+        stale, rows = payload["stale"], [
+            {"path": hit["path"], "score": hit["score"], "title": hit["title"], "snippet": hit["snippet"],
+             "scope": SECURE if SECURE in PurePosixPath(hit["path"]).parts[:-1] else scope_for(hit["path"], vault)}
+            for hit in payload["results"]]
+    except (ValueError, LookupError, TypeError) as exc:
+        raise SearchError("Reflect emitted unexpected JSON") from exc
+    if stale:
+        print("semantic: Reflect's index is stale; open the graph in Reflect to refresh it", file=sys.stderr)
+    return rows
+
+
 def query(args: argparse.Namespace) -> list[dict]:
     vault = vault_root()
-    require_index(vault)
     requested = list(SCOPES) if args.scope == "all" else [args.scope]
     store = raw_store()
     prefixes = [relative_path(path, vault) for path in (args.path or [])]
@@ -429,46 +453,62 @@ def query(args: argparse.Namespace) -> list[dict]:
     # hybrid row skipping the reranker carries an RRF fusion score instead.
     score_kind = f"{args.mode}-no-rerank" if args.mode == "hybrid" and args.no_rerank else args.mode
     limit = min(200, max(settings()["runtime"]["candidate_limit"], args.top * (4 if prefixes or after or before else 1)))
+
+    def accept(rows: object, backend: str, kind: str) -> list[dict]:
+        """The one post-filter both backends share; `backend` names the producer in errors and rows."""
+        if not isinstance(rows, list):
+            raise SearchError(f"{backend} query did not return a result list")
+        result, seen = [], set()
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+                raise SearchError(f"{backend} returned a malformed result")
+            path = row["path"]
+            actual_scope = scope_for(path, vault)
+            collection_scope = "active" if row.get("scope") == SECURE else row.get("scope")
+            if actual_scope not in requested or collection_scope != actual_scope:
+                continue
+            source = vault / path
+            if source.is_symlink() or not source.is_file() or (
+                    source.resolve() != source.absolute() and not store_mirror(path, vault, store)):
+                continue
+            if source.suffix.lower() != ".md" and actual_scope != "raw":
+                continue
+            if prefixes and not any(prefix in (".", path) or path.startswith(prefix + "/") for prefix in prefixes):
+                continue
+            mtime = source.stat().st_mtime
+            if after is not None and mtime < after or before is not None and mtime > before:
+                continue
+            if path in seen:
+                continue
+            score = row.get("score")
+            if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
+                raise SearchError(f"{backend} returned an invalid score")
+            seen.add(path)
+            hit = {**row, "scope": actual_scope, "source": "local", "backend": backend.lower(), "score_kind": kind,
+                   "representation": "raw_text" if actual_scope == "raw" else "authored"}
+            if row.get("scope") == SECURE:  # local models read secure notes; agents get the path only
+                hit = {key: value for key, value in hit.items() if key not in ("title", "line", "snippet")}
+                hit["representation"] = "path_only"
+            result.append(hit)
+            if len(result) == args.top:
+                break
+        return result
+
+    if args.backend != "qmd" and args.mode != "vector":  # Reflect is lexical, even for a hybrid request
+        try:
+            hits = accept(reflect_rows(vault, args.query, limit), "Reflect", "lexical")
+            if hits or args.backend == "reflect":
+                return hits
+        except SearchError as exc:
+            if args.backend == "reflect":
+                raise
+            print(f"semantic: {exc}; falling back to QMD", file=sys.stderr)
+    elif args.backend == "reflect":
+        raise SearchError("Reflect search is lexical; --mode vector needs --backend qmd or auto")
+    require_index(vault)
     collections = requested + ([SECURE] if store is not None and "active" in requested else [])
-    rows = bridge(vault, "query", roles=roles, query=args.query, mode=args.mode,
-                  collections=collections, limit=limit, rerank=not args.no_rerank, expand=args.expand)
-    if not isinstance(rows, list):
-        raise SearchError("QMD query did not return a result list")
-    result, seen = [], set()
-    for row in rows:
-        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
-            raise SearchError("QMD returned a malformed result")
-        path = row["path"]
-        actual_scope = scope_for(path, vault)
-        collection_scope = "active" if row.get("scope") == SECURE else row.get("scope")
-        if actual_scope not in requested or collection_scope != actual_scope:
-            continue
-        source = vault / path
-        if source.is_symlink() or not source.is_file() or (
-                source.resolve() != source.absolute() and not store_mirror(path, vault, store)):
-            continue
-        if source.suffix.lower() != ".md" and actual_scope != "raw":
-            continue
-        if prefixes and not any(prefix == "." or path == prefix or path.startswith(prefix + "/") for prefix in prefixes):
-            continue
-        mtime = source.stat().st_mtime
-        if after is not None and mtime < after or before is not None and mtime > before:
-            continue
-        if path in seen:
-            continue
-        score = row.get("score")
-        if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
-            raise SearchError("QMD returned an invalid score")
-        seen.add(path)
-        hit = {**row, "scope": actual_scope, "source": "local", "backend": "qmd", "score_kind": score_kind,
-               "representation": "raw_text" if actual_scope == "raw" else "authored"}
-        if row.get("scope") == SECURE:  # local models read secure notes; agents get the path only
-            hit = {key: value for key, value in hit.items() if key not in ("title", "line", "snippet")}
-            hit["representation"] = "path_only"
-        result.append(hit)
-        if len(result) == args.top:
-            break
-    return result
+    return accept(bridge(vault, "query", roles=roles, query=args.query, mode=args.mode, collections=collections,
+                         limit=limit, rerank=not args.no_rerank, expand=args.expand), "QMD", score_kind)
 
 
 def status(vault: Path) -> dict:
@@ -501,6 +541,8 @@ def build_parser() -> argparse.ArgumentParser:
     query_parser = sub.add_parser("query", help="Bounded local search; scores are ranking evidence, not confidence.")
     query_parser.add_argument("query")
     query_parser.add_argument("--mode", choices=("hybrid", "lexical", "vector"), default="hybrid")
+    query_parser.add_argument("--backend", choices=BACKENDS, default="auto",
+                              help="auto tries Reflect's lexical index, then QMD; vector mode always uses QMD.")
     query_parser.add_argument("--scope", choices=SCOPES + ("all",), default="active")
     query_parser.add_argument("--top", type=int, default=10)
     query_parser.add_argument("--path", action="append")

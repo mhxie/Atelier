@@ -53,7 +53,8 @@ and retrieval. Custom score adjustments are retired. `sources/semantic.md`
 owns the CLI, exact scope boundaries, setup, and hardware profiles.
 
 Reflect maintains its own index in `$OV/.reflect/index.sqlite` while the desktop
-app runs. Agents reach it only through the bundled `reflect` CLI (see AGENTS.md).
+app runs. Agents reach it only through the bundled `reflect` CLI, which
+`semantic.py query` tries before QMD (see AGENTS.md).
 
 ## Source of Truth
 
