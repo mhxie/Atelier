@@ -140,7 +140,7 @@ uv run scripts/zk_audit.py            # human-readable report
 uv run scripts/zk_audit.py --json     # machine-readable; used by /lint Phase 0b
 ```
 
-The audit walks `$OV/` and surfaces six categories of finding (advisory only; never mutates):
+The audit walks `$OV/` and surfaces seven categories of finding (advisory; only `--fix-links` mutates, by creating missing links):
 
 | # | Category | What it flags | Action |
 |---|---|---|---|
@@ -149,10 +149,11 @@ The audit walks `$OV/` and surfaces six categories of finding (advisory only; ne
 | 3 | Archive ↔ working-tier overlap | Archive subtrees whose normalized name matches a working-tier domain (e.g., `archive/practical/health-admin` ↔ `health/`). Often pre-protocol residue duplicating active tiers. | Per-subtree decision: keep as historical archive, merge into the active working tier, or rename to disambiguate. Audit surfaces; user decides. |
 | 4 | Root orphans + empty `.md` | `.md` files at `$OV/` root other than `README.md`; 0-byte `.md` files in working tiers. Empty `.md` under `archive/` aggregated as a count (pre-ingestion stubs, not new debt). | Move root orphans into a tier dir; delete or fill empty stubs. |
 | 5 | Suspicious top-level dirs | Finder-duplicate names (` 2`, ` (2)`), empty dirs, skeleton dirs (no README, fewer than 3 entries). | Rename, remove, or build out. |
+| 6 | Vault layout | `$OV` missing, not a Git work tree, or inside a file-sync folder; raw store unmounted; a `raw/`, `secure/`, or root `cache` that is a real folder, a misdirected link, or a store folder with no link. | Fix `$OV` or mount the store; `--fix-links` adds missing links; move real folders into the store by hand. |
 
 The audit is integrated into `/lint` as Phase 0b (advisory; never blocks). `/lint` surfaces a one-line summary per non-empty category; the full listings are read on demand via the script.
 
-Findings are *advisory*, not auto-fixable. The audit reports gaps; consolidation, README authoring, and digest writing are user-driven follow-up work (typically a per-domain pass).
+Findings are *advisory*; only missing links are auto-fixable. The audit reports gaps; consolidation, README authoring, and digest writing are user-driven follow-up work (typically a per-domain pass).
 
 ## Out of scope
 
