@@ -46,7 +46,7 @@ The power isn't in having a large circle. It's in knowing exactly where the edge
 ## Example Application
 
 **Situation:** "Should I lead the ML infrastructure redesign?"
-- Inside circle: distributed systems, data pipelines, system design
+- Inside circle: distributed systems, data pipelines, software architecture
 - Edge: ML training loops, model serving optimization
 - Outside: ML research, model architecture choices
 

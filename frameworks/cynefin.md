@@ -52,7 +52,7 @@ Origin: Dave Snowden (Cognitive Edge). A sense-making framework for understandin
 ## Common Mistake: Domain Mismatch
 
 Most reflection failures come from treating a **complex** problem as if it were **complicated**:
-- Trying to plan your way through a career transition (complex) like it's a system design (complicated)
+- Trying to plan your way through a career transition (complex) like it's a database migration (complicated)
 - Analyzing a relationship issue (complex) like it's a debugging problem (complicated)
 
 The fix: if your analysis isn't producing clarity, you're probably in complex territory. Switch to probing.

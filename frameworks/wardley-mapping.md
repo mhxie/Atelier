@@ -22,7 +22,7 @@ List all capabilities needed to deliver that value, from visible to invisible:
 ```
 [User Need: Reliable data infra]
     ↓
-[System Design] → [Distributed Systems] → [Cloud Platforms]
+[Software Architecture] → [Distributed Systems] → [Cloud Platforms]
     ↓
 [ML Pipeline Knowledge] → [Data Formats] → [Compute Orchestration]
     ↓
