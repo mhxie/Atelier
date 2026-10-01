@@ -31,7 +31,7 @@
             "propertyNames": {
               "not": {
                 "enum": [
-                  "claude_code", "codex", "codex_reasoning_effort", "direct_api",
+                  "agy", "claude_code", "codex", "codex_reasoning_effort", "direct_api",
                   "direct_api_base", "direct_api_extras", "direct_api_timeout", "api_env"
                 ]
               }
@@ -61,7 +61,7 @@
               "voices": {
                 "type": "object",
                 "minProperties": 1,
-                "propertyNames": {"enum": ["native", "direct", "codex"]},
+                "propertyNames": {"enum": ["native", "direct", "codex", "agy"]},
                 "additionalProperties": {"$ref": "#/$defs/text"}
               }
             },

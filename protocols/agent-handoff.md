@@ -281,11 +281,12 @@ granting it to itself.
 Each role's `voices` table in `harness/agents.toml` maps a leg name to a model
 identity. A `native` leg runs the role file in the selected runtime; a `direct`
 leg runs `uv run scripts/chat_completion.py --model <identity> --max-tokens 0
---prompt -` with the prompt on stdin. Missing `api_env` makes that script exit
-2. Treat an unavailable leg as a soft skip, never a silent one: report the
-downgrade visibly, e.g. `Cross-provider check downgraded: <role> ran
-native-only (<reason>).` Never claim a plan completed when a planned leg did
-not run.
+--prompt -` with the prompt on stdin; an `agy` leg runs `uv run
+scripts/agy_leg.py` (web search, no file or command tools). Prefer `agy` as the
+second leg when available, else `direct`. A missing key, binding, or CLI exits 2.
+Soft-skip an unavailable leg, never silently: report the downgrade, e.g.
+`Cross-provider check downgraded: <role> ran native-only (<reason>).` Never
+claim a plan completed when a planned leg did not run.
 
 ## Escalation Protocol
 

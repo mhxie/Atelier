@@ -1,55 +1,18 @@
-# Model identity registry — committed schema, no bindings.
+# Model identity registry: committed schema, no bindings. Each `[models.X]` holds
+# only a runtime-neutral `reasoning_tier`; provider bindings live in the
+# gitignored `profile/models.toml` and merge at runtime.
 #
-# This file declares model identities and their runtime-neutral reasoning tier.
-# Each `[models.X]` entry contains only shared semantic metadata.
-# All provider bindings (claude_code id, codex id, direct_api endpoint,
-# api_env, request extras) live in the gitignored `profile/models.toml`
-# and merge at runtime: schema from here, bindings from there.
+# Roles live in `agents/*.md`; each role's `voices` table in `harness/agents.toml`
+# maps its legs (`native`/`direct`/`codex`/`agy`) to these identities, and
+# `protocols/agent-handoff.md` owns dispatch. Claude binds `native` models in agent
+# frontmatter; Codex maps `reasoning_tier` to effort.
 #
-# Three orthogonal axes — kept separate by design:
-#
-#   1. Role            (researcher, reader, scribe, ...)  -> agents/*.md
-#                                                          + generated runtime edges
-#                                                          + harness/agents.toml
-#   2. Model identity  (opus, sonnet, deepseek_pro, ...)  -> THIS FILE
-#   3. Voices         (available model legs for a role) -> harness/agents.toml
-#
-# Each role declares a `voices` keyed inline table in `harness/agents.toml`
-# (`{native = "X", direct = "Y"}`, with leg keys `native`/`direct`/`codex`).
-# Whether all declared legs fire on a dispatch is the call site's decision;
-# see `protocols/agent-handoff.md` for the canonical
-# story. Single-leg roles (Scribe) declare only `{native}` by design. `native`
-# is the selected runtime's project-agent surface. Claude binds its concrete
-# model in agent frontmatter; Codex inherits the selected session model and
-# maps this file's native-identity `reasoning_tier` to native effort.
-# Review risk tiers are separate from model reasoning effort. Neither is a
-# demonstrated measure of how much procedural guidance a model needs.
-#
-# Per-model schema (binding values live in profile/models.toml):
-#   claude_code            Claude Code-side model id (e.g., "opus")
-#   codex                  Codex-side model id (e.g., "openai/gpt-5.5")
-#   codex_reasoning_effort "low" | "medium" | "high" | "xhigh" - explicit
-#                          Codex CLI model binding
-#                          used by direct legs through chat_completion.py.
-#                          Native project agents instead map their shared
-#                          `reasoning_tier` at the `.codex/agents/` edge.
-#   direct_api             direct OpenAI-compatible model id
-#   direct_api_base        full endpoint URL — host + path
-#   direct_api_extras      inline table merged into request body for
-#                          provider-specific extensions (e.g., a `thinking`
-#                          block for reasoning-control providers)
-#   direct_api_timeout     seconds; per-call timeout override (use for
-#                          reasoning-heavy models where TTFT exceeds the
-#                          120s default)
-#   direct_api_provider    optional; only "openai" (OpenAI-compatible chat
-#                          completions via the official SDK) is supported
-#   api_env                env var holding the API key; the selected SDK
-#                          applies its own auth scheme
-#
-# Helper scripts that read api_env MUST exit-skip cleanly when unset (a
-# missing key collapses dual voices to single-leg with a warning, never a
-# silent success). Callers that fire dual dispatches MUST handle exit-2
-# from chat_completion.py as soft-skip-and-degrade, not as a hard failure.
+# Binding keys (profile/models.toml only): `claude_code`, `codex`,
+# `codex_reasoning_effort` (low|medium|high|xhigh; direct legs), `agy`
+# (scripts/agy_leg.py; effort rides the id), `direct_api`, `direct_api_base`,
+# `direct_api_extras` (request-body table), `direct_api_timeout` (seconds),
+# `direct_api_provider` (only "openai"), `api_env` (env var holding the key).
+# A leg with no usable binding or key exits 2; callers soft-skip it.
 
 [models.opus]
 # Anthropic Opus — high-cognition Anthropic leg used by deep-thinking roles.
@@ -68,16 +31,23 @@ reasoning_tier = "light"
 reasoning_tier = "deep"
 
 [models.deepseek_pro]
-# DeepSeek v4 Pro with default thinking. The reasoning-light DeepSeek leg
-# paired with Sonnet on every cross-validation role.
+# DeepSeek v4 Pro with default thinking; the leg paired with Sonnet.
 reasoning_tier = "balanced"
 
 [models.deepseek_flash]
-# DeepSeek v4 Flash. Cheap DeepSeek leg, currently unbound: no committed
-# role binds it (Scribe is single-leg `{native}` by design). Reserved —
-# a gitignored per-user profile may still bind it.
+# DeepSeek v4 Flash. Reserved: no committed role binds it.
 reasoning_tier = "light"
 
 [models.codex_gpt55_max]
 # Codex gpt-5.5 with reasoning_effort = "high".
 reasoning_tier = "deep"
+
+[models.gemini_flash]
+# Antigravity fast leg paired with Sonnet on cross-validation roles.
+reasoning_tier = "balanced"
+binding_optional = true
+
+[models.gemini_deep]
+# Antigravity deep leg paired with Opus on deep-cognition roles.
+reasoning_tier = "deep"
+binding_optional = true

@@ -3,29 +3,16 @@
 # `agents/*.md` is canonical. The edge renderer copies each source to Claude
 # and generates the project-scoped Codex adapter from this registry.
 #
-# Each agent declares a `voices` keyed inline table mapping leg name to
-# model identity. Allowed leg keys:
+# Each agent's `voices` table maps a leg to a model identity:
+#   native  selected runtime's project agent (`.claude/agents/`, `.codex/agents/`)
+#   direct  `uv run scripts/chat_completion.py --model <identity>` (OpenAI-compatible)
+#   codex   `codex exec -m <identity>`, independent of the selected runtime
+#   agy     `uv run scripts/agy_leg.py --model <identity>` (Antigravity CLI)
 #
-#   native  The selected interactive runtime's project-agent leg. Claude Code
-#           dispatches `.claude/agents/<name>.md`; Codex dispatches
-#           `.codex/agents/<name>.toml`. The runtime adapter controls the
-#           concrete model and reasoning effort.
-#   direct  OpenAI-compatible direct-api leg, dispatched via
-#           `uv run scripts/chat_completion.py --model <identity>`.
-#   codex   Explicit external Codex CLI reviewer leg, dispatched via
-#           `codex exec -m <identity>` independently of the selected runtime.
-#
-# Bindings are available voices, not permission grants or mandatory fanout.
-# The selected procedure chooses calls using `protocols/agent-handoff.md`;
-# `protocols/agent-handoff.md` owns dispatch inputs and completion reporting.
-#
-# Model identities are defined in `harness/models.toml`; provider bindings
-# live in gitignored `profile/models.toml`.
-#
-# Each voice identity carries a runtime-neutral `reasoning_tier` in
-# `harness/models.toml`. Codex inherits the user's selected model and maps the
-# native voice's tier to `model_reasoning_effort`. Lint enforces
-# registry-to-adapter parity.
+# Bindings are available voices, not grants or mandatory fanout; the selected
+# procedure chooses calls per `protocols/agent-handoff.md`. Identities and
+# `reasoning_tier` live in `harness/models.toml`; provider bindings in gitignored
+# `profile/models.toml`. Lint enforces registry-to-adapter parity.
 
 [agents.precedent-judge]
 source = "agents/precedent-judge.md"
@@ -35,79 +22,79 @@ description = "Applies the user's own past decisions to a new pending item; one 
 
 [agents.challenger]
 source = "agents/challenger.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
+voices = { native = "opus", direct = "deepseek_pro_max", agy = "gemini_deep" }
 status = "canonical"
 description = "Probes the painter's thoughts with sharp questions; affirms or counters in turn. Le cercle archetype: The Critic (Degas)."
 
 [agents.curator]
 source = "agents/curator.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Drafts note-content operations (compactions, merges, new notes, wiki entries) for the orchestrator to write under $OV/. Le cercle archetype: The Collector (Caillebotte)."
 
 [agents.forgetter]
 source = "agents/forgetter.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Active decay scanner over $OV/: redundant / time-stale / contradicted / low-signal. Proposes; never deletes. Returns findings inline via envelope for the trusted parent to validate. Le cercle archetype: The Conservator."
 
 [agents.librarian]
 source = "agents/librarian.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Recommends readings, resources, and thinkers relevant to the painter's interests and goals. Le cercle archetype: The Cataloguer."
 
 [agents.meeting]
 source = "agents/meeting.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Processes work meeting transcripts into structured notes with action items and decisions. Le cercle archetype: The Stenographer."
 
 [agents.reader]
 source = "agents/reader.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Reads articles and notes through critical, structural, practical, and dialectical lenses. For dense theory, foundational papers, or hard texts, dispatch the Scholar instead. Le cercle archetype: The Reader."
 
 [agents.scholar]
 source = "agents/scholar.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
+voices = { native = "opus", direct = "deepseek_pro_max", agy = "gemini_deep" }
 status = "canonical"
 description = "Deep-cognition variant of Reader: same lenses, same workflow, dispatched with stronger voices for dense theory, foundational papers, and hard texts. Le cercle archetype: The Scholar."
 
 [agents.researcher]
 source = "agents/researcher.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
+voices = { native = "opus", direct = "deepseek_pro_max", agy = "gemini_deep" }
 status = "canonical"
 description = "Gathers raw context from the painter's œuvre ($OV/). Le cercle archetype: The Observer (Pissarro)."
 
 [agents.reviewer]
 source = "agents/reviewer.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Quality-checks session outputs and system evolution changes. Le cercle archetype: The Arbiter (Manet)."
 
 [agents.scout]
 source = "agents/scout.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
 description = "Gathers external context from outside the œuvre: articles, discussions, research, recent developments. Le cercle archetype: The Flâneur."
 
 [agents.synthesizer]
 source = "agents/synthesizer.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
+voices = { native = "opus", direct = "deepseek_pro_max", agy = "gemini_deep" }
 status = "canonical"
 description = "Composes gathered context into structured reflections, summaries, and insights. Le cercle archetype: The Colorist (Monet)."
 
 [agents.thinker]
 source = "agents/thinker.md"
-voices = { native = "opus", direct = "deepseek_pro_max" }
+voices = { native = "opus", direct = "deepseek_pro_max", agy = "gemini_deep" }
 status = "canonical"
 description = "Applies structured thinking frameworks for outside-view reasoning. Le cercle archetype: The Structuralist (Cézanne)."
 
 [agents.privacy-reviewer]
 source = "agents/privacy-reviewer.md"
-voices = { native = "sonnet", direct = "deepseek_pro" }
+voices = { native = "sonnet", direct = "deepseek_pro" }  # no agy: it can web-search, and this role reads private diffs
 status = "canonical"
 description = "Semantic privacy scanner for committed-file diffs. Catches leaks the mechanical scripts/privacy_check.py misses. Le cercle archetype: The Steward."
 

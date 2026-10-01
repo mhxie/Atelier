@@ -4,14 +4,10 @@ Committed schema in `harness/models.toml` declares identities and their
 runtime-neutral reasoning tier; gitignored `profile/models.toml` supplies
 provider ids, endpoints, env vars, and request extras. This module is the one
 place that merges them, so callers never re-implement the overlay.
-
-CLI: `_models.py codex <identity>` prints "<codex id>\t<reasoning effort>",
-the contract `scripts/chat_completion.py` consumes.
 """
 from __future__ import annotations
 
 from pathlib import Path
-import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,27 +54,19 @@ def codex_binding(name: str) -> tuple[str, str]:
     return str(entry.get("codex") or ""), str(entry.get("codex_reasoning_effort") or "")
 
 
-def claude_binding(name: str) -> str:
-    """Claude Code model id for a Claude leg, or "" when unbound."""
+def _id(name: str, key: str) -> str:
+    """Bound provider model id under `key`, or "" when unbound."""
     entry = resolve(name)
     if entry is None:
         raise ModelError(f"model {name!r} is missing from harness/models.toml")
-    return str(entry.get("claude_code") or "")
+    return str(entry.get(key) or "")
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if len(args) != 2 or args[0] != "codex":
-        print("usage: _models.py codex <identity>", file=sys.stderr)
-        return 2
-    try:
-        model, effort = codex_binding(args[1])
-    except ModelError as exc:
-        print(f"_models.py: {exc}", file=sys.stderr)
-        return 2
-    print(f"{model}\t{effort}")
-    return 0
+def claude_binding(name: str) -> str:
+    """Claude Code model id for a Claude leg, or "" when unbound."""
+    return _id(name, "claude_code")
 
 
-if __name__ == "__main__":
-    raise SystemExit(main())
+def agy_binding(name: str) -> str:
+    """Antigravity CLI model id for an agy leg, or "" when unbound."""
+    return _id(name, "agy")
