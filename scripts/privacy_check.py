@@ -120,6 +120,8 @@ def md_files(root: Path, *, contents: bool = False):
     Callers that read the files pass contents=True: secure/ notes lend only
     their filenames.
     """
+    if contents and root.name == "secure":
+        return
     for current, dirs, files in os.walk(root, followlinks=True):
         if contents:
             dirs[:] = [d for d in dirs if d != "secure"]

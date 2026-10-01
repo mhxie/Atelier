@@ -79,10 +79,12 @@ class IndexBuildTest(unittest.TestCase):
                 "---\npeople: [Grace Kelly]\n---\nAsk [[Marie Curie]].\n", encoding="utf-8")
             (vault / "wip" / "secure").symlink_to(store / "wip" / "secure")
             (vault / "travel" / "raw").symlink_to(store / "travel" / "raw")
+            (vault / "secure").mkdir()
+            (vault / "secure" / "Quiet Harbor Notes.md").write_text("---\npeople: [Lise Meitner]\n---\n", encoding="utf-8")
             terms = pi.build(vault, allowlist=set())["terms"]
-            for name in ("Hidden Orchard Notes", "okonkwo-ledger", "Rosalind Franklin"):
+            for name in ("Hidden Orchard Notes", "okonkwo-ledger", "Rosalind Franklin", "Quiet Harbor Notes"):
                 self.assertIn(name, terms)
-            for name in ("Grace Kelly", "Marie Curie"):
+            for name in ("Grace Kelly", "Marie Curie", "Lise Meitner"):
                 self.assertNotIn(name, terms, "secure note contents are never read")
 
     def test_explain_reports_provenance_or_the_reason_for_absence(self) -> None:
