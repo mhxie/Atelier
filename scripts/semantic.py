@@ -18,11 +18,12 @@ from datetime import date, datetime, time as daytime
 from pathlib import Path, PurePosixPath
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier_segments, vault_root  # noqa: E402
+from _paths import raw_store, tier_segments, vault_root  # noqa: E402
 import _node  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 SCOPES = ("active", "raw", "archive", "inbox", "process")
+SECURE = "secure"  # QMD collection of raw-store secure notes; results report it as `active`
 CONFIG_PATH = ROOT / "semantic.toml"
 HARD_DIRS = ("cache", "_meta", "_routine_prompts", "_tools", "node_modules", ".venv", "__pycache__")
 STAGED_MODEL_DIRECTORY_ENV = "ATELIER_QMD_MODEL_DIRECTORY"
@@ -90,7 +91,10 @@ def relative_path(value: str, vault: Path) -> str:
     path = Path(value).expanduser()
     absolute = (vault / path).resolve() if not path.is_absolute() else path.resolve()
     if not absolute.is_relative_to(vault):
-        raise SearchError("path must remain inside the canonical vault")
+        store = raw_store()
+        if store is None or not absolute.is_relative_to(store):
+            raise SearchError("path must remain inside the canonical vault")
+        return absolute.relative_to(store).as_posix()
     return absolute.relative_to(vault).as_posix()
 
 
@@ -127,22 +131,26 @@ def scope_for(path: str, vault: Path) -> str | None:
 
 def collection_config(vault: Path) -> dict:
     zone = zones(vault)
+    store = raw_store()
     hard = [f"**/{name}/**" for name in HARD_DIRS]
     hard += ["**/.*", "**/.*/**", zone["archive"] + "/orphan-stubs/**"]
     hard += [zone[name] + "/**" for name in ("meta", "routine_prompts", "private_components")]
     archive, process = zone["archive"] + "/**", zone["process"] + "/**"
+    authored = ["**/raw/**", "**/inbox/**", archive, process]
     patterns = {
-        "active": ("**/*.md", ["**/raw/**", "**/inbox/**", archive, process]),
+        "active": ("**/*.md", authored),
         "raw": ("**/raw/**/*.{md,txt,text,csv,html,htm}", []),
         "archive": (zone["archive"] + "/**/*.md", ["**/raw/**"]),
         "inbox": ("**/inbox/**/*.md", ["**/raw/**", archive, process]),
         "process": (zone["process"] + "/**/*.md", ["**/raw/**"]),
     }
+    if store is not None:  # vault raw/ and secure/ folders are symlinks into this mirror
+        patterns[SECURE] = ("**/secure/**/*.md", authored)
     return {
         "models": settings()["models"],
         "collections": {name: {
-            "path": str(vault), "pattern": pattern, "ignore": hard + exclusions,
-            "includeByDefault": name == "active",
+            "path": str(store if store is not None and name in ("raw", SECURE) else vault),
+            "pattern": pattern, "ignore": hard + exclusions, "includeByDefault": name in ("active", SECURE),
         } for name, (pattern, exclusions) in patterns.items()},
     }
 
@@ -150,6 +158,8 @@ def collection_config(vault: Path) -> dict:
 def prepare(vault: Path) -> Path:
     if not vault.is_dir():
         raise SearchError("canonical vault directory does not exist")
+    if (store := raw_store()) is not None and not store.is_dir():
+        raise SearchError("raw_store is not a directory; mount it or unset it before indexing")
     directory = state_dir(vault)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     # JSON is a YAML subset; the official QMD CLI can use this same config.
@@ -389,10 +399,20 @@ def bridge(vault: Path, command: str, *, roles: list[str] | None = None, **optio
         raise SearchError("QMD emitted invalid JSON") from exc
 
 
+def store_mirror(path: str, vault: Path, store: Path | None) -> bool:
+    """Accept one raw or secure folder symlink onto the same path in the raw store, nothing else."""
+    if store is None or (vault / path).resolve() != store / path:
+        return False
+    parts = PurePosixPath(path).parts
+    return [part for depth, part in enumerate(parts[:-1], 1)
+            if vault.joinpath(*parts[:depth]).is_symlink()] in (["raw"], ["secure"])
+
+
 def query(args: argparse.Namespace) -> list[dict]:
     vault = vault_root()
     require_index(vault)
     requested = list(SCOPES) if args.scope == "all" else [args.scope]
+    store = raw_store()
     prefixes = [relative_path(path, vault) for path in (args.path or [])]
     after = datetime.combine(date.fromisoformat(args.after), daytime.min).timestamp() if args.after else None
     before = datetime.combine(date.fromisoformat(args.before), daytime.max).timestamp() if args.before else None
@@ -409,8 +429,9 @@ def query(args: argparse.Namespace) -> list[dict]:
     # hybrid row skipping the reranker carries an RRF fusion score instead.
     score_kind = f"{args.mode}-no-rerank" if args.mode == "hybrid" and args.no_rerank else args.mode
     limit = min(200, max(settings()["runtime"]["candidate_limit"], args.top * (4 if prefixes or after or before else 1)))
+    collections = requested + ([SECURE] if store is not None and "active" in requested else [])
     rows = bridge(vault, "query", roles=roles, query=args.query, mode=args.mode,
-                  collections=requested, limit=limit, rerank=not args.no_rerank, expand=args.expand)
+                  collections=collections, limit=limit, rerank=not args.no_rerank, expand=args.expand)
     if not isinstance(rows, list):
         raise SearchError("QMD query did not return a result list")
     result, seen = [], set()
@@ -419,10 +440,12 @@ def query(args: argparse.Namespace) -> list[dict]:
             raise SearchError("QMD returned a malformed result")
         path = row["path"]
         actual_scope = scope_for(path, vault)
-        if actual_scope not in requested or row.get("scope") != actual_scope:
+        collection_scope = "active" if row.get("scope") == SECURE else row.get("scope")
+        if actual_scope not in requested or collection_scope != actual_scope:
             continue
         source = vault / path
-        if source.is_symlink() or not source.is_file() or source.resolve() != source.absolute():
+        if source.is_symlink() or not source.is_file() or (
+                source.resolve() != source.absolute() and not store_mirror(path, vault, store)):
             continue
         if source.suffix.lower() != ".md" and actual_scope != "raw":
             continue
@@ -437,7 +460,7 @@ def query(args: argparse.Namespace) -> list[dict]:
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
             raise SearchError("QMD returned an invalid score")
         seen.add(path)
-        result.append({**row, "source": "local", "backend": "qmd", "score_kind": score_kind,
+        result.append({**row, "scope": actual_scope, "source": "local", "backend": "qmd", "score_kind": score_kind,
                        "representation": "raw_text" if actual_scope == "raw" else "authored"})
         if len(result) == args.top:
             break

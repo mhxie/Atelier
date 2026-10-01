@@ -166,6 +166,14 @@ def wiki_dirs() -> list[Path]:
     return dirs
 
 
+def raw_store() -> Path | None:
+    """Return the optional out-of-vault mirror behind `raw/` and `secure/` symlinks, else None."""
+    value = _registry().get("raw_store")
+    if value is not None and not (isinstance(value, str) and value.startswith("/")):
+        raise PathsError("ERROR: raw_store must be an absolute path in harness/paths.local.toml.")
+    return None if value is None else _resolve_segment(value)
+
+
 def atomic_write(
     path: Path, text: str, *, fsync: bool = True, newline: str | None = None,
     expected_text: str | None = None,

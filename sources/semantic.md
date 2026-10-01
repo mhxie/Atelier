@@ -87,6 +87,9 @@ All collections exclude operational directories (cache, metadata, routine
 prompts, private tools, hidden directories and dependency trees) and orphan
 stubs. QMD does not follow symlinks; the adapter also rejects replaced
 symlinks, out-of-vault paths, deleted sources, and scope-mismatched results.
+If `harness/paths.local.toml` sets `raw_store`, the `raw` scope and `secure/`
+notes (searched as `active`) are indexed from that mirror of vault paths; a hit
+may then cross one `raw` or `secure` folder link onto the same path there.
 Read the original source before quoting. Scope is provenance, not certification.
 
 Readwise uses its own explicit connector/CLI. Binary raw locator generation,

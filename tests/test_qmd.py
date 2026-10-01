@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import _node
+import _paths
 import semantic
 import semantic_eval
 from _paths import reset
@@ -35,8 +36,28 @@ class QmdAdapterTest(unittest.TestCase):
         self.enterContext(patch.dict(os.environ, {"OV": str(self.vault), "ATELIER_QMD_HOME": str(self.cache)}))
         os.environ.pop("ATELIER_QMD_PROFILE", None)
         self.enterContext(patch.object(semantic, "CONFIG_PATH", self.temp / "semantic.toml"))
+        # A private paths.local.toml (a real raw_store above all) must never reach these fixtures.
+        self.registry = self.temp / "atelier/harness"
+        self.registry.mkdir(parents=True)
+        shutil.copy(semantic.ROOT / "harness/paths.toml", self.registry)
+        self.enterContext(patch.object(_paths, "_atelier_root", return_value=self.registry.parent))
         reset()
         self.addCleanup(reset)
+
+    def use_store(self, value):
+        (self.registry / "paths.local.toml").write_text(f'[paths]\nraw_store = "{value}"\n', encoding="utf-8")
+        reset()
+
+    def mirror_store(self):
+        """Move raw/ into a store mirror beside a secure note; the vault keeps only the folder links."""
+        store = self.temp / "store"
+        (store / "personal/secure").mkdir(parents=True)
+        (store / "personal/secure/ledger.md").write_text("# Ledger\n\nsecuresentinel account notes\n")
+        shutil.move(self.vault / "raw", store / "raw")
+        (self.vault / "raw").symlink_to(store / "raw", target_is_directory=True)
+        (self.vault / "personal").mkdir()
+        (self.vault / "personal/secure").symlink_to(store / "personal/secure", target_is_directory=True)
+        return store
 
     def cli(self, *argv):
         with redirect_stdout(io.StringIO()) as stdout, redirect_stderr(io.StringIO()) as stderr:
@@ -85,6 +106,7 @@ class QmdAdapterTest(unittest.TestCase):
             "topic/cache/a.md": None, "topic/_tools/a.md": None, "topic/_meta/a.md": None,
             "_routine_prompts/a.md": None, ".secret/a.md": None, "topic/.hidden/a.md": None,
             "archive/orphan-stubs/a.md": None, "node_modules/a.md": None, "../a.md": None,
+            "personal/secure/a.md": "active", "topic/secure/raw/a.csv": "raw",
         }
         for name, expected in cases.items():
             with self.subTest(name=name):
@@ -409,6 +431,74 @@ class QmdAdapterTest(unittest.TestCase):
         self.assertEqual(child.call_args.kwargs["collections"], ["active"])
         self.assertEqual(json.loads(out)[0]["backend"], "qmd")
 
+    def test_raw_store_roots_raw_and_secure_collections(self):
+        plain = semantic.collection_config(self.vault)["collections"]
+        self.assertEqual({entry["path"] for entry in plain.values()}, {str(self.vault)})
+        store = self.mirror_store()
+        self.use_store(store)
+        config = semantic.collection_config(self.vault)["collections"]
+        self.assertEqual(config, {**plain, "raw": {**plain["raw"], "path": str(store)}, semantic.SECURE: {
+            **plain["active"], "path": str(store), "pattern": "**/secure/**/*.md"}})
+        self.assertTrue(config[semantic.SECURE]["includeByDefault"])
+        for value in ("relative/store", "~/store", ""):
+            self.use_store(value)
+            with self.subTest(value=value), self.assertRaisesRegex(_paths.PathsError, "absolute"):
+                semantic.collection_config(self.vault)
+        self.use_store(self.temp / "unmounted")
+        with patch.object(semantic, "bridge") as child:
+            code, out, err = self.cli("index", "--lexical-only")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("raw_store is not a directory", err)
+        self.assertFalse(self.cache.exists())
+        child.assert_not_called()
+
+    def test_store_mirror_admits_only_raw_and_secure_folder_links(self):
+        store = self.mirror_store()
+        elsewhere = self.temp / "elsewhere"
+        (elsewhere / "raw").mkdir(parents=True)
+        for name in ("raw/stray.md", "loose.md"):
+            (elsewhere / name).write_text("stray")
+        for name in ("journal/entry.md", "alias/raw/aliased.md"):
+            (store / name).parent.mkdir(parents=True)
+            (store / name).write_text("mirrored")
+        (self.vault / "real").mkdir()
+        for link, target in (("topic/raw", elsewhere / "raw"),               # raw link outside the store
+                             ("finance/secure", store / "personal/secure"),   # secure link to another path
+                             ("journal", store / "journal"),                  # mirrored, but neither raw nor secure
+                             ("alias", self.vault / "real"),                  # a second link before the raw link
+                             ("real/raw", store / "alias/raw"),
+                             ("personal/secure/escape", elsewhere)):          # a link inside the store
+            (self.vault / link).parent.mkdir(parents=True, exist_ok=True)
+            (self.vault / link).symlink_to(target, target_is_directory=True)
+        (self.vault / "wiki/ledger.md").symlink_to(store / "personal/secure/ledger.md")
+
+        def row(path, scope=semantic.SECURE):
+            return {"path": path, "scope": scope, "score": .5, "snippet": "bounded", "line": 1}
+        rows = [row("raw/import/evidence.md", "raw"), row("personal/secure/ledger.md"),
+                row("topic/raw/stray.md", "raw"), row("finance/secure/ledger.md"), row("journal/entry.md", "active"),
+                row("alias/raw/aliased.md", "raw"), row("personal/secure/escape/loose.md"),
+                row("wiki/ledger.md", "active"), row("wiki/rate-limits.md", "active")]
+
+        def search(*flags):
+            with patch.object(semantic, "bridge", return_value=rows) as child:
+                code, out, err = self.cli("query", "notes", "--mode", "lexical", *flags)
+            self.assertEqual(code, 0, err)
+            return child.call_args.kwargs["collections"], [(item["path"], item["scope"]) for item in json.loads(out)]
+
+        self.fake_index()
+        self.assertEqual(search("--scope", "all"), (list(semantic.SCOPES), [("wiki/rate-limits.md", "active")]))
+        code, _, err = self.cli("query", "notes", "--mode", "lexical", "--path", "personal/secure")
+        self.assertEqual(code, 2)
+        self.assertIn("inside", err)
+        self.use_store(store)
+        self.fake_index()
+        self.assertEqual(search(), (["active", semantic.SECURE],
+                                    [("personal/secure/ledger.md", "active"), ("wiki/rate-limits.md", "active")]))
+        self.assertEqual(search("--scope", "raw"), (["raw"], [("raw/import/evidence.md", "raw")]))
+        self.assertEqual(search("--scope", "all")[0], [*semantic.SCOPES, semantic.SECURE])
+        self.assertEqual(search("--path", "personal/secure")[1], [("personal/secure/ledger.md", "active")])
+        self.assertEqual(search("--scope", "raw", "--path", "raw")[1], [("raw/import/evidence.md", "raw")])
+
     def test_bad_query_payloads_and_child_exit_are_not_empty_success(self):
         self.fake_index()
         for payload in ({}, [None], [{"path": "wiki/rate-limits.md", "scope": "active", "score": float("nan")} ]):
@@ -549,6 +639,27 @@ class QmdAdapterTest(unittest.TestCase):
         self.assertEqual(find("synchronized"), [])
         self.assertEqual(find("replacementsentinel")[0]["path"], "wiki/rate-limits.md")
         self.assertEqual(find("inboxsentinel", "--scope", "inbox"), [])
+
+    @unittest.skipUnless((semantic.ROOT / "node_modules/@tobilu/qmd/package.json").is_file(), "run npm ci for real QMD")
+    def test_real_qmd_indexes_raw_and_secure_notes_from_the_store(self):
+        store = self.mirror_store()
+        for name, text in (("cache/excluded.md", "forbiddensentinel"), ("archive/old/secure/parked.md", "parkedsentinel")):
+            (store / name).parent.mkdir(parents=True)
+            (store / name).write_text(text)
+        self.use_store(store)
+        code, out, err = self.cli("index", "--lexical-only")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["status"]["totalDocuments"], 8)
+
+        def find(text, *flags):
+            code, output, errors = self.cli("query", text, "--mode", "lexical", *flags)
+            self.assertEqual(code, 0, errors)
+            return [(row["path"], row["scope"], row["representation"]) for row in json.loads(output)]
+        self.assertEqual(find("securesentinel"), [("personal/secure/ledger.md", "active", "authored")])
+        self.assertEqual(find("rawsentinel"), [])
+        self.assertEqual(find("rawsentinel", "--scope", "raw"), [("raw/import/evidence.md", "raw", "raw_text")])
+        for sentinel in ("forbiddensentinel", "parkedsentinel"):
+            self.assertEqual(find(sentinel, "--scope", "all"), [])
 
 
 if __name__ == "__main__":

@@ -22,3 +22,6 @@
 # value from harness/paths.toml.
 # [paths]
 # wip = "drafts"   # legacy vault that hasn't migrated yet
+# Under [paths]: absolute, machine-local mirror of vault paths that `raw/`
+# and `secure/` folders symlink into; semantic search indexes them from here.
+# raw_store = "/absolute/path/to/raw-store"
