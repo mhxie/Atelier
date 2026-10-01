@@ -209,17 +209,6 @@ def cmd_done(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_next(args: argparse.Namespace) -> int:
-    item = find_by_slug(args.slug)
-    if not item:
-        print(f"ERROR: no recurring item with slug '{args.slug}'", file=sys.stderr)
-        return 2
-    today = date.today()
-    d = item.days_until_due(today)
-    print(f"{args.slug}: next due {item.next_due().isoformat()} ({d:+d}d)")
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/recurring.py",
@@ -237,10 +226,6 @@ def main(argv: list[str] | None = None) -> int:
     p_done.add_argument("slug", help="The slug of the recurring item.")
     p_done.add_argument("date", nargs="?", help="Completion date (default: today).")
     p_done.set_defaults(func=cmd_done)
-
-    p_next = sub.add_parser("next", help="Print next-due date for a slug.")
-    p_next.add_argument("slug")
-    p_next.set_defaults(func=cmd_next)
 
     args = parser.parse_args(argv)
     return args.func(args)

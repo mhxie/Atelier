@@ -226,16 +226,6 @@ def execute(argv: list[str], *, dry_run: bool, active_runtime: str | None = None
     return subprocess.run(argv, cwd=ROOT, env=env).returncode
 
 
-def cmd_resolve(args: argparse.Namespace) -> int:
-    registry = load_registry()
-    name, source = resolve_runtime(registry)
-    if args.json:
-        print(json.dumps({"runtime": name, "source": source}, indent=2))
-    else:
-        print(name)
-    return 0
-
-
 def cmd_status(args: argparse.Namespace) -> int:
     registry = load_registry()
     if args.observations:
@@ -356,10 +346,6 @@ def build_parser() -> argparse.ArgumentParser:
         description="Select and launch Atelier's native Codex or Claude Code surface."
     )
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
-
-    resolve = subparsers.add_parser("resolve", help="Print the effective runtime name.")
-    resolve.add_argument("--json", action="store_true")
-    resolve.set_defaults(func=cmd_resolve)
 
     status = subparsers.add_parser("status", help="Show runtime preference and installation status.")
     status.add_argument("--json", action="store_true")

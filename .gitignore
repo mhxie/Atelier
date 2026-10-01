@@ -5,8 +5,6 @@
 scripts/readwise_skip_domains.txt
 
 # Private eval data (filenames-from-$OV as literal test fixtures)
-scripts/_evalset.json
-scripts/_evalset_v1.json
 scripts/_*.json
 scripts/_results_*/
 scripts/_results_*.log

@@ -1,9 +1,8 @@
-"""Trusted Autoevo publication and manual queue-commit tests."""
+"""Trusted Autoevo publication tests."""
 
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import subprocess
 import sys
@@ -30,37 +29,7 @@ def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _run(vault: Path, *argv: str) -> dict:
-    proc = subprocess.run(
-        [sys.executable, "scripts/autoevo_commit.py", *argv],
-        cwd=REPO_ROOT,
-        env={
-            **os.environ,
-            "OV": str(vault),
-            "GIT_AUTHOR_NAME": "Local User",
-            "GIT_AUTHOR_EMAIL": "local@example.com",
-            "GIT_COMMITTER_NAME": "Local Committer",
-            "GIT_COMMITTER_EMAIL": "committer@example.com",
-        },
-        capture_output=True, text=True, timeout=120,
-    )
-    payload = json.loads(proc.stdout)
-    payload["_exit"] = proc.returncode
-    return payload
-
-
 class AutoevoCommitTest(unittest.TestCase):
-    def _vault(self, tmp: str) -> Path:
-        vault = Path(tmp) / "vault"
-        (vault / "wip").mkdir(parents=True)
-        (vault / "wip" / "a.md").write_text("a\n", encoding="utf-8")
-        (vault / "wip" / "b.md").write_text("b\n", encoding="utf-8")
-        (vault / "wip" / "target.md").write_text("merged\n", encoding="utf-8")
-        _git(vault, "init", "-q")
-        _git(vault, "add", "-A")
-        _git(vault, "commit", "-q", "-m", "base")
-        return vault
-
     def test_cluster_hash_is_order_insensitive(self) -> None:
         snippet = (
             "import sys; sys.path.insert(0, 'scripts'); import autoevo_commit as a; "
@@ -69,48 +38,6 @@ class AutoevoCommitTest(unittest.TestCase):
         proc = subprocess.run([sys.executable, "-c", snippet], cwd=REPO_ROOT,
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.stdout.strip(), "True", proc.stderr)
-
-    def test_failed_commit_reports_json_error(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            vault = self._vault(tmp)  # clean tree: commit --only with no changes fails
-            out = _run(vault, "queue", "--summary", "append 0", "--detail", "Categories: none")
-            self.assertEqual(out["_exit"], 1)
-            self.assertIn("error", out)
-
-
-class QueueExtraPathTest(unittest.TestCase):
-    def test_queue_commit_includes_extra_paths_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            vault = Path(tmp) / "vault"
-            (vault / "_meta").mkdir(parents=True)
-            (vault / "agent-findings").mkdir()
-            (vault / "wip").mkdir()
-            queue = vault / "_meta" / "autoevo_pending.toml"
-            queue.write_text("# queue\n", encoding="utf-8")
-            audit = vault / "agent-findings" / "autoevo-applied-2099-01-02.md"
-            audit.write_text("## Autoevo Run\n", encoding="utf-8")
-            _git(vault, "init", "-q")
-            _git(vault, "add", "-A")
-            _git(vault, "commit", "-q", "-m", "base")
-            queue.write_text("# queue\n# dismissed\n", encoding="utf-8")
-            audit.write_text("## Autoevo Run\n### Auto-dismissed\n", encoding="utf-8")
-            # A stray edit that must NOT be swept into the queue commit.
-            (vault / "wip" / "stray.md").write_text("s\n", encoding="utf-8")
-            out = _run(
-                vault, "queue",
-                "--summary", "auto-dismiss 1 stale pending entries",
-                "--detail", "Categories: redundant=1",
-                "--extra-path", "agent-findings/autoevo-applied-2099-01-02.md",
-            )
-            self.assertEqual(out["_exit"], 0, out)
-            changed = _git(vault, "show", "--name-only", "--format=", "HEAD").stdout.split()
-            self.assertEqual(
-                sorted(changed),
-                ["_meta/autoevo_pending.toml", "agent-findings/autoevo-applied-2099-01-02.md"],
-            )
-            subject = _git(vault, "log", "-1", "--format=%s").stdout.strip()
-            self.assertEqual(subject, "[autoevo:queue] _meta: auto-dismiss 1 stale pending entries")
-
 
 
 class TrustedPublisherTest(unittest.TestCase):

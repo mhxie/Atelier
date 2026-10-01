@@ -59,12 +59,12 @@ def check_runtime_selector() -> None:
 
     overridden = json.loads(
         run(
-            ["scripts/atelier_runtime.py", "resolve", "--json"],
+            ["scripts/atelier_runtime.py", "status", "--json"],
             env_overrides={"ATELIER_RUNTIME": "claude"},
         )
     )
     expect(
-        overridden == {"runtime": "claude", "source": "environment"},
+        (overridden["runtime"], overridden["source"]) == ("claude", "environment"),
         "runtime env override drift",
     )
 

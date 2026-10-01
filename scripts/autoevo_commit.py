@@ -1,18 +1,14 @@
-#!/usr/bin/env python3
-"""Trusted Autoevo publisher plus the manual-review queue commit CLI.
+"""Trusted Autoevo publisher.
 
 The nightly process imports the candidate publisher, reconciler, and stable
-``cluster_hash`` helper. ``autoevo-review`` uses the ``queue`` subcommand for
-its path-limited bot commit. Nothing here repairs Git state, retries a failed
+``cluster_hash`` helper. Nothing here repairs Git state, retries a failed
 publication, rolls back, or pushes.
 """
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 import hashlib
-import json
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -23,7 +19,6 @@ import tempfile
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import vault_root  # noqa: E402
 from _git import BOT_EMAIL, BOT_NAME, default_branch, git_path, merge_state, run_git  # noqa: E402
 
 
@@ -590,83 +585,3 @@ def _assert_clean_paths(vault: Path, paths: list[str], *, started: bool) -> None
     )
     if result.stdout:
         raise _publication_error("candidate paths have uncommitted changes", started=started)
-
-
-def _commit(vault: Path, message: str, paths: list[str]) -> dict:
-    paths = [_relative_name(path, "commit path") for path in paths]
-    # Stage what still exists; a path already removed by `git rm` / `git mv`
-    # is neither on disk nor in the index and would make `git add` fail, while
-    # a path deleted on disk but still tracked needs `-A` to stage the deletion.
-    present = [p for p in paths if (vault / p).exists()]
-    tracked_gone = [
-        p for p in paths
-        if not (vault / p).exists()
-        and _git(vault, "ls-files", "--error-unmatch", "--", p).returncode == 0
-    ]
-    if present:
-        add = _git(vault, "add", "--", *present)
-        if add.returncode != 0:
-            return {"error": f"git add failed: {add.stderr.strip()[:300]}"}
-    if tracked_gone:
-        gone = _git(vault, "add", "-A", "--", *tracked_gone)
-        if gone.returncode != 0:
-            return {"error": f"git add -A failed: {gone.stderr.strip()[:300]}"}
-    commit = _git(
-        vault,
-        "commit",
-        "--only",
-        "-m",
-        message,
-        "--",
-        *paths,
-        bot_identity=True,
-    )
-    if commit.returncode != 0:
-        return {"error": f"git commit failed: {commit.stderr.strip() or commit.stdout.strip()[:300]}"}
-    sha = _git(vault, "rev-parse", "HEAD").stdout.strip()
-    return {"sha": sha}
-
-
-def queue_commit(vault: Path, *, summary: str, detail: str, queue_path: str, extra_paths: list[str] | None = None) -> dict:
-    message = f"[autoevo:queue] _meta: {summary}\n\n{detail}"
-    return _commit(vault, message, [queue_path, *(extra_paths or [])])
-
-
-def _print_result(result: dict) -> int:
-    print(json.dumps(result, sort_keys=True))
-    return 0 if "sha" in result else 1
-
-
-def cmd_queue(args: argparse.Namespace) -> int:
-    return _print_result(queue_commit(
-        vault_root(), summary=args.summary, detail=args.detail, queue_path=args.queue_path,
-        extra_paths=args.extra_path,
-    ))
-
-
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    p = sub.add_parser("queue", help="pending-queue state commit")
-    p.add_argument("--summary", required=True, help='subject tail, e.g. "append N pending findings from DATE sweep"')
-    p.add_argument("--detail", required=True, help='body line, e.g. "Categories: redundant=n, ..."')
-    p.add_argument("--queue-path", default="_meta/autoevo_pending.toml")
-    p.add_argument(
-        "--extra-path", action="append",
-        help="additional path committed with the queue file (repeat), e.g. the day's audit log",
-    )
-    p.set_defaults(func=cmd_queue)
-
-    args = parser.parse_args(argv)
-    try:
-        return args.func(args)
-    except SystemExit:
-        raise
-    except Exception as exc:  # keep the one-JSON-object contract for headless callers
-        print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}))
-        return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())
