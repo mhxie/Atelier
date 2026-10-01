@@ -214,7 +214,7 @@ def _git_paths(args: list[str], repo_root: Path) -> list[str]:
         raise SystemExit(2)
 
 
-def tracked_files(repo_root: Path = REPO_ROOT) -> list[str]:
+def tracked_files(repo_root: Path | None = None) -> list[str]:
     """Files tracked by git PLUS untracked-but-not-ignored files.
 
     The privacy gate cares about content about to enter the repo, not just
@@ -223,16 +223,17 @@ def tracked_files(repo_root: Path = REPO_ROOT) -> list[str]:
     gate has a trivial bypass: add a leak in a new file and it is invisible
     to `git ls-files`.
     """
+    repo_root = repo_root or REPO_ROOT
     tracked = _git_paths(["ls-files"], repo_root)
     untracked = _git_paths(["ls-files", "-o", "--exclude-standard"], repo_root)
     return sorted(set(tracked) | set(untracked))
 
 
-def staged_files(repo_root: Path = REPO_ROOT) -> list[str]:
+def staged_files(repo_root: Path | None = None) -> list[str]:
     """Index paths whose staged blob will survive the next commit."""
     return _git_paths(
         ["diff", "--cached", "--name-only", "--diff-filter=ACMR"],
-        repo_root,
+        repo_root or REPO_ROOT,
     )
 
 
@@ -258,9 +259,10 @@ def _index_text(repo_root: Path, relative: str) -> str | None:
 
 
 def content_sources(
-    files: list[str], repo_root: Path = REPO_ROOT
+    files: list[str], repo_root: Path | None = None
 ) -> list[tuple[str, str, str]]:
     """Return `(path, source, text)` for worktree and divergent staged blobs."""
+    repo_root = repo_root or REPO_ROOT
     sources: list[tuple[str, str, str]] = []
     worktree: dict[str, str] = {}
     for relative in files:
@@ -316,17 +318,26 @@ def scan_vault_paths(paths: list[str], sources: list[tuple[str, str, str]]) -> l
     return hits
 
 
-def range_sources(rev_range: str, repo_root: Path = REPO_ROOT) -> list[tuple[str, str, str]]:
+def range_commits(rev_range: str, repo_root: Path | None = None) -> list[str]:
+    """Commits in `rev_range`, oldest first; an unreadable range is an error, never an empty scan."""
+    result = subprocess.run(
+        ["git", "rev-list", "--reverse", rev_range], cwd=repo_root or REPO_ROOT, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        sys.stderr.write(f"privacy_check: cannot read range {rev_range}: {result.stderr.strip()}\n")
+        raise SystemExit(2)
+    return result.stdout.split()
+
+
+def range_sources(rev_range: str, repo_root: Path | None = None) -> list[tuple[str, str, str]]:
     """`(path, source, text)` for every file each commit in `rev_range` touched.
 
     Intermediate commits count: a name added in one commit and removed two
     commits later still ships in history.
     """
-    commits = subprocess.run(
-        ["git", "rev-list", "--reverse", rev_range], cwd=repo_root, capture_output=True, text=True
-    ).stdout.split()
+    repo_root = repo_root or REPO_ROOT
     sources: list[tuple[str, str, str]] = []
-    for commit in commits:
+    for commit in range_commits(rev_range, repo_root):
         short = commit[:7]
         listing = subprocess.run(
             ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "--diff-filter=AM", commit],
@@ -431,16 +442,17 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--json", action="store_true", help="Emit JSON output.")
     ap.add_argument("--range", default=None, metavar="A..B", help="Scan every commit in a git history range instead of the working tree.")
+    ap.add_argument("--repo", type=Path, default=None, metavar="PATH", help="Git repository to scan (default: this Atelier checkout).")
     ap.add_argument("--why", default=None, metavar="TERM", help="Explain where a term comes from (or why it is not indexed) and exit.")
     ap.add_argument("--rebuild-index", action="store_true", help="Rebuild $OV/_meta/privacy_index.json before scanning.")
     ap.add_argument(
         "--allow-empty-ov",
         action="store_true",
         help=(
-            "Exit 0 when the gate would scan vacuously: either $OV is "
-            "missing, OR $OV exists but has no private dirs, private terms, "
-            "or private slugs. Without this flag, both cases exit 2 "
-            "to avoid a placebo green light for fresh clones."
+            "Exit 0 when the gate would scan vacuously: $OV is missing or "
+            "has no private dirs, terms, or slugs, or a --range has commits "
+            "but no readable added or modified files. Without this flag, "
+            "these cases exit 2 to avoid a placebo green light."
         ),
     )
     args = ap.parse_args(argv)
@@ -502,13 +514,21 @@ def main(argv: list[str] | None = None) -> int:
     counts = index.get("counts", {})
     titles = [t for t, e in index_terms.items() if "stem" in e["kinds"]]
     wikilinks = {t for t, e in index_terms.items() if "wikilink" in e["kinds"]}
+    repo = args.repo.resolve() if args.repo else REPO_ROOT
     if args.range:
-        sources = range_sources(args.range)
+        sources = range_sources(args.range, repo)
         if not sources:
+            if range_commits(args.range, repo) and not args.allow_empty_ov:
+                msg = f"range {args.range} in {repo} has commits but no readable added or modified files"
+                if args.json:
+                    print(json.dumps({"action": "abort", "reason": msg, "range": args.range, "hits": []}, indent=2))
+                else:
+                    sys.stderr.write(f"privacy_check: {msg}; review it by hand, then pass --allow-empty-ov.\n")
+                return 2
             coverage_warnings.append(f"range {args.range} touched no readable files")
     else:
-        files = tracked_files()
-        sources = content_sources(files)
+        files = tracked_files(repo)
+        sources = content_sources(files, repo)
         sources.extend(path_sources(files))
     explicit = set(index_terms) | private_terms
     slug_terms = private_slugs | {t.casefold() for t in explicit if _SINGLE_ASCII_WORD_RE.fullmatch(t)}
@@ -527,6 +547,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({
             "action": "abort" if hits else "proceed",
             "ov_dir": OV.as_posix(),
+            "repo": repo.as_posix(),
             "range": args.range,
             "index_built": index.get("built"),
             "index_counts": counts,
@@ -545,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if not hits:
             kinds = ", ".join(f"{counts.get(k, 0)} {k}" for k in ("dir", "stem", "wikilink", "registry", "frontmatter", "profile"))
-            scope = f"history {args.range}" if args.range else "working tree"
+            scope = (f"history {args.range}" if args.range else "working tree") + ("" if repo == REPO_ROOT else f" of {repo}")
             print(
                 f"privacy_check: clean ({scope}; {len(phrase_terms) + len(slug_terms)} terms "
                 f"[{kinds}, {len(private_slugs)} slugs, {len(private_terms)} explicit] + "

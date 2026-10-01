@@ -26,7 +26,7 @@ An empty range means nothing to publish; stop.
 uv run scripts/privacy_check.py --range "$RANGE" --json
 ```
 
-`hits` must be empty. A hit carries `why` (which vault source produced the
+`action` must be `proceed`; exit 2 means it could not scan. A hit carries `why` (which vault source produced the
 term) and the commit it lives in. Fix the offending commit (amend or
 `git rebase -x` with the same replacement in every affected tree), never by
 adding the term to `scripts/privacy_allowlist.txt` unless it is deliberately
