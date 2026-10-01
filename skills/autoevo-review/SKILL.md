@@ -22,9 +22,9 @@ a blocker: report it and do not rewrite it.
 Before presentation, stage `autoevo_pending.py auto-dismiss --today <date>` on
 private state for entries at three surfaces or over the default 30-day age.
 
-Never call removed commit subcommands or mutate live state directly. The trusted
-parent publishes explicit note, queue, ledger, and optional review-log changes
-through `autoevo_commit.publish_changes` after rechecking hashes and Git.
+Never mutate live state directly. After approval, the orchestrator writes
+explicit note, queue, ledger, and optional review-log changes as plain files
+after rechecking their hashes; Reflect commits and pushes them.
 
 ## 2. Present the queue
 
@@ -61,19 +61,19 @@ proposal; a rhetorical verdict performs no wiki write and returns to the user
 for a dismissal decision.
 
 After approval, stage `autoevo_pending.py resolve --id <id> --status applied
---reason <reason> --today <date>` on private state. Publish it with the approved
-note change. Archive means byte-preserving addition plus deletion in one commit,
-not a model write or promised rename.
+--reason <reason> --today <date>` on private state. Write it with the approved
+note change. Archive means byte-preserving addition plus deletion, not a model
+write or promised rename.
 
 If the user rejects the proposal, stage a `dismissed` resolution with their
-reason instead. No content change is published.
+reason instead. No content change is written.
 
 ### Skip
 
 Stage `autoevo_pending.py resolve --id <id> --status dismissed --reason
 <reason> --today <date>` against private state. Tell the user whether this
-vetoes `stale-banner` or confirms `dismiss`; then include it in the next trusted
-queue publication.
+vetoes `stale-banner` or confirms `dismiss`; then include it in the next queue
+write.
 
 ### Defer
 
@@ -81,7 +81,7 @@ Stage `autoevo_pending.py defer --id <id> --today <date>` with the optional
 reason. It increments surfacing state and, when applicable, restarts the default
 deadline. Optionally ask for a cue snooze (default seven days); cue snoozing is
 group-wide, not per entry. Batch compatible defer-only state changes into one
-trusted publication.
+write.
 
 ### Explain
 
@@ -92,17 +92,16 @@ probe verdict, and any unresolved gaps. Then ask again.
 
 ### Quit
 
-Stop. Publish only already confirmed staged changes; leave every other entry
-pending. If publication has not begun, discarding scratch state has no live
-effect.
+Stop. Write only already confirmed staged changes; leave every other entry
+pending. If writing has not begun, discarding scratch state has no live effect.
 
-## 4. Publication and summary
+## 4. Write and summary
 
-Before publication, recheck live hashes and Git, and limit the candidate to
-approved note/state/review-log paths. Keep content operations recoverable;
-compatible queue-only decisions may share a review commit. Never push.
+Before writing, recheck live hashes and limit the write to approved
+note/state/review-log paths. Never commit or push. Rollback is plain
+`git restore`.
 
-Report applied, dismissed, deferred, remaining, and any failed publication.
+Report applied, dismissed, deferred, remaining, and any failed write.
 Name the queue path and separate review log if one was created. A review log is
 ordinary human-triage history only; it is never an Autoevo verifier input.
 
@@ -114,5 +113,5 @@ ordinary human-triage history only; it is never an Autoevo verifier input.
   required Revision Log.
 - Any daily-note source is a nightly bug. Refuse the content operation and ask
   the user whether to dismiss the queue entry; daily notes remain read-only.
-- On ambiguous or partly published effects, stop and report `needs_review`.
+- On ambiguous or partly written effects, stop and report `needs_review`.
   Do not replay the model, automatically roll back, or overwrite state.

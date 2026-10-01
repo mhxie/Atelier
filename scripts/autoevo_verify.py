@@ -10,10 +10,13 @@ from pathlib import Path
 import re
 import sys
 
+from _git import hash_objects, tree_blobs
 from _paths import atomic_write, retry_transient, tier_segments, vault_root
 
 VERSION = 1
 CATEGORIES = ("redundant", "time-stale-A", "time-stale-B", "contradicted", "low-signal")
+BLOCKING_STATES = ("half-applied", "malformed")
+SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 class VerificationError(RuntimeError):
@@ -152,12 +155,18 @@ def sweep_report(sweep: dict) -> str:
     return f"## Decay sweep: {sweep['scope']}\n\n```json\n{json.dumps(sweep, ensure_ascii=False, sort_keys=True, indent=2)}\n```\n"
 
 
+def _operation_line(op: dict) -> str:
+    if "state" not in op:  # commit-era receipts re-render exactly as they were published
+        return f"- {op['kind']}: {op.get('commit', {}).get('sha', 'not committed')}"
+    return f"- {op['kind']} {op['state']}: {', '.join(sorted(op['paths']))}"
+
+
 def render_report(record: dict) -> str:
     proposal = record["proposal"]
     lines = [f"## Autoevo Run: {record['cycle_id']}", "", f"Run ID: {record['run_id']}", "", "### Sweep coverage"]
     lines += [f"- {row['scope']}: {row['outcome']} ({row['mode']})" for row in proposal["sweeps"]]
     lines += ["", "### Operations"]
-    lines += [f"- {op['kind']}: {op.get('commit', {}).get('sha', 'not committed')}" for op in record["operations"] if op["kind"] != "audit"] or ["- (none)"]
+    lines += [_operation_line(op) for op in record["operations"] if op["kind"] != "audit"] or ["- (none)"]
     for heading, values in (
         ("Pending", record.get("pending", [])),
         ("Lint", [json.dumps(record.get("lint", {}), ensure_ascii=False, sort_keys=True)]),
@@ -168,23 +177,66 @@ def render_report(record: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def verify_operations(vault: Path, record: dict, *, allow_refused: bool = False) -> None:
-    from autoevo_commit import PublicationError, reconcile_commit
+def operation_paths(operation: dict) -> dict[str, tuple[str | None, str | None]]:
+    """(before_sha256, after_sha256) per path; commit-era receipts stored the after text."""
+    if "paths" in operation:
+        pairs = {rel: (row["before_sha256"], row["after_sha256"]) for rel, row in operation["paths"].items()}
+    else:
+        pairs = {rel: (row["before_sha256"], None if row["after"] is None else hashlib.sha256(row["after"].encode()).hexdigest())
+                 for rel, row in operation["changes"].items()}
+    if not pairs or any(pair == (None, None) or any(value is not None and not SHA256.fullmatch(value) for value in pair)
+                        for pair in pairs.values()):
+        raise VerificationError("operation paths are malformed")
+    return {relative(rel): pair for rel, pair in pairs.items()}
 
+
+def _current(vault: Path, rel: str) -> str | None:
+    path = vault / rel
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def operation_state(vault: Path, operation: object) -> str:
+    """Classify one operation by comparing live content with its receipt.
+
+    Every path at its after bytes is committed once HEAD holds them, else
+    pending-commit. An applied operation whose paths all hold their before
+    bytes is reverted (a user veto); any other mix is superseded. An operation
+    that never finished writing is skipped when nothing changed and
+    half-applied otherwise.
+    """
     try:
-        expected_head = record["plan"]["base_head"]
-        for operation in record["operations"]:
-            if operation["expected_head"] != expected_head:
-                raise VerificationError("publication chain differs from the accepted base")
-            if allow_refused and "commit" not in operation and operation.get("publication_started") is False:
-                continue
-            proof = reconcile_commit(vault, candidate_id=operation["candidate_id"], expected_head=expected_head,
-                                     changes=operation["changes"], force_add=set(operation.get("force_add", [])))
-            if proof != operation.get("commit"):
-                raise VerificationError("recorded commit evidence differs from Git")
-            expected_head = proof["sha"]
-    except (PublicationError, KeyError, TypeError) as exc:
-        raise VerificationError(f"publication evidence is incomplete: {exc}") from exc
+        paths = operation_paths(operation)
+        if not isinstance(operation["kind"], str) or not isinstance(operation["candidate_id"], str):
+            raise TypeError("operation identity")
+    except (AttributeError, KeyError, TypeError, VerificationError):
+        return "malformed"
+    if "commit" not in operation and operation.get("publication_started") is False:
+        return "skipped"  # a commit-era refusal before any write
+    current = {rel: _current(vault, rel) for rel in paths}
+    if all(current[rel] == after for rel, (_, after) in paths.items()):
+        head = tree_blobs(vault, *paths)
+        written = [rel for rel, (_, after) in paths.items() if after is not None]
+        try:
+            committed = hash_objects(vault, written) == [head.get(rel) for rel in written]
+        except RuntimeError:  # a path changed while hashing; it cannot be proven committed
+            committed = False
+        deleted_at_head = head.keys() - set(written)
+        return "committed" if committed and not deleted_at_head else "pending-commit"
+    restored = all(current[rel] == before for rel, (before, _) in paths.items())
+    if operation.get("state") == "applied" or "commit" in operation:
+        return "reverted" if restored else "superseded"
+    return "skipped" if restored else "half-applied"
+
+
+def verify_operations(vault: Path, record: dict) -> dict[str, str]:
+    """Content state per operation; only half-applied or malformed operations block."""
+    states = {}
+    for index, operation in enumerate(record["operations"]):
+        state = operation_state(vault, operation)
+        if state in BLOCKING_STATES:
+            raise VerificationError(f"{state} Autoevo operation {index} in {record.get('cycle_id')} needs review")
+        states[operation["candidate_id"]] = state
+    return states
 
 
 def verify_cycle(*, vault: Path, cycle: str) -> dict:
@@ -202,17 +254,18 @@ def verify_cycle(*, vault: Path, cycle: str) -> dict:
         raise VerificationError("cycle introduced lint errors")
     operations = record.get("operations", [])
     if not operations or operations[-1].get("kind") != "audit":
-        raise VerificationError("cycle has no final audit publication")
-    verify_operations(vault, record)
-    audit = operations[-1]
+        raise VerificationError("cycle has no final audit write")
+    states = verify_operations(vault, record)
+    audit = operation_paths(operations[-1])
     expected_reports = {record["output_file"]: render_report(record)}
     for sweep in proposal["sweeps"]:
         if sweep["outcome"] == "envelope_returned":
             expected_reports[record["reports"][sweep["scope"]]] = sweep_report(sweep)
-    if any(audit["changes"].get(relative(name), {}).get("after") != body for name, body in expected_reports.items()):
-        raise VerificationError("published report does not represent the structured result")
+    if any(audit.get(relative(name), (None, None))[1] != hashlib.sha256(body.encode()).hexdigest()
+           for name, body in expected_reports.items()):
+        raise VerificationError("written report does not represent the structured result")
     return {"verified": True, "sweeps_completed": len(expected_reports) - 1,
-            "audit_commit": audit["commit"]["sha"], "record_file": str(path)}
+            "operations": states, "record_file": str(path)}
 
 
 def main(argv: list[str] | None = None) -> int:

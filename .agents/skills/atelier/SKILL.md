@@ -83,8 +83,8 @@ points at the canonical sources and adds only what is Codex-native.
   evidence and shared receipt validation live in `protocols/remote-routines.md`.
   Connector discovery before reporting missing inputs follows
   `routines/_adapters/archived-prompt/PROCEDURE.md`.
-  Autoevo drafts only in its isolated workspace; the trusted parent owns
-  publication and its single structured result (`protocols/autoevo.md`).
+  Autoevo drafts only in its isolated workspace; the trusted parent owns its
+  plain-file vault writes and single structured result (`protocols/autoevo.md`).
 - Private routine mappings, tools, routines, digest declarations, and skills
   stay under their registered `$OV` roots. Classification and activation live
   in `protocols/components.md`; remote execution and digest context live

@@ -140,7 +140,7 @@ sidecars. Preserve honest partial/failure evidence if interrupted.
 After writing the candidate, return only the generic transport-acknowledgment
 JSON required by the supplied output schema: name `proposal.json` as
 `output_file`, summarize coverage, and use `outcome: delivered` only to mean
-the candidate file is ready for the parent. It is not live delivery or commit
-success. The trusted parent validates, publishes per operation, updates state,
-lints, derives human reports, and verifies Git evidence after you return. A
-publish failure is not permission to replay the model or roll back the vault.
+the candidate file is ready for the parent. It is not live delivery. The
+trusted parent validates, writes per operation, updates state, lints, derives
+human reports, and verifies its receipt after you return. A write failure is
+not permission to replay the model or roll back the vault.

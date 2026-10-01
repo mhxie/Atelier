@@ -1,4 +1,4 @@
-"""Read-only preflight outcomes, source protection, and legacy-state refusal.
+"""Read-only preflight outcomes, session-lock safety, and legacy-state refusal.
 
 Every call runs in a subprocess with a disposable vault and canonical-only
 path registry, so tests never load the user's private path overrides.
@@ -82,7 +82,7 @@ vault = Path(__import__('os').environ['OV'])
 """
 
 
-class DirtyGateScopeTest(unittest.TestCase):
+class LiveGateTest(unittest.TestCase):
     def test_publication_rechecks_live_gates_without_repeating_input_probes(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))
@@ -92,82 +92,50 @@ class DirtyGateScopeTest(unittest.TestCase):
                 args = dict(vault=vault, privacy_probe=must_not_run,
                             semantic_probe=must_not_run, publication_boundary=True)
                 ready = ap.inspect_preflight(**args)
-                (vault / 'cache' / 'atelier-session-lock').write_text('interactive session')
+                (vault / '_meta' / 'atelier-session-lock').write_text('interactive session')
                 blocked = ap.inspect_preflight(**args)
                 print(json.dumps({'ready': ready['ready'], 'gate': blocked['gate']}))
             """)
             self.assertTrue(out["ready"])
             self.assertEqual(out["gate"], "session_active")
 
-    def test_wrong_or_unknown_default_branch_is_read_only_blocked(self) -> None:
-        for setup in (("checkout", "-qb", "feature"), ("checkout", "--detach"), ("branch", "-m", "notes")):
-            with self.subTest(setup=setup), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+    def test_branch_index_lock_operations_and_dirt_do_not_gate_file_writes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+            vault = _make_vault(Path(tmp))
+            _git(vault, "checkout", "-qb", "feature")
+            for marker in ("index.lock", "MERGE_HEAD"):
+                (vault / ".git" / marker).write_text("0" * 40 + "\n", encoding="utf-8")
+            for rel in ("wip/note.md", "personal/diary.md", "_meta/autoevo_pending.toml"):
+                (vault / rel).write_text("edited\n", encoding="utf-8")
+            before = {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")}
+            out = _run_py(vault, "print(json.dumps(ap.inspect_preflight(vault=vault, privacy_probe=ok_probe, semantic_probe=sem_probe)))")
+            self.assertTrue(out["ready"], out)
+            self.assertEqual(before, {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")})
+
+    def test_session_lock_fails_closed_without_a_real_parent_or_with_a_symlinked_lock(self) -> None:
+        for case in ("missing", "dangling", "linked-lock", "dangling-lock"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
                 vault = _make_vault(Path(tmp))
-                _git(vault, *setup)
-                before = {str(path.relative_to(vault)): path.read_bytes()
-                          for path in vault.rglob("*") if path.is_file()}
-                result = _run_py(vault, "print(json.dumps(ap.inspect_preflight(vault=vault, privacy_probe=ok_probe, semantic_probe=sem_probe)))")
-                self.assertFalse(result["ready"])
-                self.assertEqual(result["gate"], "git_not_default_branch")
-                self.assertEqual(before, {str(path.relative_to(vault)): path.read_bytes()
-                                          for path in vault.rglob("*") if path.is_file()})
-
-    def test_out_of_scope_dirt_does_not_block(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            (vault / "personal" / "diary.md").write_text("edited\n", encoding="utf-8")
-            out = _run_py(
-                vault,
-                """
-                r = ap.inspect_preflight(vault=vault, lock_path=vault/'cache'/'lock', now=1000,
-                                         privacy_probe=ok_probe, semantic_probe=sem_probe)
-                print(json.dumps({"ready": r["ready"], "gate": r.get("gate"),
-                                  "entries": r["health"]["worktree_entries"],
-                                  "in_scope": r["health"]["worktree_entries_in_scope"]}))
-                """,
-            )
-            self.assertTrue(out["ready"], out)
-            self.assertEqual(out["entries"], 1)
-            self.assertEqual(out["in_scope"], 0)
-
-    def test_in_scope_content_dirt_protects_instead_of_blocking(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            (vault / "wip" / "note.md").write_text("edited\n", encoding="utf-8")
-            (vault / "personal" / "diary.md").write_text("edited\n", encoding="utf-8")
-            out = _run_py(
-                vault,
-                """
-                r = ap.inspect_preflight(vault=vault, lock_path=vault/'cache'/'lock', now=1000,
-                                         privacy_probe=ok_probe, semantic_probe=sem_probe)
-                print(json.dumps({"ready": r["ready"], "gate": r.get("gate"), "detail": r.get("detail"),
-                                  "in_scope": r["health"]["worktree_entries_in_scope"],
-                                  "protected": r["health"].get("protected_paths", [])}))
-                """,
-            )
-            # A note the user is editing makes the file untouchable for the
-            # run; it no longer stops the sweep. Blocking on it meant the bot
-            # never ran after a work day.
-            self.assertTrue(out["ready"], out)
-            self.assertIsNone(out["gate"])
-            self.assertEqual(out["in_scope"], 1)
-            self.assertEqual(out["protected"], ["wip/note.md"])
-
-    def test_rename_out_of_scope_still_protects_source(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            _git(vault, "mv", "wip/note.md", "personal/note.md")
-            out = _run_py(
-                vault,
-                """
-                r = ap.inspect_preflight(vault=vault, lock_path=vault/'cache'/'lock', now=1000,
-                                         privacy_probe=ok_probe, semantic_probe=sem_probe)
-                print(json.dumps({"ready": r["ready"], "gate": r.get("gate"), "detail": r.get("detail", ""),
-                                  "in_scope": r["health"]["worktree_entries_in_scope"]}))
-                """,
-            )
-            self.assertTrue(out["ready"], out)
-            self.assertEqual(out["in_scope"], 1)
+                meta, outside = vault / "_meta", Path(tmp) / "outside"
+                outside.write_text("not a lock\n", encoding="utf-8")
+                if case in ("missing", "dangling"):
+                    meta.rmdir()
+                if case == "dangling":
+                    meta.symlink_to(Path(tmp) / "unmounted", target_is_directory=True)
+                if case.endswith("lock"):
+                    (meta / "atelier-session-lock").symlink_to(outside if case == "linked-lock" else Path(tmp) / "gone")
+                out = _run_py(vault, """
+                    result = ap.inspect_preflight(vault=vault, now=10**10, privacy_probe=ok_probe, semantic_probe=sem_probe)
+                    try:
+                        ap.touch_session_lock()
+                        touched = True
+                    except OSError:
+                        touched = False
+                    print(json.dumps({"gate": result["gate"], "touched": touched}))
+                """)
+                self.assertEqual(out, {"gate": "session_lock_unsafe", "touched": False})
+                self.assertEqual(outside.read_text(encoding="utf-8"), "not a lock\n")
+                self.assertFalse((Path(tmp) / "unmounted").exists() or (Path(tmp) / "gone").exists())
 
 
 class ReadOnlyReadinessTest(unittest.TestCase):
@@ -176,7 +144,7 @@ class ReadOnlyReadinessTest(unittest.TestCase):
             with self.subTest(blocked=blocked), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
                 vault = _make_vault(Path(tmp))
                 if blocked:
-                    (vault / ".git" / "index.lock").touch()
+                    (vault / "_meta").rmdir()
                 before = {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")}
                 out = _run_py(vault, """
                     ap._default_privacy_probe = ok_probe
@@ -185,7 +153,7 @@ class ReadOnlyReadinessTest(unittest.TestCase):
                 """)
                 self.assertEqual(out["ready"], not blocked, out)
                 if blocked:
-                    self.assertEqual(out["gate"], "git_index_lock_present")
+                    self.assertEqual(out["gate"], "session_lock_unsafe")
                 self.assertEqual(
                     before,
                     {p.relative_to(vault): p.read_bytes() if p.is_file() else None for p in vault.rglob("*")},
@@ -202,27 +170,15 @@ class ReadOnlyReadinessTest(unittest.TestCase):
                     if {skip}:
                         os.environ["ATELIER_SKIP_LOCK_TOUCH"] = "1"
                     ap.main(["--touch-lock"])
-                    lock = ap._resolve_segment(ap.tier_segments()["cache"], vault) / "atelier-session-lock"
+                    lock = ap.session_lock_path(vault)
                     gates = [ap.inspect_preflight(vault=vault, now=time.time() + age, privacy_probe=ok_probe,
                                                   semantic_probe=sem_probe)["gate"]
                              for age in (ap.SESSION_LOCK_TTL_SECONDS - 60, ap.SESSION_LOCK_TTL_SECONDS + 60)]
-                    print(json.dumps({{"exists": lock.exists(), "gates": gates}}))
+                    print(json.dumps({{"lock": str(lock.relative_to(vault)), "exists": lock.exists(), "gates": gates}}))
                 """)
+                self.assertEqual(out["lock"], "_meta/atelier-session-lock")
                 self.assertEqual(out["exists"], not skip)
                 self.assertEqual(out["gates"], [None, None] if skip else ["session_active", None])
-
-    def test_git_operation_is_preserved_and_blocks(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            marker = vault / ".git" / "MERGE_HEAD"
-            marker.write_text("0" * 40 + "\n", encoding="utf-8")
-            out = _run_py(vault, """
-                print(json.dumps(ap.inspect_preflight(
-                    vault=vault, privacy_probe=ok_probe, semantic_probe=sem_probe)))
-            """)
-            self.assertEqual(out["gate"], "git_operation_in_progress", out)
-            self.assertEqual(marker.read_text(), "0" * 40 + "\n")
-            self.assertEqual(list((vault / "agent-findings").iterdir()), [])
 
     def test_privacy_hits_block_without_semantic_or_audit_work(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:

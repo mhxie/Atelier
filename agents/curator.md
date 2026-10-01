@@ -122,8 +122,8 @@ For `band: low-signal-high`:
 3. Copy the snapshot into `proposed_content` without modification and return
    `operation: archive`, `mode: auto-apply`, the matching band, exact
    `snapshot_paths`, and `auto_apply_safe: true`. The parent rechecks the live
-   low-signal conditions and publishes a byte-preserving destination addition
-   plus source deletion in one commit; Curator never claims a rename effect.
+   low-signal conditions and writes a byte-preserving destination addition
+   plus source deletion as one operation; Curator never claims a rename effect.
 
 Never read mutable live notes/state, write, commit, or invoke publication/state
 helpers in this mode. All other Curator preservation rules still apply.

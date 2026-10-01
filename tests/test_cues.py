@@ -79,13 +79,13 @@ class AutoevoCueTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = Path(tmp)
             runs = [
-                _autoevo_run(day, "NotReady", '{"gate":"dirty_autoevo_state"}')
+                _autoevo_run(day, "NotReady", '{"gate":"session_lock_unsafe"}')
                 for day in (5, 4, 3)
             ]
             cue, debug = self._check(vault, runs)
             self.assertEqual(cue.severity, "hard")
             self.assertIn("3 consecutive days", cue.message)
-            self.assertIn("commit or restore", cue.message)
+            self.assertIn("symlinked session lock", cue.message)
             self.assertIn("streak=3", debug)
 
     def test_specific_fix_text_for_each_gate(self) -> None:
@@ -117,7 +117,7 @@ class AutoevoCueTest(unittest.TestCase):
                 _autoevo_run(5, "NotReady", '{"gate":"session_active"}', hour=5),
             ]
             with mock.patch.object(cues.routine_status, "recent_runs", return_value=runs), mock.patch.object(
-                cues.autoevo_verify, "verify_cycle", return_value={"verified": True, "audit_commit": "abc"}
+                cues.autoevo_verify, "verify_cycle", return_value={"verified": True, "operations": {"abc": "committed"}}
             ):
                 cue, debug = cues.check_autoevo_ran(vault, self.TODAY, now=self.NOW)
             self.assertIsNone(cue)

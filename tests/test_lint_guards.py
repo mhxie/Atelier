@@ -372,16 +372,6 @@ class HotPathCeilingGuardTest(unittest.TestCase):
         self.assertEqual(h.check_hot_path_ceilings(), [])
 
 
-class BotTrailerBanGuardTest(unittest.TestCase):
-    def test_reintroduced_trailer_is_flagged(self) -> None:
-        with _lint_root() as root:
-            _write(root, "cmd.md", "Co-Authored-By: Atelier Autoevo Bot <x@y>")
-            self.assertIn("bot-trailer-banned", [f.code for f in h.check_bot_trailer_banned(roots=[str(root)])])
-
-    def test_repo_prompt_surfaces_are_clean(self) -> None:
-        self.assertEqual(h.check_bot_trailer_banned(), [])
-
-
 class LegacyFramingGuardTest(unittest.TestCase):
     """The present-tense rule shipped without an executor; these two phrasings
     survived in the repo until a hand audit found them."""

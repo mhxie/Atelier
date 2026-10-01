@@ -911,11 +911,8 @@ def check_autoevo_ran(
                 break
             streak += 1
         fixes = {
-            "dirty_autoevo_state": "commit or restore the changed Autoevo state, then rerun deterministic preflight",
             "session_active": "wait for the active session to finish",
-            "git_index_lock_present": "confirm no Git process is running before removing a stale index lock",
-            "git_operation_in_progress": "finish or abort the active Git operation",
-            "git_index_missing": "restore the vault Git index",
+            "session_lock_unsafe": "restore a real vault `_meta` directory and remove any symlinked session lock",
             "git_not_worktree": "repair the vault Git worktree",
             "privacy_hits": "resolve the privacy check finding",
             "semantic_unavailable": "restore the local semantic index",
@@ -954,7 +951,7 @@ def check_autoevo_ran(
             Cue("autoevo_ran", "soft", record_display, f"Today's Autoevo result is not verified: {str(exc)[:160]}. Inspect the JSON result and Prefect run before retrying."),
             f"structured result verification failed: {exc}",
         )
-    return None, f"latest Prefect attempt completed; structured result verified ({proof.get('audit_commit', 'no commit')})"
+    return None, f"latest Prefect attempt completed; structured result verified ({len(proof.get('operations', {}))} operations)"
 
 
 def _recap_local_runs(ov: Path, today: date, verbose: bool = False) -> list[str]:

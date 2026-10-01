@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
-"""Prepare isolated Autoevo proposals and accept them through one trusted writer."""
+"""Prepare isolated Autoevo proposals and accept them through one trusted writer.
+
+Accepted operations are plain file writes; Reflect commits and pushes them.
+"""
 
 from __future__ import annotations
 
 import argparse
-from datetime import date
+from bisect import bisect_right
+from datetime import date, timedelta
 import hashlib
 import json
 import math
@@ -15,12 +19,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import uuid
 
-from _git import git_paths, run_git
-from _paths import tier_segments
-import autoevo_commit as commits
+from _git import hash_objects, run_git, tree_blobs
+from _paths import atomic_write, tier_segments
 import autoevo_pending as pending
 import autoevo_preflight as preflight
 import autoevo_quarantine as quarantine
@@ -32,15 +36,20 @@ import precedent
 ROOT = Path(__file__).resolve().parents[1]
 WORKING_TIERS = ("wip", "research", "reflections")
 RESEARCH_EXCLUDED_SUBDIRS = ("cache", "images", "raw")
-TOMBSTONE_WINDOW = "90 days ago"
-
-
-def _git(vault: Path, *args: str) -> subprocess.CompletedProcess:
-    return run_git(vault, *args, timeout=120)
+NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner")
+RESULT_STATUSES = ("prepared", "publishing", "needs_review", "failed", "complete")
+TOMBSTONE_DAYS = 90
+# A note touched this recently may still be mid-edit or not yet committed by Reflect.
+RECENT_EDIT_SECONDS = 2 * 60 * 60
+# When most in-scope notes share one mtime window, a clone or checkout reset
+# them, and mtime no longer says how long a note sat untouched.
+MTIME_RESET_SHARE = 0.8
+MTIME_RESET_WINDOW_SECONDS = 10 * 60
+CONFLICT_MARKER = re.compile(rb"^(?:<<<<<<<(?: |\r?$)|=======\r?$|>>>>>>>(?: |\r?$))", re.MULTILINE)
 
 
 def _text(vault: Path, *args: str) -> str:
-    result = _git(vault, *args)
+    result = run_git(vault, *args, timeout=120)
     if result.returncode:
         raise evidence.VerificationError(f"git {args[0]} failed: {result.stderr.strip()[:200]}")
     return result.stdout.strip()
@@ -69,6 +78,10 @@ def _file(vault: Path, rel: str) -> Path:
 
 def _hash(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None
+
+
+def _text_hash(body: str | None) -> str | None:
+    return None if body is None else hashlib.sha256(body.encode()).hexdigest()
 
 
 def _assert_hashes(vault: Path, hashes: dict[str, str | None]) -> None:
@@ -106,19 +119,6 @@ BAND_RULES = {
 }
 
 
-def band_label(band: str) -> str:
-    """The `--band` string recorded in commit bodies; rendered from BAND_RULES."""
-    if band == "redundant-high":
-        r = BAND_RULES[band]
-        return (
-            f"redundant-high ({r['min_peers']}+ peers >= {r['min_score']}, all in {'/'.join(r['tiers'])}, "
-            f"all > {r['cold_days']}d cold, mode={r['mode']})"
-        )
-    if band == "low-signal-high":
-        r = BAND_RULES[band]
-        return f"low-signal-high (all {r['conditions']} Forgetter conditions + >{r['cold_days']}d cold)"
-    return band
-
 def _age_days(vault: Path, rel: str, today: date) -> int | None:
     path = vault / rel
     try:
@@ -145,11 +145,13 @@ def _under_tiers(vault: Path, rel: str, tiers: tuple[str, ...]) -> bool:
     return _norm_rel(rel).startswith(prefixes)
 
 
-def route_row(vault: Path, row: dict, today: date) -> tuple[str, str, str]:
+def route_row(vault: Path, row: dict, today: date, age_guard: str | None = None) -> tuple[str, str, str]:
     """(bucket, band, reason) for one Forgetter row.
 
     bucket: auto_apply | pending | probe | invalid. The band is the label the
     op records; the reason explains a downgrade so the audit can show it.
+    `age_guard` says why mtimes cannot measure age tonight; no age-based band
+    matches while it is set.
     """
     category = str(row.get("category", ""))
     confidence = str(row.get("confidence", "medium") or "medium")
@@ -196,8 +198,8 @@ def route_row(vault: Path, row: dict, today: date) -> tuple[str, str, str]:
             if age is None:
                 failures.append(f"{rel} missing on disk")
                 break
-            if age <= rule["cold_days"]:
-                failures.append(f"{rel} touched within {rule['cold_days']}d")
+            if age_guard or age <= rule["cold_days"]:
+                failures.append(age_guard or f"{rel} touched within {rule['cold_days']}d")
                 break
         if failures:
             pending_rule = BAND_RULES["redundant-pending"]
@@ -225,6 +227,8 @@ def route_row(vault: Path, row: dict, today: date) -> tuple[str, str, str]:
         failures = decay_scan.low_signal_content_failures(vault, candidate)
         if failures:
             return "invalid", category, f"conditions do not hold on disk: {'; '.join(failures)}"
+        if age_guard:
+            return "invalid", category, age_guard
         if age > rule["cold_days"] and confidence == "high":
             return "auto_apply", "low-signal-high", f"{age}d cold, all conditions hold"
         pending = BAND_RULES["low-signal-pending"]
@@ -239,7 +243,7 @@ def stale_banner_text(run_date: str, entry_id: str, phrase: str) -> str:
     phrase = " ".join(str(phrase).split()).replace('"', "'")
     return (
         f'> Stale since {run_date} (autoevo {entry_id}): "{phrase}" passed with no '
-        "closure found; the veto window closed. `git revert` the marked commit to undo.\n"
+        "closure found; the veto window closed. `git restore` the note's prior version to undo.\n"
     )
 
 
@@ -265,13 +269,36 @@ def insert_stale_banner(text: str, banner: str) -> str:
     return "".join(head) + block + "".join(tail)
 
 
+def cluster_hash(sources: list[str]) -> str:
+    """First 12 hex chars of sha1 over the sorted unique source paths, one per LF-terminated line."""
+    return hashlib.sha1(("\n".join(sorted(set(sources))) + "\n").encode("utf-8")).hexdigest()[:12]
+
+
+def _recent_operations(vault: Path, today: date) -> list[tuple[dict, str]]:
+    """(operation, content state) for note operations receipted in the tombstone window."""
+    found = []
+    for receipt in sorted(evidence.record_path(vault, today.isoformat()).parent.glob("*.json")):
+        try:
+            cycle = date.fromisoformat(receipt.stem)
+        except ValueError:
+            continue
+        if today - timedelta(days=TOMBSTONE_DAYS) <= cycle < today:
+            found += [(op, evidence.operation_state(vault, op)) for op in evidence.read_record(receipt).get("operations", [])
+                      if isinstance(op, dict) and op.get("kind") in NOTE_KINDS]
+    return found
+
+
+def _cluster(operation: dict) -> str:
+    """The cluster an operation changed: its pre-existing note paths, never state files."""
+    meta = _segment("meta") + "/"
+    return cluster_hash([rel for rel, (before, _) in evidence.operation_paths(operation).items()
+                         if before is not None and not rel.startswith(meta)])
+
 
 def tombstone_reason(vault: Path, sources: list[str], today: date) -> str | None:
-    cluster = commits.cluster_hash(sources)
-    reverts = _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", '--grep=^Revert "', "--format=%B")
-    for sha in _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", "--grep=^\\[autoevo:", "--format=%H").split():
-        if sha in reverts and f"cluster_hash: {cluster}" in _text(vault, "show", "-s", "--format=%B", sha):
-            return f"user reverted cluster {cluster}"
+    cluster = cluster_hash(sources)
+    if any(state == "reverted" and _cluster(op) == cluster for op, state in _recent_operations(vault, today)):
+        return f"user reverted cluster {cluster}"
     path = _file(vault, f"{_segment('meta')}/autoevo_tombstones.toml")
     if path.is_file():
         for row in tomllib.loads(path.read_text()).get("tombstone", []):
@@ -281,23 +308,47 @@ def tombstone_reason(vault: Path, sources: list[str], today: date) -> str | None
 
 
 def record_undos(vault: Path, ledger: Path, today: date) -> None:
+    """A restored stale banner is the user's veto of that queue entry's default."""
     existing = {(row.get("class"), row.get("subject")) for row in decisions.load(ledger) if row.get("verdict") == "undo"}
-    for sha in _text(vault, "log", f"--since={TOMBSTONE_WINDOW}", '--grep=^Revert "', "--format=%H").split():
-        match = re.search(r"^This reverts commit ([0-9a-f]{7,40})", _text(vault, "show", "-s", "--format=%B", sha), re.MULTILINE)
-        if not match:
-            continue
-        original = _text(vault, "show", "-s", "--format=%B", match.group(1))
-        category = re.match(r"^\[autoevo:([a-zA-Z0-9-]+)\]", original)
-        entry = re.search(r"^Queue entry: (\S+)", original, re.MULTILINE)
-        if category and entry and (f"autoevo/{category.group(1)}", entry.group(1)) not in existing:
-            decisions.record_best_effort(cls=f"autoevo/{category.group(1)}", subject=entry.group(1), verdict="undo",
-                reason=f"user reverted the autoevo commit ({sha[:7]})", features={}, source="revert-scan", by="human",
-                ts=f"{today.isoformat()}T00:00:00", path=ledger)
-            existing.add((f"autoevo/{category.group(1)}", entry.group(1)))
+    for op, state in _recent_operations(vault, today):
+        key = (f"autoevo/{op.get('category')}", op.get("entry"))
+        if state == "reverted" and op.get("entry") and key not in existing:
+            decisions.record_best_effort(cls=key[0], subject=key[1], verdict="undo",
+                reason=f"user restored the notes autoevo changed ({op['candidate_id'][:12]})", features={},
+                source="revert-scan", by="human", ts=f"{today.isoformat()}T00:00:00", path=ledger)
+            existing.add(key)
 
 
-def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict) -> dict:
-    """Snapshot eligible clean sources; the parent retains this plan, not the model."""
+def _revived_archives(vault: Path, today: date, run_id: str) -> list[dict]:
+    """Queue archived sources that a sync merge brought back beside their archive copy."""
+    entries = []
+    for op, state in _recent_operations(vault, today):
+        peers = sorted(evidence.operation_paths(op)) if state == "superseded" and op["kind"] == "low-signal-high" else []
+        if peers and all((vault / rel).is_file() for rel in peers):
+            entries.append({"id": f"{run_id}-{evidence.digest(['revived', peers])[:12]}", "category": "redundant",
+                            "peers": peers, "proposed_action": "keep either the revived note or its archive copy",
+                            "evidence_summary": f"archived by autoevo {op['candidate_id'][:12]}, then revived by a sync merge",
+                            "proposed_at": today.isoformat(), "status": "pending"})
+    return entries
+
+
+def _mtime_reset(stamps: list[float]) -> str | None:
+    """Why ages are unreliable when most in-scope notes share one mtime window."""
+    stamps = sorted(stamps)
+    peak = max((bisect_right(stamps, stamp + MTIME_RESET_WINDOW_SECONDS) - index for index, stamp in enumerate(stamps)), default=0)
+    if not stamps or peak < MTIME_RESET_SHARE * len(stamps):
+        return None
+    return (f"mtime_reset: {peak} of {len(stamps)} in-scope tracked notes share one "
+            f"{MTIME_RESET_WINDOW_SECONDS // 60}-minute mtime window; age-based bands are off this run")
+
+
+def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict, *, now: float | None = None) -> dict:
+    """Snapshot eligible committed sources; the parent retains this plan, not the model.
+
+    A source is eligible when it is tracked at HEAD, its bytes are that blob,
+    it has no conflict markers, and it is older than the recent-edit window.
+    """
+    now = time.time() if now is None else now
     today = date.fromisoformat(cycle)
     meta = _segment("meta")
     state_files = [f"{meta}/{name}" for name in ("autoevo_pending.toml", "autoevo_quarantine.toml", "autoevo_tombstones.toml", "decisions.jsonl")]
@@ -321,34 +372,40 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict)
                 if row.get("status") == "pending" and row.get("default_action")
                 and pending._parse_date(row.get("default_at")) is not None
                 and pending._parse_date(row["default_at"]) <= today]
-    protected = list(readiness.get("health", {}).get("protected_paths", []))
-    tracked = set(git_paths(vault, "ls-files"))
-    candidates = {rel for rel in tracked if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
-    candidates.update(peer for row in defaults for peer in row.get("peers", []) if isinstance(peer, str))
-    snapshots = workspace / "sources"
-    sources = {}
-    for rel in sorted(candidates):
-        if rel not in tracked or _protected(rel, protected) or not rel.startswith(_prefixes(WORKING_TIERS)):
+    peers = [peer for row in defaults for peer in row.get("peers", [])
+             if isinstance(peer, str) and _norm_rel(peer) == peer and peer.startswith(_prefixes(WORKING_TIERS))]
+    head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers)
+    in_scope = {rel for rel in head if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
+    files, protected, stamps, sources = {}, [], [], {}
+    for rel in sorted(in_scope.union(peer for peer in peers if peer in head)):
+        try:
+            source = _file(vault, rel)
+        except evidence.VerificationError:
+            protected.append(rel)
             continue
-        source = _file(vault, rel)
-        if not source.is_file():
-            continue
+        if source.is_file():
+            files[rel] = source
+    for (rel, source), blob in zip(files.items(), hash_objects(vault, list(files))):
         before = source.stat()
+        stamps += [before.st_mtime] if rel in in_scope else []
         content = source.read_bytes()
-        destination = snapshots / rel
+        if blob != head[rel] or CONFLICT_MARKER.search(content) or now - before.st_mtime < RECENT_EDIT_SECONDS:
+            protected.append(rel)
+            continue
+        destination = workspace / "sources" / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(content)
         shutil.copystat(source, destination)
-        if source.stat() != before:
-            raise evidence.VerificationError(f"source changed while snapshotting: {rel}")
-        sources[rel] = {"before_sha256": hashlib.sha256(content).hexdigest(), "mtime_ns": before.st_mtime_ns,
-                        "mode": before.st_mode & 0o777, "snapshot": str(destination)}
+        sources[rel] = {"before_sha256": hashlib.sha256(content).hexdigest(), "before_blob": blob,
+                        "mtime_ns": before.st_mtime_ns, "snapshot": str(destination)}
     _assert_hashes(vault, state_hashes)
+    age_guard = _mtime_reset(stamps)
+    notes = [] if selected else ["research_rotation_empty: no eligible research subdirectory"]
     return {"schema_version": evidence.VERSION, "cycle_id": cycle, "run_id": f"{today:%Y%m%d}-{uuid.uuid4().hex[:12]}",
             "base_head": _text(vault, "rev-parse", "HEAD"), "dispatches": dispatches, "quarantine_skipped": skipped,
             "retrieval_mode": readiness.get("health", {}).get("semantic_mode", "unavailable"),
-            "protected_paths": protected, "source_files": sources, "state_files": state_hashes, "defaults": defaults,
-            "notes": [] if selected else ["research_rotation_empty: no eligible research subdirectory"]}
+            "protected_paths": sorted(protected), "source_files": sources, "state_files": state_hashes, "defaults": defaults,
+            "age_guard": age_guard, "notes": notes + [age_guard] if age_guard else notes}
 
 
 def _curator_problem(row: dict, plan: dict, vault: Path, band: str) -> str | None:
@@ -397,7 +454,7 @@ def route_proposal(vault: Path, proposal: dict, plan: dict) -> tuple[list[dict],
             if not subject.startswith(sweep["scope"] + "/") or _protected(row["candidate"], plan["protected_paths"]):
                 notes.append(f"out-of-scope or protected finding skipped: {row['candidate']}")
                 continue
-            bucket, band, reason = route_row(vault, row, today)
+            bucket, band, reason = route_row(vault, row, today, plan.get("age_guard"))
             if row["category"] == "redundant" and bucket == "auto_apply" and plan["retrieval_mode"] != "real":
                 bucket, band, reason = "pending", "redundant", "trusted retrieval mode is not calibrated; model scores cannot authorize a merge"
             if bucket == "invalid":
@@ -476,62 +533,68 @@ def _error_set(lint: dict) -> set[str]:
     return {evidence.digest(row) for row in lint.get("findings", []) if row.get("severity") == "ERROR"}
 
 
-def _changes(vault: Path, after: dict[str, str | None], expected: dict[str, str | None] | None = None) -> dict:
-    result = {}
-    for rel, body in after.items():
-        path = _file(vault, rel)
-        before = _hash(path) if expected is None else expected[rel]
-        after_hash = hashlib.sha256(body.encode()).hexdigest() if body is not None else None
-        if before != after_hash:
-            result[rel] = {"before_sha256": before, "after": body, "mode": path.stat().st_mode & 0o777 if path.exists() else 0o644}
-    return result
+def _stale(vault: Path, rel: str, expected: str | None, *, note: bool) -> str | None:
+    """Why `rel` no longer holds the bytes its write was planned against.
 
-
-def _state_changes(vault: Path, shadow: Path, expected: dict) -> dict:
-    changes = _changes(vault, {rel: (shadow / rel).read_text(encoding="utf-8") if (shadow / rel).is_file() else None for rel in expected}, expected)
-    for change in changes.values():
-        if change["before_sha256"] is None:
-            change["mode"] = 0o600
-    return changes
-
-
-def _publish(vault: Path, record: dict, path: Path, kind: str, changes: dict, message: str, *, recheck=None) -> None:
-    if not changes:
-        return
-    expected_head = record["operations"][-1]["commit"]["sha"] if record["operations"] else record["plan"]["base_head"]
-    intent = {"kind": kind, "changes": changes, "expected_head": expected_head}
-    intent["candidate_id"] = evidence.digest([record["run_id"], len(record["operations"]), intent])
-    metadata = set(record["plan"]["state_files"])
-    sources = tuple(record["plan"]["source_files"])
-    allowed = {"redundant-high": sources,
-               "low-signal-high": (*sources, f"{_segment('archive')}/decayed/"),
-               "stale-banner": (*sources, *metadata), "queue": tuple(metadata),
-               "audit": (record["output_file"], *record["reports"].values())}[kind]
-    intent["force_add"] = [rel for rel in changes if rel in metadata and _git(vault, "check-ignore", "--no-index", "-q", "--", rel).returncode == 0]
-    record["operations"].append(intent)
-    record["status"] = "publishing"
-    evidence.write_record(path, record)
+    A note must also still be its HEAD blob without conflict markers, so the
+    bytes a write replaces stay recoverable with plain Git.
+    """
     try:
-        intent["commit"] = commits.publish_changes(vault, changes=changes, message=message, candidate_id=intent["candidate_id"],
-            expected_head=intent["expected_head"], allowed_prefixes=allowed, protected_paths=set(record["plan"]["protected_paths"]),
-            force_add=set(intent["force_add"]), recheck=recheck)
-    except commits.PublicationError as exc:
-        intent["publication_started"] = exc.publication_started
-        record["status"] = "needs_review" if exc.publication_started else "failed"
-        record["errors"].append(str(exc))
-        evidence.write_record(path, record)
-        raise
+        path = _file(vault, rel)
+        data = path.read_bytes() if path.is_file() else None
+        if (None if data is None else hashlib.sha256(data).hexdigest()) != expected:
+            return f"{rel} differs from its planned bytes"
+        if note and data is not None and (CONFLICT_MARKER.search(data) or tree_blobs(vault, rel).get(rel) != hash_objects(vault, [rel])[0]):
+            return f"{rel} has conflict markers or is not committed at HEAD"
+    except (OSError, RuntimeError, evidence.VerificationError) as exc:
+        return f"{rel} cannot be checked: {exc}"
+    return None
+
+
+def _apply(vault: Path, record: dict, path: Path, kind: str, after: dict[str, str | None],
+           expected: dict[str, str | None], **fields: str) -> bool:
+    """Write one operation as plain files after receipting its intent; Reflect commits them.
+
+    A changed note skips the operation before its first write. A change found
+    between writes stops the run with a half-applied operation for review.
+    Queue and audit state is hash-pinned, so a change there fails instead.
+    """
+    note, plan = kind in NOTE_KINDS, record["plan"]
+    scope = {"queue": [*plan["state_files"]], "audit": [f"{_segment('agent_findings')}/"]}.get(
+        kind, [*plan["source_files"], f"{_segment('archive')}/decayed/"])
+    if stray := [rel for rel in after if not _protected(_norm_rel(rel), scope)]:
+        raise evidence.VerificationError(f"{kind} may not write {stray}")
+    after = {rel: body for rel, body in after.items() if _text_hash(body) != expected[rel]}
+    if not after:
+        return True
+    order = sorted(after, key=lambda rel: (after[rel] is None, rel))
+    _ready(vault)
+    if problem := next(filter(None, (_stale(vault, rel, expected[rel], note=note) for rel in order)), None):
+        if not note:
+            raise evidence.VerificationError(f"source or decision state changed: {problem}")
+        record["notes"].append(f"skipped {kind}: {problem}")
+        return False
+    existing = [rel for rel in order if expected[rel] is not None]
+    before_blobs = dict(zip(existing, hash_objects(vault, existing)))
+    operation = {"kind": kind, "candidate_id": evidence.digest([record["run_id"], len(record["operations"]), kind, order]),
+                 **fields, "state": "applying", "paths": {
+                     rel: {"before_blob": before_blobs.get(rel), "before_sha256": expected[rel],
+                           "after_blob": None, "after_sha256": _text_hash(after[rel])} for rel in order}}
+    record["operations"].append(operation)
     evidence.write_record(path, record)
-
-
-def _source_check(vault: Path, plan: dict, sources: list[str]) -> None:
-    for rel in sources:
-        if rel not in plan["source_files"] or _protected(rel, plan["protected_paths"]):
-            raise evidence.VerificationError(f"source is not a clean authorized snapshot: {rel}")
-        source = _file(vault, rel)
-        saved = plan["source_files"][rel]
-        if _hash(source) != saved["before_sha256"] or source.stat().st_mtime_ns != saved["mtime_ns"]:
-            raise evidence.VerificationError(f"source changed since proposal: {rel}")
+    for rel in order:
+        if problem := _stale(vault, rel, expected[rel], note=note):
+            raise evidence.VerificationError(f"{kind} stopped between writes: {problem}")
+        if after[rel] is None:
+            _file(vault, rel).unlink()
+        else:
+            atomic_write(_file(vault, rel), after[rel], newline="")
+    written = [rel for rel in order if after[rel] is not None]
+    for rel, blob in zip(written, hash_objects(vault, written)):
+        operation["paths"][rel]["after_blob"] = blob
+    operation["state"] = "applied"
+    evidence.write_record(path, record)
+    return True
 
 
 def _ready(vault: Path) -> None:
@@ -541,12 +604,10 @@ def _ready(vault: Path) -> None:
 
 
 def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str, lint_check=None) -> dict:
-    """Only the trusted Prefect process calls this; the model cannot publish."""
+    """Only the trusted Prefect process calls this; the model cannot write the vault."""
     proposal = evidence.validate_proposal(proposal, plan)
     _ready(vault)
     _assert_hashes(vault, plan["state_files"])
-    if _text(vault, "rev-parse", "HEAD") != plan["base_head"]:
-        raise evidence.VerificationError("Git HEAD changed during proposal preparation")
     check_lint = lint_check or _lint
     before_lint = check_lint(vault)
     cycle, today = plan["cycle_id"], date.fromisoformat(plan["cycle_id"])
@@ -560,7 +621,7 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
     auto, entries, notes = route_proposal(vault, proposal, plan)
     record["notes"] = notes
     expected_state = dict(plan["state_files"])
-    with tempfile.TemporaryDirectory(prefix="atelier-autoevo-publish-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="atelier-autoevo-accept-") as temporary:
         shadow = Path(temporary)
         queue, ledger = _shadow(vault, shadow, expected_state)
         evidence.write_record(path, record)
@@ -569,54 +630,34 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                 for op in auto:
                     row, band = op["row"], op["band"]
                     sources = sorted(set([row["candidate"], *row.get("peers", [])])) if band == "redundant-high" else [row["candidate"]]
-                    def recheck(row=row, band=band, sources=sources):
-                        _ready(vault)
-                        _source_check(vault, plan, sources)
-                        if route_row(vault, row, today)[:2] != ("auto_apply", band) or _curator_problem(row, plan, vault, band):
-                            raise evidence.VerificationError("operation no longer satisfies its authorized band")
-                    recheck()
+                    if route_row(vault, row, today, plan.get("age_guard"))[:2] != ("auto_apply", band) or _curator_problem(row, plan, vault, band):
+                        record["notes"].append(f"skipped {band}: {row['candidate']} no longer satisfies its band")
+                        continue
                     if band == "redundant-high":
                         target = row["curator"]["target_path"]
                         after = {rel: row["curator"]["proposed_content"] if rel == target else None for rel in sources}
-                        message = f"[autoevo:redundant] merge {len(sources)} notes into {Path(target).stem}"
                     else:
-                        source = sources[0]
-                        target = f"{_segment('archive')}/decayed/{cycle}-{source[:-3].replace('/', '-')}.md"
-                        if _file(vault, target).exists():
-                            raise evidence.VerificationError(f"archive target exists: {target}")
-                        after = {source: None, target: _file(vault, source).read_bytes().decode("utf-8")}
-                        message = f"[autoevo:low-signal] archive: {Path(source).stem}"
-                    message += f"\n\nAuto-band: {band_label(band)}\ncluster_hash: {commits.cluster_hash(sources)}\n{row['evidence']}"
-                    expected = {rel: plan["source_files"][rel]["before_sha256"] if rel in sources else None for rel in after}
-                    changes = _changes(vault, after, expected)
-                    if band == "low-signal-high":
-                        changes[target]["mode"] = plan["source_files"][sources[0]]["mode"]
-                    _publish(vault, record, path, band, changes, message, recheck=recheck)
+                        target = f"{_segment('archive')}/decayed/{cycle}-{sources[0][:-3].replace('/', '-')}.md"
+                        after = {sources[0]: None, target: _file(vault, sources[0]).read_bytes().decode("utf-8")}
+                    _apply(vault, record, path, band, after,
+                           {rel: plan["source_files"][rel]["before_sha256"] if rel in sources else None for rel in after})
                 for entry in plan["defaults"]:
                     if entry.get("default_action") != "stale-banner":
                         continue
                     sources = list(entry.get("peers", []))
-                    if pending.default_for(entry) != "stale-banner":
-                        record["notes"].append(f"default has no eligible sources: {entry['id']}")
+                    live = next((item for item in pending.load(vault / _segment("meta") / "autoevo_pending.toml")["pending"] if item.get("id") == entry["id"]), None)
+                    if (pending.default_for(entry) != "stale-banner" or live != entry or tombstone_reason(vault, sources, today)
+                            or any(rel not in plan["source_files"] for rel in sources)):
+                        record["notes"].append(f"default skipped: {entry['id']} lacks eligible sources or was changed, vetoed, deferred, or tombstoned")
                         continue
-                    def recheck_default():
-                        _ready(vault)
-                        _assert_hashes(vault, expected_state)
-                        _source_check(vault, plan, sources)
-                        live = next((item for item in pending.load(vault / _segment("meta") / "autoevo_pending.toml")["pending"] if item.get("id") == entry["id"]), None)
-                        if live != entry or tombstone_reason(vault, sources, today):
-                            raise evidence.VerificationError("default was changed, vetoed, deferred, or tombstoned")
-                    recheck_default()
                     after = {}
                     for source in sources:
                         original = _file(vault, source).read_text(encoding="utf-8")
                         after[source] = original if f"(autoevo {entry['id']})" in original else insert_stale_banner(original, stale_banner_text(cycle, entry["id"], entry["evidence_summary"]))
-                    _pending(queue, ledger, "resolve", "--id", entry["id"], "--status", "applied", "--reason", "default after veto window",
-                             "--today", cycle, "--source", "nightly", "--by", "rule")
-                    changes = {**_state_changes(vault, shadow, expected_state), **_changes(vault, after, {source: plan["source_files"][source]["before_sha256"] for source in sources})}
-                    message = f"[autoevo:time-stale-A] stale-banner: {len(sources)} notes\n\nQueue entry: {entry['id']}\ncluster_hash: {commits.cluster_hash(sources)}\nDefault fired: {entry['default_at']}"
-                    _publish(vault, record, path, "stale-banner", changes, message, recheck=recheck_default)
-                    expected_state.update({rel: record["operations"][-1]["commit"]["after_sha256"][rel] for rel in expected_state if rel in changes})
+                    if _apply(vault, record, path, "stale-banner", after, {rel: plan["source_files"][rel]["before_sha256"] for rel in sources},
+                              entry=entry["id"], category=entry["category"]):
+                        _pending(queue, ledger, "resolve", "--id", entry["id"], "--status", "applied", "--reason", "default after veto window",
+                                 "--today", cycle, "--source", "nightly", "--by", "rule")
             else:
                 for op in auto:
                     row = op["row"]
@@ -625,7 +666,7 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                                     "peers": peers, "proposed_action": row["proposed_action"], "evidence_summary": row["evidence"] + "; incomplete sweep",
                                     "proposed_at": cycle, "status": "pending"})
             _assert_hashes(vault, expected_state)
-            record["pending"] = _append(queue, ledger, entries, shadow, cycle)["appended"]
+            record["pending"] = _append(queue, ledger, entries + _revived_archives(vault, today, plan["run_id"]), shadow, cycle)["appended"]
             _pending(queue, ledger, "veto-expired", "--today", cycle, "--apply-dismissals")
             bundles = _bundles(queue, ledger, today)
             gate_args = precedent._gate_kwargs(precedent.build_parser().parse_args(["autoevo"]))
@@ -644,24 +685,22 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
             record_undos(vault, ledger, today)
             quarantine.update_state(outcomes={str(vault / row["scope"]): row["outcome"] for row in proposal["sweeps"]},
                                     state_path=shadow / _segment("meta") / "autoevo_quarantine.toml", today=today)
-            changes = _state_changes(vault, shadow, expected_state)
-            _publish(vault, record, path, "queue", changes, f"[autoevo:queue] pending/default/quarantine updates for {cycle}",
-                     recheck=lambda: (_ready(vault), _assert_hashes(vault, expected_state)))
+            _apply(vault, record, path, "queue", {rel: (shadow / rel).read_text(encoding="utf-8") if (shadow / rel).is_file() else None
+                                                  for rel in expected_state}, expected_state)
             after_lint = check_lint(vault)
             record["lint"] = {"counts": after_lint["counts"], "new_errors": sorted(_error_set(after_lint) - _error_set(before_lint))}
             if record["lint"]["new_errors"]:
-                record["errors"].append("publication introduced lint errors; review the per-operation commits")
+                record["errors"].append("written operations introduced lint errors; review the receipted operations")
             record["reports"] = {row["scope"]: f"{_segment('agent_findings')}/decay-{plan['run_id']}-{evidence.digest(row['scope'])[:12]}.md"
                                  for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
             reports = {record["reports"][row["scope"]]: evidence.sweep_report(row) for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
             reports[record["output_file"]] = evidence.render_report(record)
-            _publish(vault, record, path, "audit", _changes(vault, reports),
-                     f"[autoevo:audit] structured nightly result {cycle}", recheck=lambda: _ready(vault))
+            _apply(vault, record, path, "audit", reports, {rel: _hash(_file(vault, rel)) for rel in reports})
             record["status"] = "failed" if record["errors"] else "complete"
             evidence.write_record(path, record)
         except BaseException as exc:
             if record["status"] not in {"needs_review", "failed"}:
-                record["status"] = "needs_review" if record["operations"] and "commit" not in record["operations"][-1] else "failed"
+                record["status"] = "needs_review" if any(op["state"] == "applying" for op in record["operations"]) else "failed"
                 record["errors"].append(f"{type(exc).__name__}: {exc}")
                 evidence.write_record(path, record)
             raise
@@ -671,6 +710,11 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
 
 
 def prior_result(vault: Path, cycle: str) -> dict | None:
+    """Return this cycle's verified result, refusing to replay it.
+
+    Every receipt's operations are checked against live content; only a
+    half-applied or malformed operation (or an unrecognized receipt) blocks.
+    """
     path = evidence.record_path(vault, cycle)
     for legacy in sorted(path.parent.glob("*.toml")):
         try:
@@ -683,32 +727,18 @@ def prior_result(vault: Path, cycle: str) -> dict | None:
             raise evidence.VerificationError(f"legacy receipt requires effects review: {legacy.name}")
     for previous in sorted(path.parent.glob("*.json")):
         record = evidence.read_record(previous)
-        if (record.get("cycle_id") != previous.stem
-                or record.get("status") not in ("complete", "failed", "publishing", "needs_review")
+        if (record.get("cycle_id") != previous.stem or record.get("status") not in RESULT_STATUSES
                 or not isinstance(record.get("operations"), list) or not isinstance(record.get("errors"), list)
-                or (record["status"] == "failed" and not record["errors"])
-                or any(not isinstance(op, dict) or not {"kind", "candidate_id", "expected_head", "changes"} <= op.keys()
-                       or ("commit" in op and not isinstance(op["commit"], dict)) for op in record["operations"])):
+                or (record["status"] == "failed" and not record["errors"])):
             raise evidence.VerificationError(f"unrecognized Autoevo result needs review: {previous.name}")
-        unresolved = any("commit" not in op and op.get("publication_started") is not False for op in record.get("operations", []))
-        if record.get("status") in {"publishing", "needs_review"} or unresolved:
-            for operation in record.get("operations", []):
-                if "commit" not in operation and operation.get("publication_started") is not False:
-                    operation["commit"] = commits.reconcile_commit(vault, candidate_id=operation["candidate_id"],
-                        expected_head=operation["expected_head"], changes=operation["changes"], force_add=set(operation.get("force_add", [])))
-            if record.get("operations") and record["operations"][-1]["kind"] == "audit" and not record.get("errors"):
-                record["status"] = "complete"
-                evidence.write_record(previous, record)
-            else:
-                raise evidence.VerificationError(f"unfinished Autoevo publication needs review: {previous.name}")
         if record["status"] == "complete":
             evidence.verify_cycle(vault=vault, cycle=record["cycle_id"])
-            if previous == path:
-                return record
         else:
-            evidence.verify_operations(vault, record, allow_refused=True)
-            if previous == path:
-                raise evidence.VerificationError(f"this cycle already has a {record.get('status')} result; no automatic replay")
+            evidence.verify_operations(vault, record)
+        if previous == path:
+            if record["status"] == "complete":
+                return record
+            raise evidence.VerificationError(f"this cycle already has a {record['status']} result; no automatic replay")
     return None
 
 

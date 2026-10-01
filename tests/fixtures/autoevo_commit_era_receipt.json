@@ -1,0 +1,319 @@
+{
+  "cycle_id": "2099-01-20",
+  "errors": [],
+  "lint": {
+    "counts": {
+      "error": 0,
+      "info": 0,
+      "warn": 0
+    },
+    "new_errors": []
+  },
+  "notes": [],
+  "operations": [
+    {
+      "candidate_id": "bc077ff566ef19e4337502f6c6f6818ace976cd5f4045d102fc0147cb75b2f54",
+      "changes": {
+        "archive/decayed/2099-01-20-wip-seed.md": {
+          "after": "short original note\n",
+          "before_sha256": null,
+          "mode": 420
+        },
+        "wip/seed.md": {
+          "after": null,
+          "before_sha256": "0fe34f7b4fe09a298dcdd4e450a2f0c3c4722552a9902489e2f716703bd78588",
+          "mode": 420
+        }
+      },
+      "commit": {
+        "after_sha256": {
+          "archive/decayed/2099-01-20-wip-seed.md": "0fe34f7b4fe09a298dcdd4e450a2f0c3c4722552a9902489e2f716703bd78588",
+          "wip/seed.md": null
+        },
+        "candidate_id": "bc077ff566ef19e4337502f6c6f6818ace976cd5f4045d102fc0147cb75b2f54",
+        "force_added": [],
+        "modes": {
+          "archive/decayed/2099-01-20-wip-seed.md": 420,
+          "wip/seed.md": null
+        },
+        "parent": "f317cc9be00052b6dd762753eac74b8c64223e18",
+        "paths": [
+          "archive/decayed/2099-01-20-wip-seed.md",
+          "wip/seed.md"
+        ],
+        "sha": "566796829b15293afa16cc595264cff19f34935e"
+      },
+      "expected_head": "f317cc9be00052b6dd762753eac74b8c64223e18",
+      "force_add": [],
+      "kind": "low-signal-high"
+    },
+    {
+      "candidate_id": "6bf8106883d93156e340243646029e0b5636c1ac9eb6494cf43a2f752cf8bf7a",
+      "changes": {
+        "_meta/autoevo_pending.toml": {
+          "after": "schema_version = 1\n\n[[pending]]\nid = \"due-item\"\ncategory = \"time-stale-A\"\nproposed_action = \"mark stale\"\nevidence_summary = \"finish by last summer\"\nproposed_at = \"2099-01-01\"\nlast_surfaced = \"2099-01-20\"\nstatus = \"applied\"\ndefault_action = \"stale-banner\"\ndefault_at = \"2099-01-15\"\npeers = [\n    \"research/lab/other.md\",\n]\ndismiss_reason = \"default after veto window\"\nresolved_at = \"2099-01-20\"\n",
+          "before_sha256": "a6bf3dbff41a66f6f8a22212d81e08486f67ecf8ee5182374a24e199aaf70f09",
+          "mode": 384
+        },
+        "_meta/decisions.jsonl": {
+          "after": "{\"ts\": \"2099-01-20T00:00:00\", \"class\": \"autoevo/time-stale-A\", \"subject\": \"due-item\", \"verdict\": \"apply\", \"reason\": \"default after veto window\", \"features\": {\"category\": \"time-stale-A\", \"peers\": [\"research/lab/other.md\"], \"tier\": \"research\", \"proposed_action\": \"mark stale\", \"evidence_summary\": \"finish by last summer\", \"proposed_at\": \"2099-01-01\", \"surface_count\": 0}, \"source\": \"nightly\", \"by\": \"rule\"}\n",
+          "before_sha256": null,
+          "mode": 384
+        },
+        "research/lab/other.md": {
+          "after": "> Stale since 2099-01-20 (autoevo due-item): \"finish by last summer\" passed with no closure found; the veto window closed. `git revert` the marked commit to undo.\n\nanother old deadline\n",
+          "before_sha256": "bd01616455041ea83f76162b0b353314c3a231b9d1d153549a0fe9712c9cb69c",
+          "mode": 420
+        }
+      },
+      "commit": {
+        "after_sha256": {
+          "_meta/autoevo_pending.toml": "b78ede134b988679d90d08e05ec144e73c6289e5dd628587cefefc46a8000373",
+          "_meta/decisions.jsonl": "8fe5e65b7d56b0702c1155a57a74f6555369cc186a4e6373921837c5f343ce14",
+          "research/lab/other.md": "9e1a6a2fa68e0bb674424d62a3142e622b26ddde47a2e2375bc6532280d44671"
+        },
+        "candidate_id": "6bf8106883d93156e340243646029e0b5636c1ac9eb6494cf43a2f752cf8bf7a",
+        "force_added": [
+          "_meta/autoevo_pending.toml",
+          "_meta/decisions.jsonl"
+        ],
+        "modes": {
+          "_meta/autoevo_pending.toml": 384,
+          "_meta/decisions.jsonl": 384,
+          "research/lab/other.md": 420
+        },
+        "parent": "566796829b15293afa16cc595264cff19f34935e",
+        "paths": [
+          "_meta/autoevo_pending.toml",
+          "_meta/decisions.jsonl",
+          "research/lab/other.md"
+        ],
+        "sha": "ad9e36b0d95091e2a4f536de6c34049dbeff0695"
+      },
+      "expected_head": "566796829b15293afa16cc595264cff19f34935e",
+      "force_add": [
+        "_meta/autoevo_pending.toml",
+        "_meta/decisions.jsonl"
+      ],
+      "kind": "stale-banner"
+    },
+    {
+      "candidate_id": "83ef30814c4945cebf95c3f127a2fa679ff26d31e604e368243b01d15162ce13",
+      "changes": {
+        "_meta/autoevo_quarantine.toml": {
+          "after": "quarantine = []\n",
+          "before_sha256": null,
+          "mode": 384
+        }
+      },
+      "commit": {
+        "after_sha256": {
+          "_meta/autoevo_quarantine.toml": "62ad0193c1ca52b7ea3c4e34b193cdedd666ab44e7f5b7f8dde6f9fae00e9e3f"
+        },
+        "candidate_id": "83ef30814c4945cebf95c3f127a2fa679ff26d31e604e368243b01d15162ce13",
+        "force_added": [
+          "_meta/autoevo_quarantine.toml"
+        ],
+        "modes": {
+          "_meta/autoevo_quarantine.toml": 384
+        },
+        "parent": "ad9e36b0d95091e2a4f536de6c34049dbeff0695",
+        "paths": [
+          "_meta/autoevo_quarantine.toml"
+        ],
+        "sha": "9389a3f9cac652fc18a8d262a8aa6adf51765e61"
+      },
+      "expected_head": "ad9e36b0d95091e2a4f536de6c34049dbeff0695",
+      "force_add": [
+        "_meta/autoevo_quarantine.toml"
+      ],
+      "kind": "queue"
+    },
+    {
+      "candidate_id": "6b7586b98cb54b670ff756576511ab22d912a298328399817986b4e9356e6b92",
+      "changes": {
+        "agent-findings/autoevo-applied-2099-01-20.md": {
+          "after": "## Autoevo Run: 2099-01-20\n\nRun ID: 20990120-fdc0e61e8e14\n\n### Sweep coverage\n- wip: envelope_returned (full)\n- research/lab: envelope_returned (full)\n- reflections: envelope_returned (full)\n\n### Operations\n- low-signal-high: 566796829b15293afa16cc595264cff19f34935e\n- stale-banner: ad9e36b0d95091e2a4f536de6c34049dbeff0695\n- queue: 9389a3f9cac652fc18a8d262a8aa6adf51765e61\n\n### Pending\n- (none)\n\n### Lint\n- {\"counts\": {\"error\": 0, \"info\": 0, \"warn\": 0}, \"new_errors\": []}\n\n### Notes\n- (none)\n\n### Errors\n- (none)\n",
+          "before_sha256": null,
+          "mode": 420
+        },
+        "agent-findings/decay-20990120-fdc0e61e8e14-03ab15510bf5.md": {
+          "after": "## Decay sweep: reflections\n\n```json\n{\n  \"completion_status\": \"complete\",\n  \"findings\": [],\n  \"gaps\": \"\",\n  \"mode\": \"full\",\n  \"notes\": [],\n  \"outcome\": \"envelope_returned\",\n  \"remaining_work\": \"\",\n  \"scope\": \"reflections\"\n}\n```\n",
+          "before_sha256": null,
+          "mode": 420
+        },
+        "agent-findings/decay-20990120-fdc0e61e8e14-51f60c689770.md": {
+          "after": "## Decay sweep: research/lab\n\n```json\n{\n  \"completion_status\": \"complete\",\n  \"findings\": [],\n  \"gaps\": \"\",\n  \"mode\": \"full\",\n  \"notes\": [],\n  \"outcome\": \"envelope_returned\",\n  \"remaining_work\": \"\",\n  \"scope\": \"research/lab\"\n}\n```\n",
+          "before_sha256": null,
+          "mode": 420
+        },
+        "agent-findings/decay-20990120-fdc0e61e8e14-c1817b216a16.md": {
+          "after": "## Decay sweep: wip\n\n```json\n{\n  \"completion_status\": \"complete\",\n  \"findings\": [\n    {\n      \"candidate\": \"wip/seed.md\",\n      \"category\": \"low-signal\",\n      \"conditions_met\": 5,\n      \"confidence\": \"high\",\n      \"curator\": {\n        \"auto_apply_safe\": true,\n        \"band\": \"low-signal-high\",\n        \"completion_status\": \"complete\",\n        \"mode\": \"auto-apply\",\n        \"operation\": \"archive\",\n        \"proposed_content\": \"short original note\\n\",\n        \"remaining_work\": \"\",\n        \"snapshot_paths\": [\n          \"/fixture/workspace/sources/wip/seed.md\"\n        ],\n        \"source_path\": \"wip/seed.md\"\n      },\n      \"evidence\": \"short, no tags or inbound links, old working note\",\n      \"proposed_action\": \"archive\"\n    }\n  ],\n  \"gaps\": \"\",\n  \"mode\": \"full\",\n  \"notes\": [],\n  \"outcome\": \"envelope_returned\",\n  \"remaining_work\": \"\",\n  \"scope\": \"wip\"\n}\n```\n",
+          "before_sha256": null,
+          "mode": 420
+        }
+      },
+      "commit": {
+        "after_sha256": {
+          "agent-findings/autoevo-applied-2099-01-20.md": "2e9810fd24fe313669641094c16149d66c2075026468b1204cc54d337298eed3",
+          "agent-findings/decay-20990120-fdc0e61e8e14-03ab15510bf5.md": "02eebd1d6c22e2bfb6497acd238471ab9f8961b707bdebfb71f5d73054b2a6d0",
+          "agent-findings/decay-20990120-fdc0e61e8e14-51f60c689770.md": "a1c892519af0a1c9d6bfa08eaa2c1386df428fb99bc88231e48a585e97b831b2",
+          "agent-findings/decay-20990120-fdc0e61e8e14-c1817b216a16.md": "9e7565c1f4fb8b1c4d28078f2c4209ccbddad82da956f1c1e0979831739b3db2"
+        },
+        "candidate_id": "6b7586b98cb54b670ff756576511ab22d912a298328399817986b4e9356e6b92",
+        "force_added": [],
+        "modes": {
+          "agent-findings/autoevo-applied-2099-01-20.md": 420,
+          "agent-findings/decay-20990120-fdc0e61e8e14-03ab15510bf5.md": 420,
+          "agent-findings/decay-20990120-fdc0e61e8e14-51f60c689770.md": 420,
+          "agent-findings/decay-20990120-fdc0e61e8e14-c1817b216a16.md": 420
+        },
+        "parent": "9389a3f9cac652fc18a8d262a8aa6adf51765e61",
+        "paths": [
+          "agent-findings/autoevo-applied-2099-01-20.md",
+          "agent-findings/decay-20990120-fdc0e61e8e14-03ab15510bf5.md",
+          "agent-findings/decay-20990120-fdc0e61e8e14-51f60c689770.md",
+          "agent-findings/decay-20990120-fdc0e61e8e14-c1817b216a16.md"
+        ],
+        "sha": "3f5599224b2cbc54240147a3fabc13e2ea19482a"
+      },
+      "expected_head": "9389a3f9cac652fc18a8d262a8aa6adf51765e61",
+      "force_add": [],
+      "kind": "audit"
+    }
+  ],
+  "output_file": "agent-findings/autoevo-applied-2099-01-20.md",
+  "pending": [],
+  "plan": {
+    "base_head": "f317cc9be00052b6dd762753eac74b8c64223e18",
+    "cycle_id": "2099-01-20",
+    "defaults": [
+      {
+        "category": "time-stale-A",
+        "default_action": "stale-banner",
+        "default_at": "2099-01-15",
+        "evidence_summary": "finish by last summer",
+        "id": "due-item",
+        "peers": [
+          "research/lab/other.md"
+        ],
+        "proposed_action": "mark stale",
+        "proposed_at": "2099-01-01",
+        "status": "pending"
+      }
+    ],
+    "dispatches": [
+      {
+        "max_candidates": 12,
+        "scope": "wip",
+        "time_budget_s": 240
+      },
+      {
+        "max_candidates": 15,
+        "scope": "research/lab",
+        "time_budget_s": 240
+      },
+      {
+        "max_candidates": 12,
+        "scope": "reflections",
+        "time_budget_s": 240
+      }
+    ],
+    "notes": [],
+    "protected_paths": [],
+    "quarantine_skipped": [],
+    "retrieval_mode": "qmd",
+    "run_id": "20990120-fdc0e61e8e14",
+    "schema_version": 1,
+    "source_files": {
+      "research/lab/other.md": {
+        "before_sha256": "bd01616455041ea83f76162b0b353314c3a231b9d1d153549a0fe9712c9cb69c",
+        "mode": 420,
+        "mtime_ns": 1790830200246031364,
+        "snapshot": "/fixture/workspace/sources/research/lab/other.md"
+      },
+      "wip/seed.md": {
+        "before_sha256": "0fe34f7b4fe09a298dcdd4e450a2f0c3c4722552a9902489e2f716703bd78588",
+        "mode": 420,
+        "mtime_ns": 4029375600000000000,
+        "snapshot": "/fixture/workspace/sources/wip/seed.md"
+      }
+    },
+    "state_files": {
+      "_meta/autoevo_pending.toml": "a6bf3dbff41a66f6f8a22212d81e08486f67ecf8ee5182374a24e199aaf70f09",
+      "_meta/autoevo_quarantine.toml": null,
+      "_meta/autoevo_tombstones.toml": null,
+      "_meta/decisions.jsonl": null
+    }
+  },
+  "prefect_flow_run_id": "fixture-flow",
+  "proposal": {
+    "cycle_id": "2099-01-20",
+    "errors": [],
+    "judgments": {},
+    "notes": [],
+    "schema_version": 1,
+    "sweeps": [
+      {
+        "completion_status": "complete",
+        "findings": [
+          {
+            "candidate": "wip/seed.md",
+            "category": "low-signal",
+            "conditions_met": 5,
+            "confidence": "high",
+            "curator": {
+              "auto_apply_safe": true,
+              "band": "low-signal-high",
+              "completion_status": "complete",
+              "mode": "auto-apply",
+              "operation": "archive",
+              "proposed_content": "short original note\n",
+              "remaining_work": "",
+              "snapshot_paths": [
+                "/fixture/workspace/sources/wip/seed.md"
+              ],
+              "source_path": "wip/seed.md"
+            },
+            "evidence": "short, no tags or inbound links, old working note",
+            "proposed_action": "archive"
+          }
+        ],
+        "gaps": "",
+        "mode": "full",
+        "notes": [],
+        "outcome": "envelope_returned",
+        "remaining_work": "",
+        "scope": "wip"
+      },
+      {
+        "completion_status": "complete",
+        "findings": [],
+        "gaps": "",
+        "mode": "full",
+        "notes": [],
+        "outcome": "envelope_returned",
+        "remaining_work": "",
+        "scope": "research/lab"
+      },
+      {
+        "completion_status": "complete",
+        "findings": [],
+        "gaps": "",
+        "mode": "full",
+        "notes": [],
+        "outcome": "envelope_returned",
+        "remaining_work": "",
+        "scope": "reflections"
+      }
+    ]
+  },
+  "reports": {
+    "reflections": "agent-findings/decay-20990120-fdc0e61e8e14-03ab15510bf5.md",
+    "research/lab": "agent-findings/decay-20990120-fdc0e61e8e14-51f60c689770.md",
+    "wip": "agent-findings/decay-20990120-fdc0e61e8e14-c1817b216a16.md"
+  },
+  "run_id": "20990120-fdc0e61e8e14",
+  "schema_version": 1,
+  "status": "complete"
+}

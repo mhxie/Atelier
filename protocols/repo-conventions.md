@@ -137,7 +137,7 @@ Vault-side lint for the conventions in this doc (folder fission, image placement
 
 ## $OV git push policy
 
-`$OV` is typically a git repo with an optional private remote (private GitHub repo). The atelier does not auto-commit or auto-push; both are user-driven. **Named exception:** `protocols/autoevo.md` defines a nightly autonomous decay sweep that auto-commits each op to `$OV` so `git revert` is the recovery path. It still never auto-pushes; push remains user-driven for all flows.
+`$OV` is typically a git repo with an optional private remote (private GitHub repo). The atelier never auto-commits or auto-pushes it; the user or a sync client such as Reflect does. `protocols/autoevo.md` writes plain files that the sync client commits; rollback is `git restore`.
 
 Conventions:
 

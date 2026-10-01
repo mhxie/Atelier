@@ -16,14 +16,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
+from tests.support import (  # noqa: E402  (importing the package puts scripts/ on sys.path)
+    IntegrationFailure,
+    expect,
+)
 import autoevo_preflight  # noqa: E402
 import autoevo_quarantine  # noqa: E402
 
 import _paths  # noqa: E402
-from tests.support import (  # noqa: E402
-    IntegrationFailure,
-    expect,
-)
 
 
 def check_autoevo_readiness() -> None:
@@ -262,7 +262,7 @@ def _check_autoevo_readiness() -> None:
                     "duration_seconds": 0.01,
                 }
 
-            session_lock = vault / "cache" / "atelier-session-lock"
+            session_lock = vault / "_meta" / "atelier-session-lock"
             inspect_preflight = partial(
                 autoevo_preflight.inspect_preflight,
                 vault=vault,
@@ -270,93 +270,36 @@ def _check_autoevo_readiness() -> None:
                 privacy_probe=privacy_probe,
                 semantic_probe=semantic_probe,
             )
-            status_commands: list[list[str]] = []
+            git_commands: list[list[str]] = []
 
             original_run = autoevo_preflight._run
 
-            def capture_status(command: list[str], **kwargs: object):
-                status_commands.append(command)
+            def capture_git(command: list[str], **kwargs: object):
+                git_commands.append(command)
                 return original_run(command, **kwargs)
 
-            with mock.patch.object(autoevo_preflight, "_run", capture_status):
+            with mock.patch.object(autoevo_preflight, "_run", capture_git):
                 clean = inspect_preflight()
             expect(clean["ready"] is True, f"clean autoevo fixture blocked: {clean}")
             expect(
-                any(
-                    command[1:3] == ["--no-optional-locks", "status"]
-                    for command in status_commands
-                ),
-                "autoevo status probe may create an optional Git index lock",
+                all(command[:2] == ["git", "rev-parse"] for command in git_commands),
+                "autoevo preflight ran a Git command that can take the index lock",
             )
 
-            raw_index = git("rev-parse", "--git-path", "index").stdout.strip()
-            index_path = Path(raw_index)
-            if not index_path.is_absolute():
-                index_path = vault / index_path
-            index_path.unlink()
-            missing = inspect_preflight()
+            session_lock.parent.rmdir()
+            unsafe = inspect_preflight(now=1_000)
             expect(
-                missing["gate"] == "git_index_missing",
-                "autoevo misclassified a missing index as an ordinary dirty tree",
-            )
-            expect(
-                missing["health"]["worktree_entries"] is None,
-                "autoevo ran git status after detecting a missing index",
-            )
-            expect(not index_path.exists(), "preflight repaired a missing index")
-            expect(
-                not list((vault / "agent-findings").iterdir())
-                and not list((vault / "cache").iterdir()),
-                "blocked preflight wrote an audit or recovery state",
-            )
-            git("read-tree", "HEAD")
-
-            raw_lock = git("rev-parse", "--git-path", "index.lock").stdout.strip()
-            index_lock = Path(raw_lock)
-            if not index_lock.is_absolute():
-                index_lock = vault / index_lock
-            index_lock.touch()
-            locked = inspect_preflight()
-            expect(
-                locked["gate"] == "git_index_lock_present",
-                "autoevo did not diagnose a Git index lock precisely",
-            )
-            expect(index_lock.exists(), "preflight removed the user's index lock")
-            expect(
-                not list((vault / "agent-findings").iterdir()),
-                "index-lock preflight wrote an audit",
-            )
-            index_lock.unlink()
-
-            # Autoevo's own queue state is different: dirty there means the
-            # queue condition is unknown, so the run must not start.
-            # Production tracks `_meta/autoevo_*.toml`; this fixture ignores
-            # `_meta/`, so force-track it or the state gate can never fire here.
-            state_file = vault / "_meta" / "autoevo_pending.toml"
-            state_file.parent.mkdir(parents=True, exist_ok=True)
-            state_file.write_text("# base\n", encoding="utf-8")
-            git("add", "-f", "--", "_meta/autoevo_pending.toml")
-            git("commit", "-q", "-m", "track autoevo state")
-            state_file.write_text("# smoke\n", encoding="utf-8")
-            state_dirty = inspect_preflight(now=1_000)
-            expect(
-                state_dirty["gate"] == "dirty_autoevo_state",
-                f"dirty autoevo state must block: {state_dirty.get('gate')}",
-            )
-            state_file.write_text("# base\n", encoding="utf-8")
-            state_file.write_text("# dirty\n", encoding="utf-8")
-            dirty = inspect_preflight(now=1_000)
-            expect(
-                dirty["retry_after_epoch"]
+                unsafe["gate"] == "session_lock_unsafe"
+                and unsafe["retry_after_epoch"]
                 == 1_000 + autoevo_preflight.GENERIC_RETRY_DELAY_SECONDS,
-                "non-session autoevo blocker did not retry on the next hourly check",
+                "a missing session-lock parent did not fail closed and retry hourly",
             )
             expect(
-                state_file.read_text(encoding="utf-8") == "# dirty\n"
+                not session_lock.parent.exists()
                 and not list((vault / "agent-findings").iterdir()),
-                "preflight absorbed dirty managed state or wrote an audit",
+                "blocked preflight created the lock parent or wrote an audit",
             )
-            state_file.write_text("# base\n", encoding="utf-8")
+            session_lock.parent.mkdir()
 
             legacy = vault / "cache" / autoevo_preflight.LEGACY_OWNED_AUDIT_STATE
             legacy.write_text("{unparsed legacy state", encoding="utf-8")

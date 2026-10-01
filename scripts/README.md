@@ -15,7 +15,7 @@ This map is not a second per-script specification.
 | Reading feedback and decisions | `decisions.py` (including `reading-*` commands), `precedent.py`; `reading_feedback.py` owns pure reading-event validation and evaluation |
 | Hosted-model calls | `chat_completion.py`, bound through `harness/models.toml`; `precedent.py` is its caller |
 | Scheduled execution and recovery | `routine_prefect.py` owns Prefect flows/deployments; `routine_adapter.py` owns fixed execution, receipt writes, and replay decisions; `routine_receipts.py` owns shared ordinary artifact validation; `routine_status.py` reads native state. Contracts: `../protocols/remote-routines.md`; operations: `launchd/README.md` |
-| Knowledge maintenance | `decay_scan.py`, `autoevo_run.py`; queue, preflight, commit, and verification helpers preserve separate safety boundaries |
+| Knowledge maintenance | `decay_scan.py`, `autoevo_run.py`; queue, preflight, and verification helpers preserve separate safety boundaries |
 | Daily brief and optional life-area applications | `routine_digest.py`, `daily_brief.py`, `dining_audit.py`, `dine_rank.py`, `interests.py` |
 | Public-repo privacy | `privacy_check.py`, `privacy_index.py`, `hooks/pre-push`; approval contract below |
 | Verification | `../tests/` owns unittest scenarios; `harness_smoke.py` runs lint, discovery, and Ruff |

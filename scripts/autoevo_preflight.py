@@ -2,8 +2,8 @@
 """Read-only deterministic readiness checks for autoevo-nightly.
 
 The scheduled runner decides how to record or defer a blocked result. This
-helper never writes an audit, repairs Git state, commits, or pushes; its
-only write is the `--touch-lock` activity marker used by interactive hooks.
+helper never writes an audit or touches Git state; its only write is the
+`--touch-lock` activity marker used by interactive hooks.
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ import os
 import subprocess
 import sys
 import time
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -25,67 +24,8 @@ ATELIER_ROOT = Path(__file__).resolve().parents[1]
 # Interactive hooks touch the lock on every prompt, tool call, and turn end,
 # so its age is idle time rather than time since a session opened.
 SESSION_LOCK_TTL_SECONDS = 60 * 60
+SESSION_LOCK_NAME = "atelier-session-lock"
 GENERIC_RETRY_DELAY_SECONDS = 60 * 60
-from _git import default_branch, merge_state  # noqa: E402
-
-# Paths autoevo may touch: the three sweep scopes, the audit write target,
-# and its queue files. The dirty-tree gate only looks here. The bot stages
-# explicit paths and commits with `--only`, so user edits elsewhere in the
-# vault cannot be swept into a bot commit; blocking on them only guaranteed
-# the bot never ran on a vault that is dirty by design because it syncs
-# through Drive.
-AUTOEVO_SCOPE_TIERS = ("wip", "research", "reflections", "agent_findings")
-# Any autoevo state file under _meta/ (pending queue, quarantine, tombstones,
-# and future siblings) is gate input; match the documented `_meta/autoevo_*.toml`
-# shape instead of enumerating names that can drift.
-AUTOEVO_SCOPE_FILE_PREFIX = "_meta/autoevo_"
-AUTOEVO_SCOPE_FILE_SUFFIX = ".toml"
-
-def autoevo_scope_prefixes(vault: Path) -> list[str]:
-    """Vault-relative prefixes the dirty gate inspects (posix, no trailing slash)."""
-    prefixes: list[str] = []
-    segments = tier_segments()
-    for name in AUTOEVO_SCOPE_TIERS:
-        segment = segments.get(name)
-        if not segment:
-            continue
-        resolved = _resolve_segment(segment, vault)  # same resolver as tier(); never re-implement it
-        try:
-            rel = resolved.resolve().relative_to(vault.resolve()).as_posix()
-        except ValueError:
-            continue  # sandbox override outside the vault; not a git path here
-        prefixes.append(rel.rstrip("/"))
-    return prefixes
-
-
-def _in_scope(path: str, prefixes: list[str]) -> bool:
-    if _is_autoevo_state(path):
-        return True
-    return any(path == prefix or path.startswith(prefix + "/") for prefix in prefixes)
-
-
-def _is_autoevo_state(path: str) -> bool:
-    """True for autoevo's own queue and quarantine state under _meta/."""
-    return path.startswith(AUTOEVO_SCOPE_FILE_PREFIX) and path.endswith(
-        AUTOEVO_SCOPE_FILE_SUFFIX
-    )
-
-
-def partition_dirty_scope(status_paths: list[str], prefixes: list[str]) -> tuple[list[str], list[str]]:
-    """Split dirty in-scope paths into blocking state and protected content.
-
-    Dirty autoevo state means the queue is in an unknown condition, so the run
-    cannot start. A dirty content file only means the user was editing it: the
-    sweep runs and treats that file as untouchable. Blocking the whole sweep on
-    it guaranteed the bot never ran on a vault the user actually works in.
-    """
-    blocking = sorted({p for p in status_paths if _is_autoevo_state(p)})
-    protected = sorted(
-        {p for p in status_paths if _in_scope(p, prefixes) and not _is_autoevo_state(p)}
-    )
-    return blocking, protected
-
-
 LEGACY_OWNED_AUDIT_STATE = "autoevo-preflight-owned-audit.json"
 
 
@@ -125,54 +65,13 @@ def _run(
     return CommandResult(result.returncode, result.stdout, result.stderr)
 
 
-def _git(vault: Path, *args: str, timeout: float = 30) -> CommandResult:
-    return _run(["git", *args], cwd=vault, timeout=timeout)
-
-
-def _git_path(vault: Path, name: str) -> Path:
-    result = _git(vault, "rev-parse", "--git-path", name)
-    if result.returncode != 0:
-        raise PreflightError(
-            f"cannot resolve Git path {name}: {result.stderr.strip() or 'unknown error'}"
-        )
-    path = Path(result.stdout.strip())
-    return path if path.is_absolute() else (vault / path).resolve()
-
-
 def _inside_worktree(vault: Path) -> bool:
-    result = _git(vault, "rev-parse", "--is-inside-work-tree")
+    result = _run(["git", "rev-parse", "--is-inside-work-tree"], cwd=vault)
     return result.returncode == 0 and result.stdout.strip() == "true"
 
 
-def _status_entries(vault: Path) -> list[tuple[str, str]]:
-    """Return (status code, vault-relative path) for every git status entry."""
-    result = _git(vault, "--no-optional-locks", "status", "--porcelain=v1", "-z")
-    if result.returncode != 0:
-        raise PreflightError(
-            f"git status failed: {result.stderr.strip() or 'unknown error'}"
-        )
-    prefix_result = _git(vault, "rev-parse", "--show-prefix")
-    prefix = prefix_result.stdout.strip() if prefix_result.returncode == 0 else ""
-    records = [raw for raw in result.stdout.split("\0") if raw]
-    entries: list[tuple[str, str]] = []
-    index = 0
-    while index < len(records):
-        record = records[index]
-        index += 1
-        code = record[:2] if len(record) >= 2 else "??"
-        raw_paths = [record[3:] if len(record) > 3 else ""]
-        if ("R" in code or "C" in code) and index < len(records):
-            # Renames and copies emit the original path as the next record.
-            # A `git mv wip/a.md personal/a.md` is in-scope dirt even though
-            # its new path is not; count both ends.
-            raw_paths.append(records[index])
-            index += 1
-        for raw_path in raw_paths:
-            path = raw_path
-            if prefix and path.startswith(prefix):
-                path = path[len(prefix):]
-            entries.append((code, path))
-    return entries
+def session_lock_path(vault: Path) -> Path:
+    return _resolve_segment(tier_segments()["meta"], vault) / SESSION_LOCK_NAME
 
 
 def _default_privacy_probe() -> dict[str, object]:
@@ -255,23 +154,17 @@ def inspect_preflight(
     """Check live write gates; expensive input probes run only before drafting."""
     vault = (vault or vault_root()).resolve()
     cache = _resolve_segment(tier_segments()["cache"], vault)
-    lock_path = lock_path or (cache / "atelier-session-lock")
+    lock_path = lock_path or session_lock_path(vault)
     now = time.time() if now is None else now
     blockers: list[dict[str, object]] = []
     health: dict[str, object] = {
         "vault": str(vault),
         "git_worktree": False,
-        "git_index": "unknown",
-        "git_index_lock": "unknown",
-        "worktree_entries": None,
-        "worktree_entries_in_scope": None,
-        "worktree_status_codes": {},
         "session_lock_age_seconds": None,
         "privacy_hits": None,
         "semantic_ready": None,
         "semantic_mode": None,
         "semantic_probe_seconds": None,
-        "branch": "",
     }
 
     legacy_state = cache / LEGACY_OWNED_AUDIT_STATE
@@ -296,7 +189,15 @@ def inspect_preflight(
             "retry_after_epoch": None,
         }
 
-    if lock_path.exists():
+    # A lock that cannot be recorded or read is no evidence of an idle user.
+    if not lock_path.parent.is_dir() or lock_path.is_symlink():
+        blockers.append(
+            {
+                "gate": "session_lock_unsafe",
+                "detail": f"{lock_path} has no parent directory or is a symlink",
+            }
+        )
+    elif lock_path.exists():
         try:
             age = max(0, int(now - lock_path.stat().st_mtime))
         except OSError as exc:
@@ -313,82 +214,11 @@ def inspect_preflight(
         blockers.append(
             {
                 "gate": "git_not_worktree",
-                "detail": "$OV is not a Git work tree, so safe audit publication is unavailable",
+                "detail": "$OV is not a Git work tree, so eligibility and rollback are unavailable",
             }
         )
     else:
         health["git_worktree"] = True
-        index_path = _git_path(vault, "index")
-        index_lock_path = _git_path(vault, "index.lock")
-        index_exists = index_path.is_file()
-        index_lock_exists = index_lock_path.exists()
-        health["git_index"] = "present" if index_exists else "missing"
-        health["git_index_lock"] = "present" if index_lock_exists else "absent"
-        if not index_exists:
-            blockers.append(
-                {
-                    "gate": "git_index_missing",
-                    "detail": (
-                        "Git index is missing; git status would misclassify tracked "
-                        "files as mass deletions and untracked files"
-                    ),
-                }
-            )
-        if index_lock_exists:
-            blockers.append(
-                {
-                    "gate": "git_index_lock_present",
-                    "detail": (
-                        "Git index.lock exists; autoevo will not delete or replace it"
-                    ),
-                }
-            )
-        try:
-            in_progress = merge_state(vault)
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise PreflightError(f"cannot inspect git operation state: {exc}") from exc
-        health["git_operation_in_progress"] = in_progress
-        if in_progress:
-            blockers.append(
-                {
-                    "gate": "git_operation_in_progress",
-                    "detail": (
-                        f"Git operation in progress ({', '.join(in_progress)}); a bot "
-                        "commit would complete the user's merge, rebase, cherry-pick, or bisect"
-                    ),
-                }
-            )
-
-        if index_exists and not index_lock_exists:
-            status_entries = _status_entries(vault)
-            entries = len(status_entries)
-            codes = dict(sorted(Counter(code for code, _ in status_entries).items()))
-            health["worktree_entries"] = entries
-            health["worktree_status_codes"] = codes
-            prefixes = autoevo_scope_prefixes(vault)
-            blocking, protected = partition_dirty_scope(
-                [path for _, path in status_entries], prefixes
-            )
-            health["worktree_entries_in_scope"] = len(blocking) + len(protected)
-            health["protected_paths"] = protected
-            if blocking:
-                sample = ", ".join(blocking[:3])
-                blockers.append(
-                    {
-                        "gate": "dirty_autoevo_state",
-                        "detail": (
-                            f"$OV has {len(blocking)} changed autoevo state files "
-                            f"(of {entries} total; a rename counts both ends), e.g. {sample}"
-                        ),
-                    }
-                )
-            health["branch"] = _git(vault, "branch", "--show-current").stdout.strip()
-            health["default_branch"] = default_branch(vault)
-            if not health["default_branch"] or health["branch"] != health["default_branch"]:
-                blockers.append({
-                    "gate": "git_not_default_branch",
-                    "detail": "Autoevo requires a checked-out, identifiable default branch; it will not switch branches",
-                })
 
     lock_age = health["session_lock_age_seconds"]
     if isinstance(lock_age, int) and lock_age < SESSION_LOCK_TTL_SECONDS:
@@ -474,12 +304,17 @@ def environment_blocker(exc: BaseException, *, now: float | None = None) -> dict
 
 
 def touch_session_lock() -> bool:
-    """Record interactive activity unless a scheduled runtime opted out."""
+    """Record interactive activity unless a scheduled runtime opted out.
+
+    Never creates the parent or follows a symlinked lock; preflight refuses
+    to run on either, so the failure surfaces there.
+    """
     if os.environ.get("ATELIER_SKIP_LOCK_TOUCH"):
         return False
-    cache = _resolve_segment(tier_segments()["cache"], vault_root().resolve())
-    cache.mkdir(parents=True, exist_ok=True)
-    (cache / "atelier-session-lock").touch()
+    lock = session_lock_path(vault_root().resolve())
+    if lock.is_symlink():
+        raise OSError(f"session lock is a symlink: {lock}")
+    lock.touch()
     return True
 
 

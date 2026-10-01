@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import date, datetime, timedelta
+import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -16,15 +18,20 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import _paths  # noqa: E402
-import autoevo_commit as commits  # noqa: E402
 import autoevo_pending as pending  # noqa: E402
 import autoevo_preflight as preflight  # noqa: E402
 import autoevo_run as run  # noqa: E402
 import autoevo_verify as evidence  # noqa: E402
 import decisions  # noqa: E402
 
-CYCLE = "2099-01-20"
+CYCLE, NEXT = "2099-01-20", "2099-01-21"
+NOW = datetime.fromisoformat(CYCLE).timestamp()
 CLEAN_LINT = {"counts": {"error": 0, "warn": 0, "info": 0}, "findings": []}
+READ_ONLY_GIT = {"rev-parse", "ls-tree", "hash-object"}
+
+
+def sha256(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
 
 
 class AutoevoTest(unittest.TestCase):
@@ -36,15 +43,18 @@ class AutoevoTest(unittest.TestCase):
         for relative in ("wip", "research/lab", "reflections", "agent-findings", "archive", "_meta", "cache"):
             (self.vault / relative).mkdir(parents=True, exist_ok=True)
         self.workspace.mkdir()
-        (self.vault / ".gitignore").write_text("_meta/\ncache/\n")
+        (self.vault / ".gitignore").write_text("cache/\n_meta/*\n!_meta/autoevo_*.toml\n!_meta/decisions.jsonl\n")
         (self.vault / "personal.txt").write_text("untouched\n")
         (self.vault / "wip/seed.md").write_text("short original note\n")
+        for days in (100, 200, 300, 400):  # a staggered history keeps mtime ages meaningful
+            (self.vault / f"reflections/r{days}.md").write_text(f"reflection {days}\n")
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "Fixture")
         self.git("config", "user.email", "fixture@example.com")
-        self.git("add", "-A")
-        self.git("commit", "-qm", "fixture")
+        self.reflect()
         self.old("wip/seed.md")
+        for days in (100, 200, 300, 400):
+            self.old(f"reflections/r{days}.md", days)
         paths = tomllib.loads((ROOT / "harness/paths.toml").read_text())["paths"]
         for patch in (
             mock.patch.dict(os.environ, {"OV": str(self.vault), "PYTHONDONTWRITEBYTECODE": "1"}),
@@ -59,6 +69,11 @@ class AutoevoTest(unittest.TestCase):
         return subprocess.run(["git", "-C", str(self.vault), *args], capture_output=True,
                               text=True, check=True, timeout=30).stdout.strip()
 
+    def reflect(self):
+        """What Reflect does after a change: stage everything and commit it."""
+        self.git("add", "-A")
+        self.git("commit", "-qm", "Update notes")
+
     def old(self, relative, days=500):
         stamp = (datetime.fromisoformat(CYCLE) - timedelta(days=days)).timestamp()
         os.utime(self.vault / relative, (stamp, stamp))
@@ -66,7 +81,7 @@ class AutoevoTest(unittest.TestCase):
     def prepare(self):
         readiness = preflight.inspect_preflight(vault=self.vault)
         self.assertTrue(readiness["ready"], readiness)
-        plan = run.prepare_workspace(self.vault, self.workspace, CYCLE, readiness)
+        plan = run.prepare_workspace(self.vault, self.workspace, CYCLE, readiness, now=NOW)
         proposal = {"schema_version": 1, "cycle_id": CYCLE, "sweeps": [
             {"scope": dispatch["scope"], "outcome": "envelope_returned", "mode": "full",
              "completion_status": "complete", "remaining_work": "", "gaps": "", "findings": [], "notes": []}
@@ -77,8 +92,25 @@ class AutoevoTest(unittest.TestCase):
         return run.accept_proposal(self.vault, proposal, plan, flow_run_id="fixture-flow",
                                    lint_check=kwargs.pop("lint_check", lambda _vault: CLEAN_LINT), **kwargs)
 
+    def read_only_git(self, action):
+        calls, original = [], subprocess.run
+
+        def recorded(argv, *args, **kwargs):
+            if argv and argv[0] == "git":
+                calls.append(argv)
+            return original(argv, *args, **kwargs)
+
+        with mock.patch("subprocess.run", side_effect=recorded):
+            result = action()
+        self.assertLessEqual({next(arg for arg in argv[1:] if not arg.startswith("-")) for argv in calls}, READ_ONLY_GIT)
+        self.assertFalse(any("-w" in argv for argv in calls))
+        return result
+
     def record(self):
         return evidence.read_record(evidence.record_path(self.vault, CYCLE))
+
+    def states(self):
+        return evidence.verify_operations(self.vault, self.record())
 
     def archive(self, plan, proposal):
         row = {"category": "low-signal", "candidate": "wip/seed.md", "confidence": "high",
@@ -101,15 +133,18 @@ class AutoevoTest(unittest.TestCase):
         pending.atomic_write(path, pending.render({"schema_version": 1, "pending": [entry]}))
         return entry
 
-    def test_empty_cycle_has_one_result_and_derived_verified_reports(self):
+    def test_empty_cycle_writes_plain_files_that_verify_before_and_after_reflect_commits(self):
         plan, proposal = self.prepare()
-        record = self.accept(plan, proposal)
+        head = self.git("rev-parse", "HEAD")
+        record = self.read_only_git(lambda: self.accept(plan, proposal))
         self.assertEqual(record["status"], "complete")
-        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
-        self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["verified"])
+        self.assertEqual([(op["kind"], op["state"]) for op in record["operations"]], [("queue", "applied"), ("audit", "applied")])
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
+        self.assertEqual(set(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["operations"].values()), {"pending-commit"})
+        self.reflect()
+        self.assertEqual(set(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["operations"].values()), {"committed"})
         self.assertEqual(run.prior_result(self.vault, CYCLE), self.record())
         self.assertFalse(evidence.record_path(self.vault, CYCLE).with_suffix(".toml").exists())
-        self.assertEqual(self.git("status", "--porcelain"), "")
         self.assertFalse(list((self.vault / "cache").iterdir()))
         for relative in record["plan"]["state_files"]:
             if (self.vault / relative).exists():
@@ -128,60 +163,116 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(record["status"], "complete")
         self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["verified"])
 
-    def test_snapshot_excludes_dirty_content_and_keeps_original_mtime(self):
-        (self.vault / "wip/seed.md").write_text("human edit\n")
+    def test_only_committed_conflict_free_settled_notes_become_sources(self):
+        notes = {"wip/dirty.md": "committed\n", "wip/kept.md": "settled\n", "wip/recent.md": "fresh\n",
+                 "wip/conflicted.md": "<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs\n"}
+        for relative, body in notes.items():
+            (self.vault / relative).write_text(body)
+        self.reflect()
+        (self.vault / "wip/dirty.md").write_text("uncommitted edit\n")
+        (self.vault / "wip/untracked.md").write_text("never committed\n")
+        for relative in ("wip/dirty.md", "wip/kept.md", "wip/conflicted.md", "wip/untracked.md"):
+            self.old(relative)
+        os.utime(self.vault / "wip/recent.md", (NOW - 60, NOW - 60))
         plan, _ = self.prepare()
-        self.assertIn("wip/seed.md", plan["protected_paths"])
-        self.assertNotIn("wip/seed.md", plan["source_files"])
+        self.assertEqual(plan["protected_paths"], ["wip/conflicted.md", "wip/dirty.md", "wip/recent.md"])
+        self.assertEqual(sorted(plan["source_files"]), ["reflections/r100.md", "reflections/r200.md", "reflections/r300.md",
+                                                        "reflections/r400.md", "wip/kept.md", "wip/seed.md"])
+        self.assertEqual(plan["source_files"]["wip/kept.md"]["before_blob"], self.git("rev-parse", "HEAD:wip/kept.md"))
+        self.assertIsNone(plan["age_guard"])
         self.assertEqual([row["scope"] for row in plan["dispatches"]], ["wip", "research/lab", "reflections"])
 
-    def test_archive_has_its_own_revertible_commit_and_preserves_other_edits(self):
+    def test_mass_mtime_reset_turns_off_age_bands_and_is_receipted(self):
+        for path in [*(self.vault / "reflections").glob("*.md"), self.vault / "wip/seed.md"]:
+            os.utime(path, (NOW - 500 * 86400, NOW - 500 * 86400))  # one clone, long ago
+        plan, proposal = self.prepare()
+        self.assertTrue(plan["age_guard"].startswith("mtime_reset: 5 of 5"))
+        row = self.archive(plan, proposal)
+        today = date.fromisoformat(CYCLE)
+        self.assertEqual(run.route_row(self.vault, row, today)[0], "auto_apply")
+        self.assertEqual(run.route_row(self.vault, row, today, plan["age_guard"]), ("invalid", "low-signal", plan["age_guard"]))
+        record = self.accept(plan, proposal)
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertTrue((self.vault / "wip/seed.md").is_file())
+        self.assertIn(plan["age_guard"], self.record()["plan"]["notes"])
+
+    def test_archive_writes_files_only_and_a_plain_git_restore_is_a_veto(self):
         original = b"short original note\r\n"
         (self.vault / "wip/seed.md").write_bytes(original)
-        (self.vault / "wip/seed.md").chmod(0o755)
-        self.git("add", "wip/seed.md")
-        self.git("commit", "-qm", "CRLF archive source")
+        self.reflect()
         self.old("wip/seed.md")
         plan, proposal = self.prepare()
         self.archive(plan, proposal)
         (self.vault / "personal.txt").write_text("human staged\n")
         self.git("add", "personal.txt")
         (self.vault / "personal.txt").write_text("human unstaged\n")
-        record = self.accept(plan, proposal)
-        operation = record["operations"][0]
-        self.assertEqual(operation["kind"], "low-signal-high")
-        target = next(path for path in operation["changes"] if path.startswith("archive/"))
+        head = self.git("rev-parse", "HEAD")
+        operation = self.read_only_git(lambda: self.accept(plan, proposal))["operations"][0]
+        self.assertEqual((operation["kind"], operation["state"]), ("low-signal-high", "applied"))
+        target = next(path for path in operation["paths"] if path.startswith("archive/"))
         self.assertEqual((self.vault / target).read_bytes(), original)
-        self.assertEqual((self.vault / target).stat().st_mode & 0o777, 0o755)
         self.assertFalse((self.vault / "wip/seed.md").exists())
-        self.assertIn("MM personal.txt", self.git("status", "--porcelain"))
+        self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertEqual(self.git("show", ":personal.txt"), "human staged")
-        self.git("restore", "--staged", "personal.txt")
-        self.git("revert", "--no-edit", operation["commit"]["sha"])
+        self.assertEqual(operation["paths"]["wip/seed.md"]["before_blob"], self.git("rev-parse", "HEAD:wip/seed.md"))
+        self.assertEqual(operation["paths"][target]["after_blob"], self.git("hash-object", "--no-filters", target))
+        self.assertEqual(self.states()[operation["candidate_id"]], "pending-commit")
+        self.reflect()
+        self.assertEqual(self.states()[operation["candidate_id"]], "committed")
+        self.git("restore", f"--source={head}", "--", "wip/seed.md", target)
         self.assertEqual((self.vault / "wip/seed.md").read_bytes(), original)
-        self.assertIsNotNone(run.tombstone_reason(self.vault, ["wip/seed.md"], date.fromisoformat(CYCLE)))
+        self.assertEqual(self.states()[operation["candidate_id"]], "reverted")
+        self.assertIsNotNone(run.tombstone_reason(self.vault, ["wip/seed.md"], date.fromisoformat(NEXT)))
+        self.assertIsNone(run.tombstone_reason(self.vault, ["wip/seed.md"], date.fromisoformat(CYCLE)))
 
-    def test_source_change_after_proposal_refuses_without_overwriting_it(self):
+    def test_archived_source_revived_by_a_sync_merge_is_queued_for_review(self):
+        plan, proposal = self.prepare()
+        self.archive(plan, proposal)
+        operation = self.accept(plan, proposal)["operations"][0]
+        self.reflect()
+        (self.vault / "wip/seed.md").write_text("edited on the phone before the archive synced\n")
+        self.assertEqual(self.states()[operation["candidate_id"]], "superseded")
+        entries = run._revived_archives(self.vault, date.fromisoformat(NEXT), "next-run")
+        self.assertEqual([entry["peers"] for entry in entries], [sorted(operation["paths"])])
+        self.assertEqual(pending.validate_entry(entries[0]), [])
+        (self.vault / next(rel for rel in operation["paths"] if rel.startswith("archive/"))).unlink()
+        self.assertEqual(run._revived_archives(self.vault, date.fromisoformat(NEXT), "next-run"), [])
+
+    def test_source_change_after_proposal_skips_without_overwriting_it(self):
         plan, proposal = self.prepare()
         row = self.archive(plan, proposal)
         (self.vault / "wip/seed.md").write_text("changed by human\n")
         self.old("wip/seed.md")
         row["curator"]["proposed_content"] = "changed by human\n"
         head = self.git("rev-parse", "HEAD")
-        with self.assertRaises(evidence.VerificationError):
-            self.accept(plan, proposal)
+        record = self.accept(plan, proposal)
+        self.assertEqual(record["status"], "complete")
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertTrue(any(note.startswith("skipped low-signal-high: wip/seed.md differs") for note in record["notes"]))
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertEqual((self.vault / "wip/seed.md").read_text(), "changed by human\n")
-        self.assertEqual(self.record()["status"], "failed")
 
-    def test_queue_publication_cannot_gain_note_write_authority(self):
+    def test_write_skips_a_source_whose_bytes_are_no_longer_its_head_blob(self):
         plan, proposal = self.prepare()
-        record = {"schema_version": 1, "plan": plan, "run_id": plan["run_id"], "operations": [],
-                  "reports": {}, "output_file": "agent-findings/audit.md", "errors": []}
-        changes = run._changes(self.vault, {"wip/seed.md": "unauthorized queue write\n"})
-        with self.assertRaises(commits.PublicationError):
-            run._publish(self.vault, record, evidence.record_path(self.vault, CYCLE), "queue", changes, "queue")
-        self.assertFalse(record["operations"][-1]["publication_started"])
+        self.archive(plan, proposal)
+        seed = self.vault / "wip/seed.md"
+        original = seed.read_text()
+        seed.write_text("committed on another device\n")
+        self.reflect()
+        seed.write_text(original)  # the snapshot's bytes again, but no longer what HEAD holds
+        self.old("wip/seed.md")
+        record = self.accept(plan, proposal)
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertTrue(any("not committed at HEAD" in note for note in record["notes"]))
+        self.assertEqual(seed.read_text(), original)
+
+    def test_queue_write_cannot_gain_note_write_authority(self):
+        plan, _ = self.prepare()
+        record = {"plan": plan, "run_id": plan["run_id"], "operations": [], "notes": []}
+        with self.assertRaisesRegex(evidence.VerificationError, "may not write"):
+            run._apply(self.vault, record, evidence.record_path(self.vault, CYCLE), "queue",
+                       {"wip/seed.md": "unauthorized queue write\n"}, {"wip/seed.md": None})
+        self.assertEqual(record["operations"], [])
         self.assertEqual((self.vault / "wip/seed.md").read_text(), "short original note\n")
 
     def test_low_signal_claims_are_recomputed_and_qmd_cannot_authorize_merge(self):
@@ -200,9 +291,9 @@ class AutoevoTest(unittest.TestCase):
     def test_merge_needs_complete_curator_and_preserves_every_source(self):
         for index, name in enumerate(("a", "b", "c", "d")):
             (self.vault / f"wip/{name}.md").write_text(f"material {name}\n")
+        self.reflect()
+        for index, name in enumerate(("a", "b", "c", "d")):
             self.old(f"wip/{name}.md", 500 + index)
-        self.git("add", "wip")
-        self.git("commit", "-qm", "merge fixture")
         plan, proposal = self.prepare()
         sources = [f"wip/{name}.md" for name in ("a", "b", "c", "d")]
         row = {"category": "redundant", "candidate": sources[0], "confidence": "high",
@@ -223,38 +314,36 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(record["operations"][0]["kind"], "redundant-high")
         self.assertEqual({rel for rel in sources if (self.vault / rel).exists()}, {sources[-1]})
 
-    def test_expired_default_commits_banner_queue_and_ledger_together(self):
+    def test_expired_default_writes_banners_and_a_restore_records_one_undo(self):
         (self.vault / "research/lab/other.md").write_text("another old deadline\n")
-        self.git("add", "research/lab/other.md")
-        self.git("commit", "-qm", "second source")
+        self.reflect()
         self.default(["wip/seed.md", "research/lab/other.md"])
         plan, proposal = self.prepare()
         record = self.accept(plan, proposal)
         operation = record["operations"][0]
-        self.assertEqual(operation["kind"], "stale-banner")
-        self.assertEqual(set(operation["changes"]), {"wip/seed.md", "research/lab/other.md", "_meta/autoevo_pending.toml", "_meta/decisions.jsonl"})
+        self.assertEqual((operation["kind"], operation["entry"]), ("stale-banner", "due-item"))
+        self.assertEqual(set(operation["paths"]), {"wip/seed.md", "research/lab/other.md"})
         self.assertIn("> Stale since " + CYCLE, (self.vault / "wip/seed.md").read_text())
         self.assertIn("> Stale since " + CYCLE, (self.vault / "research/lab/other.md").read_text())
         self.assertEqual(pending.load(self.vault / "_meta/autoevo_pending.toml")["pending"][0]["status"], "applied")
         for relative in ("_meta/autoevo_pending.toml", "_meta/decisions.jsonl"):
             self.assertEqual((self.vault / relative).stat().st_mode & 0o777, 0o600)
-            self.assertTrue(self.git("ls-tree", "HEAD", "--", relative).startswith("100644 blob"))
-        self.git("revert", "--no-edit", operation["commit"]["sha"])
+        head = self.git("rev-parse", "HEAD")
+        self.reflect()
+        self.git("restore", f"--source={head}", "--", "wip/seed.md", "research/lab/other.md")
         ledger = self.root / "undo-ledger.jsonl"
-        run.record_undos(self.vault, ledger, date.fromisoformat(CYCLE))
-        run.record_undos(self.vault, ledger, date.fromisoformat(CYCLE))
-        self.assertEqual(len(decisions.load(ledger)), 1)
-        self.assertEqual(decisions.load(ledger)[0]["verdict"], "undo")
+        run.record_undos(self.vault, ledger, date.fromisoformat(NEXT))
+        run.record_undos(self.vault, ledger, date.fromisoformat(NEXT))
+        self.assertEqual([(row["class"], row["subject"], row["verdict"]) for row in decisions.load(ledger)],
+                         [("autoevo/time-stale-A", "due-item", "undo")])
 
-    def test_veto_or_defer_after_plan_prevents_default_without_any_publication(self):
+    def test_veto_or_defer_after_plan_prevents_default_without_any_write(self):
         self.default()
         plan, proposal = self.prepare()
         path = self.vault / "_meta/autoevo_pending.toml"
         path.write_text(path.read_text().replace('status = "pending"', 'status = "dismissed"'))
-        head = self.git("rev-parse", "HEAD")
         with self.assertRaisesRegex(evidence.VerificationError, "state changed"):
             self.accept(plan, proposal)
-        self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertNotIn("Stale", (self.vault / "wip/seed.md").read_text())
         self.assertFalse(evidence.record_path(self.vault, CYCLE).exists())
 
@@ -268,7 +357,6 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(self.accept(plan, proposal)["status"], "complete")
         self.assertEqual(ledger.stat().st_mode & 0o777, 0o600)
         self.assertEqual(decisions.load(ledger)[0], original)
-        self.assertTrue(self.git("ls-tree", "HEAD", "--", "_meta/decisions.jsonl").startswith("100644 blob"))
 
     def test_missing_sweep_produces_diagnostic_audit_not_note_mutation(self):
         plan, proposal = self.prepare()
@@ -282,7 +370,7 @@ class AutoevoTest(unittest.TestCase):
         with self.assertRaises(evidence.VerificationError):
             evidence.verify_cycle(vault=self.vault, cycle=CYCLE)
 
-    def test_new_lint_error_marks_committed_result_failed(self):
+    def test_new_lint_error_marks_written_result_failed(self):
         plan, proposal = self.prepare()
         bad = {"counts": {"error": 1, "warn": 0, "info": 0}, "findings": [{"severity": "ERROR", "code": "fixture"}]}
         lint = mock.Mock(side_effect=[CLEAN_LINT, bad])
@@ -291,55 +379,57 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(len(record["lint"]["new_errors"]), 1)
         self.assertIn("introduced lint errors", record["errors"][-1])
 
-    def test_write_failure_records_ambiguity_and_never_replays(self):
+    def test_interrupted_write_is_half_applied_and_blocks_until_resolved(self):
         plan, proposal = self.prepare()
         self.archive(plan, proposal)
-        with mock.patch.object(commits, "_delete_file", side_effect=OSError("fixture interruption")):
-            with self.assertRaises(commits.PublicationError):
-                self.accept(plan, proposal)
-        self.assertEqual(self.record()["status"], "needs_review")
-        before = self.git("status", "--porcelain")
-        with mock.patch.object(commits, "publish_changes") as publish:
-            with self.assertRaises((evidence.VerificationError, commits.PublicationError)):
-                run.prior_result(self.vault, CYCLE)
-            publish.assert_not_called()
-        self.assertEqual(self.git("status", "--porcelain"), before)
+        seed, unlink = self.vault / "wip/seed.md", Path.unlink
 
-    def test_committed_final_audit_can_reconcile_only_missing_result_update(self):
-        plan, proposal = self.prepare()
-        record = self.accept(plan, proposal)
-        expected = deepcopy(record)
-        record["status"] = "publishing"
-        del record["operations"][-1]["commit"]
-        evidence.write_record(evidence.record_path(self.vault, CYCLE), record)
-        head = self.git("rev-parse", "HEAD")
-        self.assertEqual(run.prior_result(self.vault, CYCLE), expected)
-        self.assertEqual(self.git("rev-parse", "HEAD"), head)
-        record = self.record()
-        record["operations"][-1]["changes"][record["output_file"]]["after"] += "tampered\n"
-        evidence.write_record(evidence.record_path(self.vault, CYCLE), record)
-        with self.assertRaises(evidence.VerificationError):
-            evidence.verify_cycle(vault=self.vault, cycle=CYCLE)
+        def interrupted(path, *args, **kwargs):
+            if path == seed:
+                raise OSError("fixture interruption")
+            return unlink(path, *args, **kwargs)
 
-    def test_post_commit_proof_failure_remains_ambiguous_on_later_days(self):
-        plan, proposal = self.prepare()
-        self.archive(plan, proposal)
-        before = self.git("rev-parse", "HEAD")
-        with mock.patch.object(commits, "reconcile_commit", side_effect=commits.PublicationError("proof read failed", publication_started=False)):
-            with self.assertRaises(commits.PublicationError) as raised:
-                self.accept(plan, proposal)
-        self.assertTrue(raised.exception.publication_started)
-        self.assertNotEqual(self.git("rev-parse", "HEAD"), before)
-        record = self.record()
-        self.assertEqual(record["status"], "needs_review")
-        # A pre-fix record without an explicit no-effects proof also blocks.
-        record["status"] = "failed"
-        del record["operations"][-1]["publication_started"]
-        evidence.write_record(evidence.record_path(self.vault, CYCLE), record)
-        with mock.patch.object(commits, "publish_changes") as publish:
-            with self.assertRaisesRegex(evidence.VerificationError, "needs review"):
-                run.prior_result(self.vault, "2099-01-21")
-            publish.assert_not_called()
+        with mock.patch.object(Path, "unlink", interrupted), self.assertRaises(OSError):
+            self.accept(plan, proposal)
+        operation = self.record()["operations"][0]
+        self.assertEqual((self.record()["status"], operation["state"]), ("needs_review", "applying"))
+        for cycle in (CYCLE, NEXT):
+            with self.assertRaisesRegex(evidence.VerificationError, "half-applied"):
+                run.prior_result(self.vault, cycle)
+        (self.vault / next(rel for rel in operation["paths"] if rel.startswith("archive/"))).unlink()
+        self.assertEqual(self.states(), {operation["candidate_id"]: "skipped"})
+        self.assertIsNone(run.prior_result(self.vault, NEXT))
+        with self.assertRaisesRegex(evidence.VerificationError, "no automatic replay"):
+            run.prior_result(self.vault, CYCLE)
+
+    def test_operation_states_follow_live_content(self):
+        head, target = self.git("rev-parse", "HEAD"), self.vault / "wip/seed.md"
+        before, after = target.read_text(), "rewritten note\n"
+
+        def operation(state="applied", **extra):
+            paths = {"wip/seed.md": {"before_blob": None, "before_sha256": sha256(before), "after_blob": None, "after_sha256": sha256(after)},
+                     **extra}
+            return {"kind": "redundant-high", "candidate_id": "fixture", "state": state, "paths": paths}
+
+        target.write_text(after)
+        self.assertEqual(evidence.operation_state(self.vault, operation()), "pending-commit")
+        self.reflect()
+        self.assertEqual(evidence.operation_state(self.vault, operation()), "committed")
+        added = {"wip/new.md": {"before_blob": None, "before_sha256": None, "after_blob": None, "after_sha256": sha256("new\n")}}
+        self.assertEqual(evidence.operation_state(self.vault, operation(**added)), "superseded")
+        self.assertEqual(evidence.operation_state(self.vault, operation("applying", **added)), "half-applied")
+        target.write_text("a later user edit\n")
+        self.assertEqual(evidence.operation_state(self.vault, operation()), "superseded")
+        self.git("restore", f"--source={head}", "--", "wip/seed.md")
+        self.assertEqual(evidence.operation_state(self.vault, operation()), "reverted")
+        self.assertEqual(evidence.operation_state(self.vault, operation("applying")), "skipped")
+        refused = {"kind": "queue", "candidate_id": "old", "publication_started": False,
+                   "changes": {"wip/seed.md": {"before_sha256": sha256("unrelated\n"), "after": "x\n", "mode": 420}}}
+        self.assertEqual(evidence.operation_state(self.vault, refused), "skipped")
+        for broken in ({}, {**operation(), "paths": {}}, {**operation(), "kind": None},
+                       {**operation(), "paths": {"wip/seed.md": {"before_sha256": "bad", "after_sha256": None}}},
+                       {**operation(), "paths": {"../escape.md": operation()["paths"]["wip/seed.md"]}}):
+            self.assertEqual(evidence.operation_state(self.vault, broken), "malformed")
 
     def test_historical_legacy_receipts_require_known_closed_state(self):
         path = evidence.record_path(self.vault, "2099-01-19").with_suffix(".toml")
@@ -353,67 +443,80 @@ class AutoevoTest(unittest.TestCase):
                 with self.assertRaisesRegex(evidence.VerificationError, "legacy receipt"):
                     run.prior_result(self.vault, CYCLE)
 
-    def test_historical_json_requires_recognized_state_and_operation_evidence(self):
+    def test_commit_era_receipt_verifies_from_content_after_its_commits_are_gone(self):
+        record = json.loads((ROOT / "tests/fixtures/autoevo_commit_era_receipt.json").read_text())
+        for operation in record["operations"]:
+            for relative, change in operation["changes"].items():
+                if change["after"] is None:
+                    (self.vault / relative).unlink(missing_ok=True)
+                else:
+                    (self.vault / relative).parent.mkdir(parents=True, exist_ok=True)
+                    (self.vault / relative).write_text(change["after"])
+        self.reflect()  # Reflect committed the content; the receipt's bot commits never existed here
+        queue = self.vault / "_meta/autoevo_pending.toml"
+        queue.write_text(queue.read_text() + "# a later review\n")
+        evidence.write_record(evidence.record_path(self.vault, CYCLE), record)
+        self.assertIsNone(run.prior_result(self.vault, NEXT))
+        states = evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["operations"]
+        self.assertEqual([states[op["candidate_id"]] for op in record["operations"]],
+                         ["committed", "superseded", "committed", "committed"])
+
+    def test_historical_json_requires_a_recognized_state(self):
         plan, proposal = self.prepare()
         complete = self.accept(plan, proposal)
         path = evidence.record_path(self.vault, CYCLE)
-        later = "2099-01-21"
-        self.assertIsNone(run.prior_result(self.vault, later))
+        self.assertIsNone(run.prior_result(self.vault, NEXT))
         for mutation in (
-            {"status": "unknown-after-crash"}, {"status": "prepared"}, {"status": []},
-            {"cycle_id": "2099-01-19"}, {"operations": None}, {"operations": [{}]},
-            {"errors": None}, {"status": "failed", "errors": []}, {"operations": []},
+            {"status": "unknown-after-crash"}, {"status": []}, {"cycle_id": "2099-01-19"},
+            {"operations": None}, {"operations": [{}]}, {"errors": None},
+            {"status": "failed", "errors": []}, {"operations": []},
         ):
             with self.subTest(mutation=mutation):
-                record = {**complete, **mutation}
-                evidence.write_record(path, record)
+                evidence.write_record(path, {**complete, **mutation})
                 with self.assertRaises(evidence.VerificationError):
-                    run.prior_result(self.vault, later)
+                    run.prior_result(self.vault, NEXT)
         for field in ("operations", "errors"):
             record = deepcopy(complete)
             del record[field]
             evidence.write_record(path, record)
             with self.assertRaises(evidence.VerificationError):
-                run.prior_result(self.vault, later)
-        failed = {**complete, "status": "failed", "errors": ["pre-publication refusal"], "operations": []}
-        evidence.write_record(path, failed)
-        self.assertIsNone(run.prior_result(self.vault, later))
-        with self.assertRaisesRegex(evidence.VerificationError, "no automatic replay"):
-            run.prior_result(self.vault, CYCLE)
+                run.prior_result(self.vault, NEXT)
+        for interrupted in ({"status": "prepared"}, {"status": "needs_review"},
+                            {"status": "failed", "errors": ["pre-write refusal"], "operations": []}):
+            with self.subTest(interrupted=interrupted):
+                evidence.write_record(path, {**complete, **interrupted})
+                self.assertIsNone(run.prior_result(self.vault, NEXT))
+                with self.assertRaisesRegex(evidence.VerificationError, "no automatic replay"):
+                    run.prior_result(self.vault, CYCLE)
 
-    def test_failed_historical_operations_need_exact_git_proof(self):
+    def test_only_half_applied_or_malformed_operations_block_later_cycles(self):
         plan, proposal = self.prepare()
-        complete = self.accept(plan, proposal)
-        failed = {**complete, "status": "failed", "errors": ["interrupted after a committed operation"]}
+        failed = {**self.accept(plan, proposal), "status": "failed", "errors": ["interrupted after a write"]}
         path = evidence.record_path(self.vault, CYCLE)
-        later = "2099-01-21"
-        evidence.write_record(path, failed)
-        self.assertIsNone(run.prior_result(self.vault, later))
-        for changes in ({"commit": {}}, {"commit": None}, {"changes": {}}, {"expected_head": "0" * 40}):
-            with self.subTest(changes=changes):
+        for change in ({"paths": {}}, {"kind": None}, {"candidate_id": 7}, {"state": "applying", "paths": {
+                "agent-findings/missing.md": {"before_sha256": None, "after_sha256": sha256("x\n")},
+                failed["output_file"]: failed["operations"][-1]["paths"][failed["output_file"]]}}):
+            with self.subTest(change=change):
                 broken = deepcopy(failed)
-                broken["operations"][0].update(changes)
+                broken["operations"][-1].update(change)
                 evidence.write_record(path, broken)
-                with self.assertRaises(evidence.VerificationError):
-                    run.prior_result(self.vault, later)
-        refused = deepcopy(failed)
-        operation = refused["operations"].pop()
-        del operation["commit"]
-        operation["publication_started"] = False
-        refused["operations"].append(operation)
-        evidence.write_record(path, refused)
-        self.assertIsNone(run.prior_result(self.vault, later))
+                with self.assertRaisesRegex(evidence.VerificationError, "half-applied|malformed"):
+                    run.prior_result(self.vault, NEXT)
+        (self.vault / failed["output_file"]).write_text("a user edit to the derived report\n")
+        evidence.write_record(path, failed)
+        self.assertIsNone(run.prior_result(self.vault, NEXT))
+        self.assertEqual(self.states()[failed["operations"][-1]["candidate_id"]], "superseded")
 
-    def test_head_advance_and_legacy_cycle_refuse_before_candidate_acceptance(self):
+    def test_head_may_advance_between_plan_and_write(self):
         plan, proposal = self.prepare()
-        self.git("commit", "--allow-empty", "-qm", "human advance")
-        with self.assertRaisesRegex(evidence.VerificationError, "HEAD changed"):
-            self.accept(plan, proposal)
-        path = evidence.record_path(self.vault, CYCLE).with_suffix(".toml")
-        path.parent.mkdir(parents=True)
+        self.git("commit", "--allow-empty", "-qm", "Reflect sync from another device")
+        record = self.accept(plan, proposal)
+        self.assertEqual(record["status"], "complete")
+        self.assertNotEqual(record["plan"]["base_head"], self.git("rev-parse", "HEAD"))
+        path = evidence.record_path(self.vault, NEXT).with_suffix(".toml")
         path.write_text("legacy\n")
         with self.assertRaisesRegex(evidence.VerificationError, "legacy receipt"):
-            run.prior_result(self.vault, CYCLE)
+            run.prior_result(self.vault, NEXT)
 
     def test_preview_does_not_trust_model_queue_edits_or_stale_judgments(self):
         plan, proposal = self.prepare()
@@ -439,6 +542,10 @@ class AutoevoTest(unittest.TestCase):
         self.assertTrue(actual.startswith("---\ntitle: Example\n---\n# Example\n"))
         self.assertIn(banner, actual)
         self.assertTrue(actual.endswith("Body\n"))
+
+    def test_cluster_hash_is_order_insensitive_and_stable(self):
+        self.assertEqual(run.cluster_hash(["wip/b.md", "wip/a.md"]), run.cluster_hash(["wip/a.md", "wip/b.md", "wip/a.md"]))
+        self.assertEqual(run.cluster_hash(["wip/a.md"]), hashlib.sha1(b"wip/a.md\n").hexdigest()[:12])
 
 
 if __name__ == "__main__":
