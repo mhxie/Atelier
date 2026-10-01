@@ -118,7 +118,7 @@ Use `<paths.health>/README.md` and `<paths.housing>/README.md` as the templates.
 
 ## Privacy boundaries
 
-- `$OV/` is gitignored. Personal data (landlord names, MRNs, addresses, lease amounts, IDs) lives in `$OV` safely. The committed repo never sees it.
+- Atelier never commits `$OV`; a sync app may push it to its own remote, minus `raw/`, `secure/`, and cache. Personal data (landlord names, MRNs, addresses, lease amounts) can live in synced notes; ID numbers cannot (below).
 - Protocols / committed files (this file included) describe the **structure** generically. No personal names, addresses, employer names, or preference policy. `scripts/privacy_check.py` checks discovered private titles, gitignored exact terms, and staged blobs during `/lint` and `/push`; semantic review remains responsible for contextual disclosure.
 - Encrypted vaults (1Password, etc.) are **out of scope**: never extract credentials from there into `$OV` plain text.
 - Identity documents go to `raw/`, and notes with ID, bank, or salary details to a `secure/` folder; never through a Reflect capture, which pushes within seconds.
