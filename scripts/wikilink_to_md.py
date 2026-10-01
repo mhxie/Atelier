@@ -27,9 +27,9 @@ DAILY = tier("daily_notes").relative_to(OV)
 # Reflect renames notes/ files on retitle, so links to them stay [[Title]].
 NOTES = tier("notes").relative_to(OV)
 
-# Mirrors zk/.gitignore semantics: dirs that never contain Reflect-bound or
+# Mirrors $OV/.gitignore: dirs that never contain Reflect-bound or
 # GitHub-bound markdown.
-SKIP_DIRS = {"secure", "personal", "cache", ".obsidian", ".trash", "raw"}
+SKIP_DIRS = {"secure", "cache", ".obsidian", ".trash", "raw"}
 
 IMAGE_EXTS = "png|jpg|jpeg|gif|svg|webp"
 
@@ -103,14 +103,31 @@ def slugify_anchor(s: str) -> str:
     return s.strip("-")
 
 
+def frontmatter_title(path: Path) -> Optional[str]:
+    """Frontmatter `title:`, which Reflect resolves [[Title]] by before the filename."""
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        if handle.readline().rstrip() != "---":
+            return None
+        for line in handle:
+            if line.rstrip() == "---":
+                return None
+            if line.startswith("title:"):
+                value = line[6:].strip()
+                return value[1:-1] if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'" else value
+    return None
+
+
 def build_stem_index(zk: Path) -> dict[str, list[Path]]:
-    """Map stem (lowercase) → list of paths relative to zk/."""
+    """Map stem and frontmatter title (lowercase) → list of paths relative to zk/."""
     idx: dict[str, list[Path]] = defaultdict(list)
     for f in zk.rglob("*.md"):
         rel = f.relative_to(zk)
         if any(p in SKIP_DIRS for p in rel.parts):
             continue
         idx[f.stem.lower()].append(rel)
+        title = frontmatter_title(f)
+        if title and title.lower() != f.stem.lower():
+            idx[title.lower()].append(rel)
     return idx
 
 

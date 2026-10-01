@@ -262,6 +262,17 @@ class KnowledgeCLITests(unittest.TestCase):
         self.cli("wikilink_to_md.py", "--file", source, "--apply", "--quiet")
         self.assertEqual(source.read_text(), examples + "[Plain](Plain.md)\n" + trailing)
 
+    def test_link_tools_resolve_frontmatter_titles_and_personal_notes(self):
+        self.put("research/labs/acme/Profile.md", '---\ntitle: "Acme Profile"\n---\n\nbody\n')
+        self.put("personal/Plan.md", "target\n")
+        source = self.put("research/source.md", "[[Acme Profile]] [[Plan]]\n")
+        self.cli("wikilink_to_md.py", "--file", source, "--apply", "--quiet")
+        self.assertEqual(source.read_text(), "[Acme Profile](labs/acme/Profile.md) [Plan](../personal/Plan.md)\n")
+        self.put("personal/moved/Plan.md", "target\n")
+        (self.vault / "personal/Plan.md").unlink()
+        self.cli("relink.py", "--apply", "--quiet")
+        self.assertEqual(source.read_text(), "[Acme Profile](labs/acme/Profile.md) [Plan](../personal/moved/Plan.md)\n")
+
     def test_code_spans_do_not_cross_markdown_blocks(self):
         self.put("research/Plain.md", "target\n")
         source = self.put(

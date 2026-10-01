@@ -20,7 +20,7 @@ from _paths import atomic_write, vault_root  # type: ignore[import-not-found]  #
 from wikilink_to_md import mask_code, relative_path, unmask_code  # noqa: E402
 
 OV = vault_root()
-SKIP_DIRS = {"secure", "personal", "cache", ".obsidian", ".trash", "raw", "assets"}
+SKIP_DIRS = {"secure", "cache", ".obsidian", ".trash", "raw", "assets"}
 
 LINK_RE = re.compile(r"(!?\[)([^\]]*)(\]\()(<[^>\n]+>|(?:[^()\n]|\([^()\n]*\))+)(\))")
 TRACKED_EXTS = (".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
