@@ -71,10 +71,14 @@ conflict. A consumer that finds a disagreement reports it as a conflict rather
 than trusting whichever copy it read first. Staleness markers such as
 `freshness: required` catch an old view, not two views that contradict.
 
-The host filesystem handles device sync and backup. `$OV` may also be a private
-Git repo; `protocols/repo-conventions.md` owns its layout. There is no two-way
-note-store sync or mirror ledger. The system does not auto-commit or auto-push
-the vault; user-driven Git retains its own authority.
+`$OV` is typically a Git work tree that a sync app such as Reflect commits and
+pushes. Folders named `raw/` or `secure/`, and root `cache`, may instead be
+links into a raw store (`raw_store` in `harness/paths.local.toml`), an
+unsynced-by-Git mirror of vault paths; Git and Reflect skip them and search
+indexes them there. `scripts/zk_audit.py` checks this layout; `--fix-links`
+repairs missing links. `.gitignore` decides what syncs and what Reflect lists;
+`.reflectignore` only hides folders from Reflect. The harness never commits or
+pushes the vault; `protocols/repo-conventions.md` owns layout.
 
 Daily notes are user-authored and read-only to the system. Curator refuses
 daily-note targets; only Scribe `daily_note` may record user-dictated text

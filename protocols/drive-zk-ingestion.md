@@ -3,8 +3,8 @@
 ## Roles
 
 - **Google Drive top-level domain folders** (`~/Google Drive/My Drive/<Domain>/`) and **`~/Downloads/`** are the **raw landing zones**. New files arrive here from web downloads, exports (e.g., MyChart), scans, photo dumps, manual uploads.
-- **`$OV/` (the vault, typically mounted under cloud storage)** is the **structured repository** — single source of truth for organized data.
-- After ingestion, originals live only in `$OV/<domain>/raw/` (or in the vault's gitignored cache for entities not yet promoted). Drive top-level domain folders and Downloads are transient.
+- **`$OV/` (the vault, a Git work tree)** is the **structured repository** — single source of truth for organized data.
+- After ingestion, originals live only in `$OV/<domain>/raw/`, a link that keeps them in the raw store and out of Git (or in the gitignored cache for entities not yet promoted). Drive top-level domain folders and Downloads are transient.
 
 This protocol governs the flow from landing zone → repository.
 
@@ -91,11 +91,11 @@ For each ingestion task (one domain or one batch):
    authorize unrelated Downloads cleanup.
 1. **Survey** the source folder. Inventory: what's there, natural groupings (per-event subfolders, loose files, photos).
 2. **Tidy at source** if needed. Group orphaned loose files into appropriate subfolders before mv. (Easier to fix structure at source than after relocation.)
-3. **Mkdir destination** `"$OV"/<domain>/raw/` if not exists. Preserve source subfolder structure verbatim where it makes sense.
+3. **Create the destination** under `<domain>/raw/` in the raw store if absent, then run `uv run scripts/zk_audit.py --fix-links`. Preserve source subfolder structure where it makes sense.
 4. **mv files** in. Use `mv -- "$src" "$dst"` to handle filenames with leading dashes / spaces.
 5. **Extract structured data** into markdown in `$OV/<domain>/` (not under `raw/`). Naming convention: `<YYYY-MM-DD>-<slug>.md` for events, `<topic>.md` for cross-cutting indexes. Cross-link related files using `[[wikilink]]`.
 6. **Cross-link source raw**: structured markdown should reference its raw source (`[../raw/<subdir>/<file>]`). Unidirectional: markdown → raw, never edit raw.
-7. **rmdir empty source folders**, including the Drive top-level domain folder if fully drained. When `$OV` lives in cloud storage, files in `$OV` remain in the cloud; no data leaves it.
+7. **rmdir empty source folders**, including the Drive top-level domain folder if fully drained. Originals stay in Drive through the `raw/` link.
 
 ## Per-domain README
 
@@ -121,6 +121,7 @@ Use `<paths.health>/README.md` and `<paths.housing>/README.md` as the templates.
 - `$OV/` is gitignored. Personal data (landlord names, MRNs, addresses, lease amounts, IDs) lives in `$OV` safely. The committed repo never sees it.
 - Protocols / committed files (this file included) describe the **structure** generically. No personal names, addresses, employer names, or preference policy. `scripts/privacy_check.py` checks discovered private titles, gitignored exact terms, and staged blobs during `/lint` and `/push`; semantic review remains responsible for contextual disclosure.
 - Encrypted vaults (1Password, etc.) are **out of scope**: never extract credentials from there into `$OV` plain text.
+- Identity documents go to `raw/`, and notes with ID, bank, or salary details to a `secure/` folder; never through a Reflect capture, which pushes within seconds.
 - Non-self entities (companion's medical, foster pets, etc.) get their own subdirectory under the domain (e.g., `<paths.health>/pet/`). Same protocol applies internally; cross-links from main self-line note "see also" but don't merge data.
 
 ## Audit / recovery

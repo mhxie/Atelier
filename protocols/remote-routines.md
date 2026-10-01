@@ -11,7 +11,7 @@ How scheduled remote agents (cron-style) integrate with the atelier without leak
 | **<paths.private_routines>/** (user-private vault source) | `registry.toml`, optional routine packages | private routine declarations and implementations | never committed to Atelier |
 | **$OV/_meta/** (user-private vault state) | `routine_acks.json`, local domain receipts | output evidence and review state | receipts do not duplicate scheduler state |
 | **local Prefect** | schedules, run state/history/logs, concurrency, eligible retries | execution for local files, Git, CLIs, and fixed headless runtimes | self-hosted on loopback; lifecycle is operator-managed |
-| **cloud scheduler** | routine definitions, prompt, and connector bindings | execution for cloud-accessible data and Drive persistence | lifecycle managed in the selected account scheduler |
+| **cloud scheduler** | routine definitions, prompt, and connector bindings | execution for cloud-accessible data | lifecycle managed in the selected account scheduler |
 
 Private routine identities and output paths belong only in the vault registry.
 
@@ -28,8 +28,8 @@ cron = "<cron expr UTC + local note>"
 output_dir = "<relative path under $OV>"
 file_pattern = "<glob>"              # e.g. "*.md", "*-weekly.md"
 label = "<short human label>"
-drive_write_enforced = true          # see Policy below — set true when Drive write is wired
-# needs_drive_write_update = true    # alternative: ack migration debt (legacy routine, Drive write not yet wired). Migration debt; clear within a sprint by adding Drive write to the prompt and flipping to drive_write_enforced = true.
+drive_write_enforced = true          # output reaches $OV (see Policy below)
+# needs_drive_write_update = true    # alternative: tracked delivery debt; clear within a sprint
 ```
 
 Exactly one of `drive_write_enforced` or `needs_drive_write_update` MUST be `true` for the policy cue to stay silent. The two flags are mutually exclusive in intent: the first declares compliance, the second declares migration debt being tracked.
@@ -58,12 +58,12 @@ Every cron-style remote routine MUST write its canonical output to a declared pa
 
 Rationale:
 - **Discoverability**: cues.py can surface unreviewed routine outputs at session start. Gmail-only outputs are invisible to the harness.
-- **Persistence**: routine sessions are ephemeral. Without Drive write, weekly state is lost across runs.
+- **Persistence**: routine sessions are ephemeral. Without a vault write, weekly state is lost across runs.
 - **Auditability**: a per-run markdown file is grep-able, linkable from notes, and survives the routine being deleted.
 
-Routine prompts implement this by calling Google Drive MCP `create_file` with a path under `$OV/<declared output_dir>/`. If the create_file fails, the prompt MUST print the full content as routine return value so the user can paste manually.
+`$OV` is a Git work tree, so Drive MCP writes land in the raw store, not the vault. Cloud routines push to the vault's Git remote, which Reflect merges, or run under local Prefect. If delivery fails, the prompt MUST print the full content as its return value.
 
-**Conflict-resolution rule (multi-channel routines).** When a routine uses more than one output channel (any combination of Drive, email, Calendar, or future MCP backends), the Drive file is the canonical output. Every secondary channel MUST point at the Drive file (`see $OV/<path>/<file>.md`) and cap its own content at 5 lines of summary. The user reads one source of truth, not parallel summaries.
+**Conflict-resolution rule (multi-channel routines).** When a routine uses more than one output channel (any combination of vault, email, Calendar, or future MCP backends), the `$OV` file is the canonical output. Every secondary channel MUST point at it (`see $OV/<path>/<file>.md`) and cap its own content at 5 lines of summary. The user reads one source of truth, not parallel summaries.
 
 **Presentation channels (exception to the 5-line cap).** The cap exists to prevent *parallel summaries*: a second, independently-worded account of the same run that the user must reconcile against the canonical file. A channel that delivers the canonical artifact itself is not a parallel summary and is not capped. A channel qualifies as a presentation channel only when all of these hold:
 
@@ -98,7 +98,7 @@ The daily digest is the first such routine: it renders one HTML document into it
 
 ## Halt conditions
 
-Routines execute on the cloud side; the harness only observes their outputs (the Drive-written file). The atelier cannot see a routine looping, OOMing, or burning quota mid-run. The harness-side cues above (`check_routine_staleness`, `check_routine_hitrate`) detect total outages and degraded hit rates *after the fact*; they cannot stop a misbehaving in-progress routine. The only effective halt signal the atelier can emit for a remote routine is a **per-routine prompt contract** the routine itself must respect.
+Routines execute on the cloud side; the harness only observes their written outputs. The atelier cannot see a routine looping, OOMing, or burning quota mid-run. The harness-side cues above (`check_routine_staleness`, `check_routine_hitrate`) detect total outages and degraded hit rates *after the fact*; they cannot stop a misbehaving in-progress routine. The only effective halt signal the atelier can emit for a remote routine is a **per-routine prompt contract** the routine itself must respect.
 
 ### Per-routine prompt contract
 
@@ -106,16 +106,16 @@ The harness cannot enforce these declarations; they are policy, not mechanism. A
 
 Every routine prompt MUST declare the following at the top of its instructions, before any data fetch or analysis step:
 
-1. **Single-pass scope.** One pass over the source data per cron fire. No retry loop on partial fetches. If a source is unavailable, write a Drive output that names the missing input and exit; do not retry.
+1. **Single-pass scope.** One pass over the source data per cron fire. No retry loop on partial fetches. If a source is unavailable, write an output that names the missing input and exit; do not retry.
 
 2. **Cost ceiling declared in plain text.** Expected token budget for one fire (typically 5K to 50K depending on scope). The plain-text declaration lets a reviewer detect overrun in the cloud session log.
 
-3. **External-blocker behavior.** If a required MCP connection is unreachable (Drive write fails, Gmail unreachable for a source fetch), the prompt:
+3. **External-blocker behavior.** If a required connection is unreachable (vault delivery fails, Gmail unreachable for a source fetch), the prompt:
    - Records the failure in the routine's session output.
-   - Skips the Drive write rather than retry.
-   - Does NOT silently degrade to an empty Drive file. An empty file would tombstone the missed run for `check_routine_staleness` as if it succeeded.
+   - Skips the write rather than retry.
+   - Does NOT silently degrade to an empty file. An empty file would tombstone the missed run for `check_routine_staleness` as if it succeeded.
 
-4. **Idempotent re-fire.** If the same routine fires twice in the same UTC day (rare cron skew, manual rerun), the second fire detects the existing Drive file and either appends or refuses. It does not overwrite a successful prior output.
+4. **Idempotent re-fire.** If the same routine fires twice in the same UTC day (rare cron skew, manual rerun), the second fire detects the existing output and either appends or refuses. It does not overwrite a successful prior output.
 
 ## Local execution layer
 
@@ -326,8 +326,7 @@ filename patterns, or trigger IDs. Private declarations belong in
    a cloud profile, then create and first-run-test the task in the account
    scheduler UI.
 2. Ensure the canonical output is written under the declared `$OV` path.
-   Cloud tasks require Google Drive write access on their hosting surface;
-   local tasks write the synchronized filesystem directly.
+   Cloud tasks push to the vault's Git remote; local tasks write `$OV` directly.
 3. Append the private policy to `<paths.private_routines>/registry.toml`:
    ```toml
    [[routine]]
@@ -351,9 +350,8 @@ filename patterns, or trigger IDs. Private declarations belong in
 
 ## Migration: legacy email-only routines
 
-For legacy email-only routines, add canonical Drive persistence before delivery,
-bind the Google-Drive connector, and set `drive_write_enforced = true` in the
-private registry. New and updated routines must comply; migrate others incrementally.
+For legacy email-only routines, add canonical vault persistence before
+delivery and set `drive_write_enforced = true` in the private registry. New and updated routines must comply; migrate others incrementally.
 
 ## Retiring a routine
 

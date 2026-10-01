@@ -109,7 +109,7 @@ canonical JSON domain result; Markdown is derived and Prefect owns run state.
 ## Plugins and Permissions
 
 The canonical write path is local: the runtime writes files under `$OV/`, and
-a filesystem sync client (such as Google Drive) handles persistence. When
+Reflect commits and pushes them. When
 `$OV/` is outside the workspace, add it as a writable root while keeping the
 sandbox at workspace-write:
 
@@ -129,7 +129,7 @@ disk:
 | Integration | Authorization | Supported use |
 |---|---|---|
 | Gmail plugin | plugin enabled + Google OAuth | mail search/read for user-requested context |
-| Google Drive plugin | plugin enabled + Google OAuth | cloud-only Drive files; Drive-writing routines need the connector on their hosting runtime |
+| Google Drive plugin | plugin enabled + Google OAuth | cloud-only Drive files and landing zones; it cannot reach `$OV` |
 | Readwise CLI | `readwise login` or token | Reader search, saved documents, inbox curation, anchor snapshots |
 | GitHub plugin | connector auth | remote issues/PRs; local `git` works without it |
 | Google Calendar plugin | Google OAuth | fork-added calendar workflows; no core command depends on it |

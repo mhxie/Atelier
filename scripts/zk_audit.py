@@ -2,26 +2,30 @@
 """Read-only post-ingestion hygiene audit of $OV; heuristics, not repair authority.
 
 Checks missing domain READMEs/digests, archive overlap, root markdown orphans
-(except README.md), empty markdown, and suspicious top-level directories.
-Archive empty stubs are counted, not individually listed, to avoid drowning
-current ingestion debt. Individual checks explain their false-positive bias.
+(except README.md), empty markdown, suspicious top-level directories, and the
+vault layout: a Git work tree outside file-sync folders whose raw/ and secure/
+folders (and root cache) are links into raw_store. Archive empty stubs are
+counted, not individually listed, to avoid drowning current ingestion debt.
+Individual checks explain their false-positive bias.
 
 Run `uv run scripts/zk_audit.py [--json]` for a human/JSON report. Advisory
-findings exit 0; IO errors exit 2. `_paths.vault_root()` requires $OV, with no
-relative fallback; domain names are discovered, never hardcoded.
+findings exit 0; IO errors exit 2. `--fix-links` only creates missing links
+into raw_store; it never moves or deletes. `_paths.vault_root()` requires $OV,
+with no relative fallback; domain names are discovered, never hardcoded.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
+from _paths import raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
 
@@ -46,6 +50,11 @@ for _path in wiki_dirs():
 # these when iCloud or Drive sync detects a phantom duplicate.
 _FINDER_DUP_RE = re.compile(r"\s(?:\d+|\(\d+\))$")
 
+# Folders that live in raw_store and appear in the vault as links; Git and
+# Reflect skip them. A .git under a file-sync client risks object corruption.
+_STORE_FOLDERS = {"raw", "secure"}
+_SYNC_ROOTS = ("/Library/CloudStorage/", "/Library/Mobile Documents/")
+
 
 @dataclass
 class Finding:
@@ -67,6 +76,7 @@ class Report:
     empty_md: list[Finding] = field(default_factory=list)
     empty_md_archive_count: int = 0
     suspicious_dirs: list[Finding] = field(default_factory=list)
+    layout: list[Finding] = field(default_factory=list)
 
     def total(self) -> int:
         # Includes the aggregated archive empty-stub count so a JSON
@@ -80,6 +90,7 @@ class Report:
             + len(self.root_orphans)
             + len(self.empty_md)
             + len(self.suspicious_dirs)
+            + len(self.layout)
             + self.empty_md_archive_count
         )
 
@@ -94,6 +105,7 @@ class Report:
                 "empty_md": [f.to_dict() for f in self.empty_md],
                 "empty_md_archive_count": self.empty_md_archive_count,
                 "suspicious_dirs": [f.to_dict() for f in self.suspicious_dirs],
+                "layout": [f.to_dict() for f in self.layout],
             },
             "total": self.total(),
         }
@@ -340,6 +352,64 @@ def check_suspicious_dirs(root: Path) -> list[Finding]:
     return out
 
 
+def _store_folders(store: Path) -> list[str]:
+    """Vault-relative raw/ and secure/ folders present in raw_store."""
+    out: list[str] = []
+    for current, dirnames, _files in os.walk(store):
+        rel = Path(current).relative_to(store)
+        out += [(rel / d).as_posix() for d in dirnames if d in _STORE_FOLDERS]
+        dirnames[:] = sorted(d for d in dirnames if not _is_hidden(d) and d not in _STORE_FOLDERS)
+    return sorted(out)
+
+
+def check_layout(root: Path, store: Path | None) -> list[Finding]:
+    """Vault is a Git work tree outside sync folders; store folders are links into raw_store."""
+    if not root.is_dir():
+        return [Finding("layout", root.as_posix(), "vault root is missing; $OV may be stale")]
+    out: list[Finding] = []
+    if not (root / ".git").exists():
+        out.append(Finding("layout", root.as_posix(), "not a Git work tree; Reflect syncs the vault through Git"))
+    elif any(part in root.resolve().as_posix() + "/" for part in _SYNC_ROOTS):
+        out.append(Finding("layout", _rel(root / ".git"), ".git inside a file-sync folder"))
+    if store is None:
+        return out
+    if not store.is_dir():
+        return out + [Finding("layout", store.as_posix(), "raw_store is missing or unmounted")]
+    for current, dirnames, files in os.walk(root):
+        here = Path(current)
+        dirnames[:] = [d for d in dirnames if not _is_hidden(d)]
+        # A dangling link is listed with files, not directories.
+        for d in [d for d in dirnames + files if d in _STORE_FOLDERS or (here == root and d == "cache")]:
+            path, rel = here / d, (here / d).relative_to(root).as_posix()
+            if path.is_symlink() and (Path(os.readlink(path)) != store / rel or not path.is_dir()):
+                out.append(Finding("layout", _rel(path), f"link should resolve to {store / rel}"))
+            elif not path.is_symlink() and path.is_dir():
+                out.append(Finding("layout", _rel(path) + "/", "real folder: local-only and unsynced; move it into raw_store and link it"))
+            if d in dirnames:
+                dirnames.remove(d)
+    for rel in _store_folders(store):
+        if not (root / rel).is_symlink() and not (root / rel).exists():
+            out.append(Finding("layout", _rel(root / rel), "raw_store folder has no link here; run with --fix-links"))
+    return out
+
+
+def fix_links(root: Path, store: Path) -> list[Path]:
+    """Create the links check_layout reports missing; never moves or deletes.
+
+    Only inside a Git work tree, so a stale $OV cannot grow a stray vault.
+    """
+    made: list[Path] = []
+    if not (root / ".git").exists():
+        return made
+    for rel in _store_folders(store):
+        link = root / rel
+        if not link.is_symlink() and not link.exists():
+            link.parent.mkdir(parents=True, exist_ok=True)
+            link.symlink_to(store / rel)
+            made.append(link)
+    return made
+
+
 def _rel(path: Path) -> str:
     """Render a path relative to $OV if possible, else absolute.
 
@@ -360,6 +430,7 @@ def run_audit() -> Report:
     report.archive_overlap = check_archive_overlap(OV, domains)
     report.root_orphans, report.empty_md, report.empty_md_archive_count = check_root_orphans(OV)
     report.suspicious_dirs = check_suspicious_dirs(OV)
+    report.layout = check_layout(OV, raw_store())
     return report
 
 
@@ -395,6 +466,7 @@ def format_human(report: Report) -> str:
             ),
         ),
         ("[5] Suspicious top-level dirs", report.suspicious_dirs, None),
+        ("[6] Vault layout", report.layout, "missing links are fixable with --fix-links"),
     ]
 
     for title, items, note in sections:
@@ -416,12 +488,12 @@ def format_human(report: Report) -> str:
     actionable = total - arch
     if arch:
         summary = (
-            f"Summary: 6 categories, {actionable} actionable + {arch} archive-aggregated "
+            f"Summary: 7 categories, {actionable} actionable + {arch} archive-aggregated "
             f"= {total} total finding(s). Audit is advisory; no $OV content was modified."
         )
     else:
         summary = (
-            f"Summary: 6 categories, {total} total finding(s). "
+            f"Summary: 7 categories, {total} total finding(s). "
             "Audit is advisory; no $OV content was modified."
         )
     lines.append(summary)
@@ -439,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Post-ingestion hygiene audit for the $OV vault.",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
+    parser.add_argument("--fix-links", action="store_true", help="Create missing links into raw_store, then audit.")
     args = parser.parse_args(argv)
 
     if not OV.is_dir():
@@ -449,6 +522,9 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(msg + "\n")
         return 2
 
+    if args.fix_links and (store := raw_store()) is not None and store.is_dir():
+        for link in fix_links(OV, store):
+            sys.stderr.write(f"zk_audit: linked {_rel(link)}\n")
     report = run_audit()
 
     if args.json:
