@@ -12,6 +12,13 @@ or crystallize working notes into source-backed wiki claims. The lasting
 artifact is your knowledge, kept in plain Markdown and independent of any
 one model or chat history.
 
+Atelier is co-developed with [reflect-open](https://github.com/mhxie/reflect-open),
+our fork of the open-source [Reflect](https://github.com/team-reflect/reflect-open)
+Markdown note app for Mac and iPhone. Reflect edits the vault and syncs it
+through Git, and its `reflect` CLI adds title search to retrieval. Atelier's
+vault conventions (titles, attachments, `.reflectignore`) follow it, and fixes
+the harness needs land in the fork.
+
 Underneath is an opinionated knowledge architecture. Provider-neutral registries
 let both runtimes share the same workflows; bounded retrieval loads task-relevant
 context; **le cercle** adds specialist perspectives. Certification tiers keep
@@ -70,6 +77,13 @@ notes are not part of the clone.
 ```bash
 export OV="/absolute/path/to/your/existing-vault"
 ```
+
+Atelier can also run on a split vault: a Git work tree that reflect-open, or
+another sync app, commits and pushes, with every `raw/` and `secure/` folder
+kept in a separate raw store such as a cloud-drive folder. Set `raw_store` in
+`harness/paths.local.toml`, then run `uv run scripts/zk_audit.py --fix-links`
+to link those folders into the vault. Git and Reflect skip the links; local
+search indexes them from the store.
 
 Follow [local search setup](sources/semantic.md#setup-and-hardware) to initialize
 models and index your notes. The [path registry](harness/paths.toml) maps the
@@ -153,10 +167,13 @@ Artifact writes remain subject to workflow authorization. Execution and evidence
 contracts are detailed in [runtime adapters](protocols/runtime-adapters.md) and
 [routine verification](protocols/remote-routines.md).
 
-The architecture rests on four principles:
+The architecture rests on five principles:
 
 - **Files are the source of truth.** Notes remain ordinary Markdown; search
   indexes and summaries are views, not a replacement for the source.
+- **Sensitive notes stay off Git and out of prompts.** `secure/` folders live
+  only in the raw store. Agents see their file names, and only local models,
+  such as the search index, read their contents.
 - **Context follows the task.** A session loads selected sources and agent
   instructions, keeping the working context bounded.
 - **Directory = certification tier (L1–L5).** L1 is raw capture, L2 working
