@@ -48,6 +48,8 @@ points at the canonical sources and adds only what is Codex-native.
 - Local retrieval uses `scripts/semantic.py` with the pinned QMD dependency.
   `sources/semantic.md` owns setup, scopes, and the bounded JSON contract.
   Queries use cached models only; downloads require explicit initialization.
+- Linked ledger tasks use `scripts/todos.py check` and `sync --file <quarter>.md`
+  (preview; `--apply` writes); see `protocols/local-first-architecture.md`.
 - Route context packs selected repository profiles and registered session logs
   with pinned Repomix; `protocols/session-continuity.md` owns selection and ceilings.
 - Reflection's energy and exploration intents share

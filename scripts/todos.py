@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier, tier_files  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, tier, tier_files, vault_root  # type: ignore[import-not-found]  # noqa: E402
 
 GTD_DIR = tier("gtd")
 REFLECTIONS_DIR = tier("reflections")
@@ -77,6 +77,8 @@ class Todo:
     priority: str | None = None
     area: str | None = None
     age_days: int = -1  # -1 = not loaded
+    sot: str | None = None  # owner link `path#anchor`, removed from text
+    sot_error: str | None = None
 
     def computed_priority(self) -> str:
         if self.priority:
@@ -251,6 +253,121 @@ def scan_reflection_next_actions(path: Path) -> list[Todo]:
     return out
 
 
+SOT_REF_RE = re.compile(r'\[sot\]\(<([^<>\n]+)#([a-z0-9][a-z0-9-]*)>\)')
+SOT_STATES = {"☐": "open", "📅": "open", "✅": "done", "🚫": "killed"}
+SOT_MARKERS = {"open": " ", "done": "x", "killed": "~"}
+
+
+def resolve_sot(todo: Todo, snapshots: dict[Path, str]) -> str:
+    """Resolve an opted-in ledger row, never infer completion from prose."""
+    if '[sot]' not in todo.text:
+        return todo.state
+    refs = SOT_REF_RE.findall(todo.text)
+    if len(refs) != 1 or todo.text.count('[sot]') != 1:
+        raise ValueError(f'{todo.source}:{todo.line}: expected one [sot](<path#id>)')
+    relative, anchor = refs[0]
+    path = (Path(todo.source).parent / relative).resolve()
+    if (Path(relative).is_absolute() or not path.is_relative_to(vault_root())
+            or path.is_relative_to(GTD_DIR.resolve())
+            or path.is_relative_to(DAILY_NOTES_DIR.resolve()) or path.suffix != '.md'):
+        raise ValueError(f'{todo.source}:{todo.line}: invalid SoT owner: {relative}')
+    if path not in snapshots:
+        snapshots[path] = path.read_bytes().decode('utf-8')
+    needle = f'<a id="{anchor}"></a>'
+    if snapshots[path].count(needle) != 1:
+        raise ValueError(f'{path}: expected exactly one owner anchor {anchor}')
+    fenced = None
+    rows = []
+    for line in snapshots[path].splitlines():
+        fence = re.match(r'^\s*(`{3,}|~{3,})', line)
+        if fence:
+            if fenced is None:
+                fenced = fence[1]
+            elif (fence[1][0] == fenced[0] and len(fence[1]) >= len(fenced)
+                  and not line[fence.end():].strip()):
+                fenced = None
+        elif needle in line and fenced is None:
+            rows.append(line)
+    if len(rows) != 1:
+        raise ValueError(f'{path}#{anchor}: owner must be outside code fences')
+    row = rows[0]
+    cells = [cell.strip() for cell in re.split(r'(?<!\\)\|', row)]
+    if not row.startswith('|') or len(cells) < 5 or cells[3] not in SOT_STATES:
+        raise ValueError(f'{path}#{anchor}: expected ledger Status in third column')
+    return SOT_STATES[cells[3]]
+
+
+def linked_state(saved: str, owner: str) -> str:
+    """The owner decides, except that an open owner keeps an in-progress marker."""
+    return saved if (saved, owner) == ("wip", "open") else owner
+
+
+def link_todos(todos: list[Todo]) -> None:
+    """Derive linked status; a bad link keeps its saved marker and is reported."""
+    snapshots: dict[Path, str] = {}
+    for todo in todos:
+        refs = SOT_REF_RE.findall(todo.text)
+        todo.sot = "#".join(refs[0]) if refs else None
+        try:
+            todo.state = linked_state(todo.state, resolve_sot(todo, snapshots))
+        except (OSError, ValueError) as exc:
+            todo.sot_error = str(exc)
+            print(f"WARN: {todo.short_source()}:{todo.line}: {exc}", file=sys.stderr)
+        todo.text = SOT_REF_RE.sub("", todo.text).strip()
+
+
+def sot_changes(paths: list[Path]) -> tuple[dict[Path, str], dict[Path, str], list[str]]:
+    snapshots: dict[Path, str] = {}
+    updates: dict[Path, str] = {}
+    findings: list[str] = []
+    for path in paths:
+        snapshots[path] = path.read_bytes().decode('utf-8')
+        lines = snapshots[path].splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            match = CHECKBOX_RE.match(line)
+            if not match:
+                continue
+            state = STATE_MAP[match[1]]
+            todo = Todo(match[2], str(path), index + 1, state)
+            expected = linked_state(state, resolve_sot(todo, snapshots))
+            if state != expected:
+                findings.append(f'{path}:{index + 1}: {state} -> {expected}')
+                start, end = match.span(1)
+                lines[index] = line[:start] + SOT_MARKERS[expected] + line[end:]
+        updated = ''.join(lines)
+        if updated != snapshots[path]:
+            updates[path] = updated
+    return snapshots, updates, findings
+
+
+def cmd_sot(args: argparse.Namespace) -> int:
+    paths = sorted(GTD_DIR.glob('*.md'))
+    if args.cmd == 'sync':
+        path = (GTD_DIR / args.file).resolve()
+        if path.parent != GTD_DIR.resolve() or path.suffix != '.md':
+            raise ValueError('--file must name a Markdown file directly under GTD')
+        paths = [path]
+    snapshots, updates, findings = sot_changes(paths)
+    for finding in findings:
+        print(finding)
+    if args.cmd == 'check':
+        print(f'{len(findings)} SoT status mismatch(es); only explicit links checked.')
+        return int(bool(findings))
+    if not args.apply:
+        print(f'Preview: {len(findings)} marker change(s); no files written.')
+        return 0
+    # One target file per apply: atomic replacement, with source drift checks.
+    for path, before in snapshots.items():
+        if path.read_bytes().decode('utf-8') != before:
+            raise ValueError(f'{path}: changed since planning; rerun sync')
+    for path, updated in updates.items():
+        atomic_write(path, updated, expected_text=snapshots[path])
+        if path.read_bytes().decode('utf-8') != updated:
+            raise ValueError(f'{path}: verification failed; inspect before retrying')
+    print(f'Applied and verified {len(findings)} marker change(s).')
+    return 0
+
+
 def collect_all_todos(load_age: bool = True) -> list[Todo]:
     todos: list[Todo] = []
     if GTD_DIR.exists():
@@ -258,6 +375,7 @@ def collect_all_todos(load_age: bool = True) -> list[Todo]:
             todos.extend(scan_gtd_file(f))
     for f in tier_files("reflections", "*.md"):
         todos.extend(scan_reflection_next_actions(f))
+    link_todos(todos)
     if load_age:
         for t in todos:
             t.age_days = line_age_days(Path(t.source), t.line)
@@ -417,6 +535,7 @@ def cmd_digest(args: argparse.Namespace) -> int:
     print("## Digest")
     if last_ref:
         last_actions = scan_reflection_next_actions(last_ref)
+        link_todos(last_actions)
         last_actions = [t for t in last_actions if t.state == "open"]
         print(f"\nLast reflection: {last_ref.name}")
         if last_actions:
@@ -481,8 +600,19 @@ def main(argv: list[str] | None = None) -> int:
     p_digest.add_argument("--days", type=int, default=7)
     p_digest.set_defaults(func=cmd_digest)
 
+    p_check = sub.add_parser("check", help="Check explicit SoT links and marker drift.")
+    p_check.set_defaults(func=cmd_sot)
+    p_sync = sub.add_parser("sync", help="Preview derived GTD markers; apply one file.")
+    p_sync.add_argument("--file", required=True, help="Filename under GTD.")
+    p_sync.add_argument("--apply", action="store_true", help="Write verified marker changes.")
+    p_sync.set_defaults(func=cmd_sot)
+
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except (OSError, ValueError) as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

@@ -166,7 +166,10 @@ def wiki_dirs() -> list[Path]:
     return dirs
 
 
-def atomic_write(path: Path, text: str, *, fsync: bool = True, newline: str | None = None) -> None:
+def atomic_write(
+    path: Path, text: str, *, fsync: bool = True, newline: str | None = None,
+    expected_text: str | None = None,
+) -> None:
     """Replace a complete file using a unique sibling, preserving existing permissions."""
     path.parent.mkdir(parents=True, exist_ok=True)
     mode: int | None = None
@@ -184,6 +187,8 @@ def atomic_write(path: Path, text: str, *, fsync: bool = True, newline: str | No
             if fsync:
                 handle.flush()
                 os.fsync(handle.fileno())
+        if expected_text is not None and path.read_bytes().decode("utf-8") != expected_text:
+            raise ValueError(f"{path}: changed before replacement; no write performed")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)

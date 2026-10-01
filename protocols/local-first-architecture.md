@@ -97,7 +97,7 @@ mirrored views and may lag. Before quoting an aggregate as authoritative, run
 flagged file against its subject source. This is a read-time warning against
 shadow state, not automatic write-time propagation.
 
-Aggregates opt in with leading YAML frontmatter:
+Date-based freshness checks opt in with leading YAML frontmatter:
 
 ```yaml
 ---
@@ -110,23 +110,29 @@ Discovery ignores unmarked files and groups marked files by `subjects`.
 The script owns excluded directories and date resolution (leading update
 marker, YAML date, then mtime). `--stale-only` is silent when fresh; explicit
 `--subjects` / `--aggregates` still supports ad-hoc and transitional checks.
-Adoption is forward-looking. Automatic aggregate generation remains deferred.
+Adoption is forward-looking. Unlinked prose and numerical aggregates remain manual.
 
-## Planner vs. Executor (orthogonal to L1-L5)
+## Derived task status
 
-The planner owns what is outstanding; executor projects own working detail and
-final receipts. Link new pairs at creation and backfill at closure:
+For ledger-backed tasks, put a stable `<a id="benefit-a"></a>` in the owning
+Markdown table row. Its third column owns Status: `☐` or `📅` means open,
+`✅` done, `🚫` cancelled. Add one `[sot](<../domain/ledger.md#benefit-a>)`
+to its GTD checkbox. Paths are relative to GTD; owner files stay inside the
+vault and outside GTD and daily notes. Split tasks with distinct owners.
 
-- Each executor declares `upstream: <path>#<anchor>` in frontmatter, pointing
-  to its originating planner item.
-- On completion, rewrite that planner row as
-  `- [x] <task> → backfilled <upstream-path>#<row> @YYYY-MM-DD`.
-- Backfill and executor closure belong in the same turn/commit, as one
-  transaction under the existing write authority. Closing only the executor
-  leaves stale planner state.
+Update the owner row and evidence first. `todos.py` derives linked status for
+list, stale, digest, and daily brief; `check` reports saved-marker drift.
+Run `sync --file <quarter>.md` to preview, then `--apply` under the existing
+write authority. It validates references and source snapshots before replacing
+one GTD file atomically, then reads it back. Reruns are idempotent; simultaneous
+external edits after validation remain a filesystem race. Missing, duplicate,
+or invalid owners fail visibly. Linked status always follows the owner,
+including reopening. For a separate scheduling cancellation or migration,
+change `[sot]` to `[source]` before marking `[~]`; the citation remains ordinary.
 
-Existing pairs are not retrofitted. An automatic backfill checker remains
-deferred until another observed omission justifies it; no such script exists.
+`check` covers explicit links only. Historical prose stays dated; current
+summaries link to owners instead of copying state. Other executor/planner pairs
+retain an `upstream: <path>#<anchor>` reference and are backfilled together.
 
 ## Per-Agent Contract
 

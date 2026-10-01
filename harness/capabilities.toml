@@ -14,7 +14,7 @@ description = "Search local files with path scoping."
 codex = ["rg", "rg --files"]
 
 [capabilities.run_shell]
-description = "Run deterministic project scripts and shell commands."
+description = "Run deterministic project scripts and shell commands, including todos.py check and sync for explicit owner links."
 codex = ["shell"]
 
 [capabilities.semantic_query]

@@ -444,6 +444,7 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
     except Exception as exc:
         warnings.append(f"todo scan failed: {exc!r}")
         return []
+    warnings.extend(f"todo link {t.short_source()}:{t.line}: {t.sot_error}" for t in open_todos if t.sot_error)
 
     try:
         reminders = load_todo_reminders(_ov)

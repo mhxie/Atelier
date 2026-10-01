@@ -77,7 +77,7 @@ Planned, in this order. These are not implemented capabilities or release
 commitments; each stage needs an approved implementation plan and verification.
 
 1. **Confirmed action handoff.** Extend the [meeting procedure](../protocols/intent-meeting.md)
-   and existing [Planner/Executor contract](../protocols/local-first-architecture.md#planner-vs-executor-orthogonal-to-l1-l5)
+   and existing [planner/executor backfill rule](../protocols/local-first-architecture.md#derived-task-status)
    so selected, approved actions reach an identified task record with source
    links and result backfill. Saving a meeting note must not accept every
    proposed task. Verify subset approval, duplicate prevention, unchanged

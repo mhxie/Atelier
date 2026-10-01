@@ -83,7 +83,7 @@ Before writing, plan side effects. Each is opt-in via the confirm prompt (see C.
 | Meal log append | Always | Append row to the meal log file (under `<paths.travel>/`, filename per `profile/diet.md`); bump `Last updated:` to today. |
 | Establishment registry upsert | First/new physical branch, or explicit address/lifecycle change | Insert or update the regional catalog's `门店索引` row with exact branch, address, lifecycle, verification date, and source. Ratings stay in the meal log. |
 | Gift card update | Receipt shows gift-card balance line OR user volunteers balance | Update existing row in the gift-card catalog file (under `<paths.finance>/`, filename per `profile/diet.md`): Balance + Last updated + Source; or insert new row if first time. |
-| Benefits-tracker nudge | Credit slot maps to a tracked benefit cycle in the private profile | Suggest an update and cite the affected row without copying program policy into this command. Do NOT auto-write; surface as a one-liner for the user to apply manually. |
+| Benefits-tracker claim | Credit slot maps to a tracked benefit cycle in the private profile | Mark the affected cycle row claimed (✅, date, amount, restaurant) in its local convention. Do not copy program policy into it. |
 | Catalog promotion flag | 评分 ≥ 8 AND 再去 = Y AND restaurant not currently in the relevant city catalog file (per `profile/diet.md`) | One-line suggestion at the end: `→ 考虑 promote 到 <city catalog name> (评分 N + 再去 Y, 还没在 catalog)`. Do NOT write. |
 | Trip-log reference | User explicitly associated this meal with a named/current trip, one compatible trip-note location was resolved, and the exact date plus relative meal-history link is not already present | After a successful, audited meal-log append, append the date-only resolved meal-history-title link from C.2a to the trip note. Do not copy meal-row details. |
 | Daily note | (never) | Daily notes are user-authored. Do NOT auto-create even if today's note is missing. |
@@ -102,7 +102,7 @@ Side effects:
   1. Append row to meal log + bump Last updated
   <next number>. <establishment registry upsert if applicable>
   <next number>. <gift card update if applicable>
-  <next number>. <benefits-tracker nudge if applicable>
+  <next number>. <benefits-tracker claim if applicable>
   <next number>. <catalog promotion flag if applicable>
   <next number>. <trip-log reference if resolved>
 
@@ -133,12 +133,12 @@ The helper holds an exclusive advisory lock for the entire final read, validatio
 
 Interpret its JSON status exactly: `inserted` means report the reference added; `already_present` means do not duplicate it; `drift` or `anchor_missing` means skip safely; `error` means skip safely with no fallback direct `Edit`. In every non-`inserted` case, leave the successfully audited meal row intact and report the reference as deferred/skipped.
 
-For the benefits tracker: do NOT write; surface the one-liner only.
+For the benefits tracker: `Edit` only the selected cycle row.
 
 ### C.7 Report
 
 One line:
-> `Logged: <Restaurant> <Date> 评 <N>/10. <one optional flag, e.g., "prepaid balance updated", "trip reference added", "trip reference skipped after meal log", "promote candidate", or "benefits tracker update to apply manually">.`
+> `Logged: <Restaurant> <Date> 评 <N>/10. <one optional flag, e.g., "prepaid balance updated", "trip reference added", "trip reference skipped after meal log", "promote candidate", or "benefits claim marked">.`
 
 If the meal row was not written successfully, or was removed or rolled back because its audit could not pass, report: `Not logged: <Restaurant> <Date>. Neither the meal row nor trip reference was written.` If a successfully audited meal row remains but the helper returns a non-`inserted` status, report: `Logged: <Restaurant> <Date>. Trip reference skipped: <reason>.`
 
@@ -148,7 +148,6 @@ If the meal row was not written successfully, or was removed or rolled back beca
 - **One compact prompt for missing slots**: group required-and-underivable slots into a single line.
 - **HEIC + large image handling**: if the input image is HEIC or > 256KB, convert via `sips -s format jpeg -Z 900 <src> --out /tmp/<basename>.jpg` first, then `Read` the JPEG. Do not assume ImageMagick.
 - **Read-only on daily notes**: do NOT auto-create today's daily note even if it's missing. Daily notes are user-authored.
-- **Read-only on the benefits tracker**: surface the cycle-credit nudge as a one-liner; never auto-write to the tracker.
 - **Match user language**: Chinese-dominant for Chinese cuisine; English otherwise.
 - **No web search**: restaurant data comes from local catalogs and the user-provided receipt only.
 - **Tight output**: draft row + side-effect list + one-line confirm prompt. No preamble.
