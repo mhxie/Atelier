@@ -38,11 +38,8 @@ for interactive input.
    missing or unknown observations do not authorize running probes again.
 6. Read `$OV/_routine_prompts/<ROUTINE>.md` completely. This private archive is
    the authoritative routine procedure. Refuse if it is absent.
-7. The adapter validates the archived prompt before starting the model. It
-   requires a `LOCAL EXECUTION OVERRIDE` first line and an `ORIGINAL ROUTINE
-   PROMPT` boundary marker, then scans for literal credentials. If a literal
-   credential is ever found after startup, stop without executing the prompt
-   and report the offending line number without printing the credential.
+7. The adapter vets the prompt before startup. If a literal credential still
+   appears, stop and report only its line number.
 
 ## Execute
 
@@ -53,6 +50,11 @@ the equivalent path under `$OV/`; Gmail remains a connector operation rather
 than a filesystem read. Apply the action-authorization contract in
 `protocols/remote-routines.md` § Runtime and permission boundary using
 `ATELIER_ROUTINE_PERMISSIONS`.
+
+Discover allowed connector tools in the runtime catalog before declaring any
+missing; shell network limits do not imply absence. Try the first permitted
+read; if blocked, report the missing tool or error. Do not reconnect, change
+permissions, or retry failed calls.
 
 Honor the archived prompt's single-pass, cost-ceiling, idempotency, output-path,
 and graceful-degradation rules. Do not modify the private routine registry or Prefect

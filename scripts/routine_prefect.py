@@ -38,9 +38,9 @@ def prepare_model_task(routine: str) -> dict[str, Any]:
     return adapter.prepare_model(routine)
 
 
-@task(name="run headless Codex", retries=0, persist_result=False)
+@task(name="run headless model", retries=0, persist_result=False)
 def model_attempt_task(payload: dict[str, Any], cycle: str, flow_run_id: str) -> dict[str, Any]:
-    """One attempt only: after Codex starts, effects may be ambiguous."""
+    """One attempt only: after the model starts, effects may be ambiguous."""
     return adapter.execute_model(payload, cycle=cycle, flow_run_id=flow_run_id)
 
 
@@ -104,7 +104,7 @@ def deployments(*, root: Path = ROOT, environ: dict[str, str] | None = None) -> 
                 parameters={"routine": spec.schedule.name},
                 concurrency_limit=concurrency,
                 tags=["atelier", "model-routine"],
-                description="Fixed headless-Codex local Atelier routine.",
+                description=f"Fixed headless-{adapter.model_runtime(spec)} local Atelier routine.",
             )
         )
     for spec in processes:
@@ -134,7 +134,6 @@ def validation_payload(*, root: Path = ROOT, environ: dict[str, str] | None = No
     return {
         "valid": True,
         "engine": "prefect",
-        "runtime": "codex",
         "global_concurrency": 1,
         "models": [
             {
@@ -143,6 +142,7 @@ def validation_payload(*, root: Path = ROOT, environ: dict[str, str] | None = No
                 "timezone": spec.schedule.timezone,
                 "profile": spec.profile,
                 "adapter": spec.adapter,
+                "runtime": adapter.model_runtime(spec),
             }
             for spec in models
         ],

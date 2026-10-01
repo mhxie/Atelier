@@ -10,7 +10,7 @@ How scheduled remote agents (cron-style) integrate with the atelier without leak
 | **atelier** (public, portable git repo) | `scripts/cues.py`, Prefect flow/adapter code, canonical skills/agents, `routines/registry.toml`, `protocols/` | generic mechanism, adapters, public routines | knows the **shape** of private routine outputs and receipts, never private identities |
 | **<paths.private_routines>/** (user-private vault source) | `registry.toml`, optional routine packages | private routine declarations and implementations | never committed to Atelier |
 | **$OV/_meta/** (user-private vault state) | `routine_acks.json`, local domain receipts | output evidence and review state | receipts do not duplicate scheduler state |
-| **local Prefect** | schedules, run state/history/logs, concurrency, eligible retries | execution for local files, Git, CLIs, and fixed headless Codex | self-hosted on loopback; lifecycle is operator-managed |
+| **local Prefect** | schedules, run state/history/logs, concurrency, eligible retries | execution for local files, Git, CLIs, and fixed headless runtimes | self-hosted on loopback; lifecycle is operator-managed |
 | **cloud scheduler** | routine definitions, prompt, and connector bindings | execution for cloud-accessible data and Drive persistence | lifecycle managed in the selected account scheduler |
 
 Private routine identities and output paths belong only in the vault registry.
@@ -120,7 +120,7 @@ Every routine prompt MUST declare the following at the top of its instructions, 
 ## Local execution layer
 
 Routines that need local files, Git, or local CLIs run through a self-hosted
-Prefect server plus a fixed headless-Codex adapter. Prefect is the sole local
+Prefect server plus a fixed headless-runtime adapter. Prefect is the sole local
 scheduler and execution-state authority. Atelier keeps only the declarations
 Prefect needs, the runtime permission boundary it cannot infer, and compact
 receipts that attest domain output.
@@ -133,7 +133,7 @@ receipts that attest domain output.
 | Deployment runner | `scripts/routine_prefect.py serve` |
 | Schedules | `Cron` objects with an explicit IANA timezone |
 | Concurrency | one queued run per deployment and one run across the Mac |
-| Model boundary | `scripts/routine_adapter.py`, always headless Codex |
+| Model boundary | `scripts/routine_adapter.py`, headless Codex or Claude |
 | Public routines and model adapters | `routines/registry.toml` |
 | Private declarations | `<paths.private_routines>/registry.toml` |
 | Domain evidence | `$OV/_meta/routine_receipts/<routine>/<cycle>.toml` |

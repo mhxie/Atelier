@@ -92,9 +92,9 @@ Direct CLI invocation always remains valid. The selector exists for interactive
 launches. Unattended local routines intentionally do not use this resolution
 chain. launchd keeps a self-hosted Prefect server and deployment runner alive;
 Prefect owns schedules, run state, history, concurrency, and eligible retry
-timing. `scripts/routine_adapter.py` owns the fixed headless-Codex arguments,
-sanitized environment, profile boundary, prompt, and verified domain receipt.
-Scheduled model work has no runtime fallback.
+timing. `scripts/routine_adapter.py` owns each profile's headless runtime (Codex
+by default), sanitized environment, profile boundary, prompt, and verified domain
+receipt. Scheduled model work has no runtime fallback.
 
 Autoevo is the narrow exception to the ordinary vault launch. Its adapter
 selects the pinned `atelier-autoevo-draft` permission profile and equivalent

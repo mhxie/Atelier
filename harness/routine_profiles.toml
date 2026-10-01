@@ -3,8 +3,8 @@ version = 1
 # Public, routine-agnostic capability profiles. Private routine names and
 # output paths stay in the private routine registry and reference these rows.
 #
-# Unattended local model routines always use the fixed Codex adapter. Runtime
-# selection and fallback belong only to interactive launches.
+# Each unattended local profile binds one runtime: Codex unless it declares
+# runtime = "claude". Runtime selection and fallback belong only to interactive launches.
 # Private rss_sources requires web:live; bounded pre-model collection is owned
 # by routine_adapter.py, without broadening the model's shell network access.
 
@@ -81,6 +81,28 @@ permissions = [
 ]
 required_clis = []
 required_plugins = ["gmail@openai-curated-remote"]
+optional_plugins = []
+allowed_adapters = ["archived-prompt"]
+
+# Gmail on the Claude account. Claude connectors belong to the claude.ai account,
+# so required_plugins names them as `claude mcp list` prints them.
+[profiles.local-claude-gmail-synthesis]
+runtime = "claude"
+surface = "local"
+sandbox = "workspace-write"
+atelier_access = "read"
+web_search = "disabled"
+shell_network = "disabled"
+user_config = "required"
+timeout_seconds = 3600
+reasoning_effort = "low"
+permissions = [
+  "atelier:read",
+  "vault:read-write",
+  "gmail:read",
+]
+required_clis = []
+required_plugins = ["claude.ai Gmail"]
 optional_plugins = []
 allowed_adapters = ["archived-prompt"]
 

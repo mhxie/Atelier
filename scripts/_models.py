@@ -58,6 +58,14 @@ def codex_binding(name: str) -> tuple[str, str]:
     return str(entry.get("codex") or ""), str(entry.get("codex_reasoning_effort") or "")
 
 
+def claude_binding(name: str) -> str:
+    """Claude Code model id for a Claude leg, or "" when unbound."""
+    entry = resolve(name)
+    if entry is None:
+        raise ModelError(f"model {name!r} is missing from harness/models.toml")
+    return str(entry.get("claude_code") or "")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) != 2 or args[0] != "codex":

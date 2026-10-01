@@ -81,6 +81,8 @@ points at the canonical sources and adds only what is Codex-native.
   scheduler before loading the Prefect deployment service. Runtime and adapter
   ownership is documented in `protocols/runtime-adapters.md`; ordinary artifact
   evidence and shared receipt validation live in `protocols/remote-routines.md`.
+  Connector discovery before reporting missing inputs follows
+  `routines/_adapters/archived-prompt/PROCEDURE.md`.
   Autoevo drafts only in its isolated workspace; the trusted parent owns
   publication and its single structured result (`protocols/autoevo.md`).
 - Private routine mappings, tools, routines, digest declarations, and skills

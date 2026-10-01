@@ -650,42 +650,48 @@ class AdapterTests(unittest.TestCase):
         payload["model"] = "demo_identity"
         self.assertNotIn("vendor/demo-1", json.dumps(payload))
 
-    def test_readwise_cache_is_warmed_before_sandbox_entry(self) -> None:
+    def test_tool_caches_and_claude_credentials_refresh_before_sandbox_entry(self) -> None:
+        # CodexBar cannot refresh Claude OAuth, so quota:read refreshes it unsandboxed.
         fixture = Fixture()
         self.addCleanup(fixture.close)
         payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
         spec = adapter.ModelSpec.from_payload(payload)
-        spec.profile_values["permissions"].append("readwise:read")
-        (fixture.bin / "readwise").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        (fixture.bin / "readwise").chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        spec.profile_values["permissions"] += ["readwise:read", "quota:read"]
+        for tool in ("readwise", "claude"):
+            (fixture.bin / tool).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (fixture.bin / tool).chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
-        completed = subprocess.CompletedProcess(["readwise"], 0, "")
+        completed = subprocess.CompletedProcess(["tool"], 0, "")
         with mock.patch.object(adapter, "execute_process", return_value=completed) as execute:
-            adapter.warm_readwise_cache(spec, env=fixture.env, root=fixture.root)
+            adapter.warm_before_sandbox(spec, env=fixture.env, root=fixture.root)
 
-        execute.assert_called_once_with(
-            ["readwise", "--refresh", "--version"],
-            env=fixture.env,
-            cwd=fixture.root,
-            seconds=30,
-            input_text="",
-        )
+        kwargs = dict(env=fixture.env, cwd=fixture.root, seconds=30, input_text="")
+        self.assertEqual(execute.call_args_list, [
+            mock.call(["readwise", "--refresh", "--version"], **kwargs),
+            mock.call(["claude", "auth", "status", "--json"], **kwargs),
+        ])
 
-    def test_readwise_cache_refresh_failure_is_nonfatal(self) -> None:
+        spec.profile_values["permissions"] = ["quota:read-extra"]
+        with mock.patch.object(adapter, "execute_process") as execute:
+            adapter.warm_before_sandbox(spec, env=fixture.env, root=fixture.root)
+        execute.assert_not_called()
+
+    def test_pre_sandbox_refresh_failure_is_nonfatal(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
         payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
         spec = adapter.ModelSpec.from_payload(payload)
-        spec.profile_values["permissions"].append("readwise:read")
-        (fixture.bin / "readwise").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        (fixture.bin / "readwise").chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        spec.profile_values["permissions"].append("quota:read")
+        (fixture.bin / "claude").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (fixture.bin / "claude").chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
-        completed = subprocess.CompletedProcess(["readwise"], 1, "")
+        completed = subprocess.CompletedProcess(["claude"], 1, "PRIVATE_TEST_MARKER")
         output = io.StringIO()
         with mock.patch.object(adapter, "execute_process", return_value=completed), redirect_stdout(output):
-            adapter.warm_readwise_cache(spec, env=fixture.env, root=fixture.root)
+            adapter.warm_before_sandbox(spec, env=fixture.env, root=fixture.root)
 
-        self.assertIn("warning: readwise tool cache refresh failed", output.getvalue())
+        self.assertIn("warning: claude refresh failed before sandbox entry", output.getvalue())
+        self.assertNotIn("PRIVATE_TEST_MARKER", output.getvalue())
 
     def test_private_process_uses_the_explicit_vault_environment(self) -> None:
         fixture = Fixture()
@@ -888,6 +894,102 @@ retry_safe = false
         with mock.patch.object(status, "recent_runs", return_value=[]) as recent, redirect_stdout(io.StringIO()):
             self.assertEqual(status.main(["--limit", str(status.MAX_LIMIT), "--json"]), 0)
         self.assertEqual(recent.call_args.kwargs["limit"], status.MAX_LIMIT)
+
+
+CLAUDE_FAKE = """#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+if args[:2] == ['mcp', 'list']:
+    print('Checking MCP server health...')
+    print('claude.ai Gmail: https://gmail.invalid/mcp - ✔ Connected')
+    sys.exit(0)
+prompt = sys.stdin.read()
+call = {'args': args, 'prompt': prompt, 'runtime': os.environ.get('ATELIER_ACTIVE_RUNTIME')}
+Path(os.environ['TMPDIR'], 'claude-call.json').write_text(json.dumps(call))
+output = Path(os.environ['OV']) / 'outputs' / (os.environ['ATELIER_ROUTINE_CYCLE'] + '.md')
+output.parent.mkdir(parents=True, exist_ok=True)
+output.write_text('verified artifact\\n', encoding='utf-8')
+print('warning: unrelated stderr noise', file=sys.stderr)
+envelope = {'routine': 'sample', 'outcome': 'delivered', 'output_file': str(output), 'summary': 'ok', 'skipped_inputs': []}
+print(json.dumps({'type': 'result', 'is_error': False, 'structured_output': envelope}))
+"""
+
+
+class ClaudeRuntimeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.fixture = Fixture()
+        self.addCleanup(self.fixture.close)
+        self.profiles = self.fixture.root / "harness/routine_profiles.toml"
+        self.profiles.write_text(
+            self.profiles.read_text(encoding="utf-8")
+            .replace('surface = "local"', 'runtime = "claude"\nsurface = "local"', 1)
+            .replace('user_config = "ignore"', 'user_config = "required"')
+            .replace('"vault:read-write"]', '"vault:read-write", "gmail:read"]')
+            .replace("required_plugins = []", 'required_plugins = ["claude.ai Gmail"]'),
+            encoding="utf-8",
+        )
+        self.claude = self.fixture.bin / "claude"
+        self.claude.write_text(CLAUDE_FAKE, encoding="utf-8")
+        self.claude.chmod(0o755)
+
+    def prepare(self) -> dict[str, object]:
+        return adapter.prepare_model("sample", root=self.fixture.root, environ=self.fixture.env)
+
+    def test_argv_grants_only_mapped_read_tools_and_ignores_user_settings(self) -> None:
+        (self.fixture.root / "harness/routine_result.schema.json").write_text(
+            json.dumps({"$schema": "https://json-schema.org/draft/2020-12/schema", "type": "object"}), encoding="utf-8")
+        spec = adapter.resolve_model("sample", root=self.fixture.root, environ=self.fixture.env)
+        argv = adapter.claude_argv(spec, root=self.fixture.root, vault=self.fixture.vault)
+        self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]), {"type": "object"})
+        rules = json.loads(argv[argv.index("--settings") + 1])["permissions"]
+        self.assertIn(f"Edit(/{self.fixture.vault}/**)", rules["allow"])
+        gmail = sorted(rule.rsplit("__", 1)[1] for rule in rules["allow"] if "Gmail" in rule)
+        self.assertEqual(gmail, ["get_message", "get_thread", "list_labels", "search_threads"])
+        self.assertIn("Bash", rules["deny"])
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], "dontAsk")
+        self.assertEqual(argv[argv.index("--setting-sources") + 1], "project")
+
+    def test_claude_profile_must_stay_offline_and_mapped(self) -> None:
+        text = self.profiles.read_text(encoding="utf-8")
+        for old, new in (
+            ('web_search = "disabled"', 'web_search = "live"'),
+            ('"gmail:read"]', '"gmail:read", "web:live"]'),
+            ('runtime = "claude"', 'runtime = "other"'),
+        ):
+            with self.subTest(new=new):
+                self.profiles.write_text(text.replace(old, new, 1), encoding="utf-8")
+                with self.assertRaises(adapter.ConfigurationError):
+                    self.prepare()
+
+    def test_preflight_requires_connected_claude_connector(self) -> None:
+        self.claude.write_text(CLAUDE_FAKE.replace("✔ Connected", "✗ Failed to connect"), encoding="utf-8")
+        with self.assertRaisesRegex(adapter.ConfigurationError, "missing required Claude connectors: claude.ai Gmail"):
+            self.prepare()
+        self.claude.write_text(CLAUDE_FAKE, encoding="utf-8")
+        self.assertEqual(self.prepare()["profile"], "fixture")
+
+    def test_structured_output_becomes_a_verified_claude_receipt(self) -> None:
+        receipt = self.fixture.execute(self.prepare(), flow_run_id="flow-claude")
+        self.assertEqual((receipt["runtime"], receipt["verification"]), ("claude", "passed"))
+        call = json.loads((Path(self.fixture.temporary.name) / "claude-call.json").read_text(encoding="utf-8"))
+        self.assertEqual(call["runtime"], "claude")
+        self.assertIn("Routine identity: `sample`", call["prompt"])
+        self.assertNotIn("Codex adaptation table", call["prompt"])
+        self.assertNotIn(call["prompt"], call["args"])
+
+    def test_error_result_is_not_a_delivery(self) -> None:
+        self.claude.write_text(CLAUDE_FAKE.replace("'is_error': False", "'is_error': True"), encoding="utf-8")
+        with self.assertRaisesRegex(adapter.ExecutionError, "no valid result envelope"):
+            self.fixture.execute(self.prepare(), flow_run_id="flow-claude-error")
+
+    def test_failed_run_reports_its_screened_output(self) -> None:
+        self.claude.write_text(
+            CLAUDE_FAKE.replace("prompt = sys.stdin.read()", "print('upstream API error'); sys.exit(3)"),
+            encoding="utf-8")
+        with self.assertRaisesRegex(adapter.ExecutionError, "claude exited 3: .*upstream API error") as caught:
+            self.fixture.execute(self.prepare(), flow_run_id="flow-claude-failed")
+        self.assertNotIn("observation coverage", str(caught.exception))
 
 
 class ShutdownHandoffTests(unittest.TestCase):

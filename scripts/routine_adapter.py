@@ -3,7 +3,7 @@
 
 Prefect owns scheduling, run identity, concurrency, retries, state, history,
 and logs.  This module owns only what the orchestrator cannot infer: the
-private routine declaration, the fixed headless-Codex sandbox, and a compact
+private routine declaration, each profile's fixed headless runtime boundary, and a compact
 receipt proving that the declared domain artifact exists.
 """
 
@@ -49,6 +49,15 @@ WEB_MODES = {"disabled", "live"}
 NETWORK_MODES = {"disabled", "enabled", "unrestricted"}
 USER_CONFIG_MODES = {"ignore", "required"}
 REASONING_EFFORTS = {"low", "medium", "high", "xhigh"}
+RUNTIMES = {"codex", "claude"}
+# Claude permission rules per routine permission; Claude profiles may declare
+# only these. Gmail send, reply, forward, trash, and draft tools are never granted.
+CLAUDE_GRANTS = {
+    "atelier:read": ("Read", "Glob", "Grep"),
+    "vault:read-write": ("Read", "Glob", "Grep", "Edit(/{vault}/**)"),
+    "gmail:read": tuple(f"mcp__claude_ai_Gmail__{tool}" for tool in ("search_threads", "get_thread", "get_message", "list_labels")),
+}
+CLAUDE_DENY = ("Bash", "WebSearch", "WebFetch")
 DEFAULT_PREFECT_API_URL = "http://127.0.0.1:4200/api"
 
 SECRET_PATTERNS = (
@@ -319,8 +328,20 @@ def _validate_profile(name: str, profile: object) -> dict[str, Any]:
     if profile["atelier_access"] == "read-write" and "atelier:read-write" not in profile["permissions"]:
         raise ConfigurationError(f"{name}: read-write Atelier access is not declared")
     if "fallback_runtime" in profile or "primary_runtime" in profile:
-        raise ConfigurationError(f"{name}: runtime selection is unsupported; scheduled model runs use Codex")
+        raise ConfigurationError(f"{name}: runtime selection is unsupported; a profile binds one runtime")
+    if profile.get("runtime", "codex") not in RUNTIMES:
+        raise ConfigurationError(f"{name}: profile has invalid runtime")
+    if profile.get("runtime") == "claude" and (
+        (profile["sandbox"], profile["atelier_access"], profile["web_search"], profile["shell_network"])
+        != ("workspace-write", "read", "disabled", "disabled")
+        or profile["required_clis"] or profile["optional_plugins"] or not set(profile["permissions"]) <= CLAUDE_GRANTS.keys()
+    ):
+        raise ConfigurationError(f"{name}: Claude profiles are offline, read-only for Atelier, and use mapped permissions")
     return dict(profile)
+
+
+def model_runtime(spec: "ModelSpec") -> str:
+    return spec.profile_values.get("runtime", "codex")
 
 
 def profile_fingerprint(name: str, profile: dict[str, Any]) -> str:
@@ -370,7 +391,7 @@ def _model_spec(row: dict[str, Any], *, root: Path, profiles: dict[str, dict[str
         if not isinstance(model, str) or not SAFE_MODEL.fullmatch(model):
             raise ConfigurationError(f"{schedule.name}: model must be a declared identity name")
         try:
-            _models.codex_binding(model)
+            (_models.claude_binding if profile.get("runtime") == "claude" else _models.codex_binding)(model)
         except _models.ModelError as exc:
             raise ConfigurationError(f"{schedule.name}: {exc}") from exc
     return ModelSpec(
@@ -536,16 +557,21 @@ def validate_archived_prompt(path: Path) -> None:
         raise ConfigurationError("archived prompt contains a literal credential at line(s): " + ", ".join(map(str, findings)))
 
 
-def installed_codex_plugins(*, root: Path, environ: dict[str, str]) -> set[str]:
-    """Return installed, enabled plugins without inheriting unrelated secrets."""
-    clean_env = {key: environ[key] for key in ("HOME", "PATH", "CODEX_HOME") if environ.get(key)}
-    result = execute_process(["codex", "plugin", "list"], env=clean_env, cwd=root, seconds=30)
+def installed_plugins(runtime: str, *, root: Path, environ: dict[str, str]) -> set[str]:
+    """Enabled Codex plugins, or connected Claude connectors as `claude mcp list`
+    names them, without inheriting unrelated secrets."""
+    clean_env = {key: environ[key] for key in ("HOME", "PATH", "CODEX_HOME", "CLAUDE_CONFIG_DIR") if environ.get(key)}
+    argv = ["claude", "mcp", "list"] if runtime == "claude" else ["codex", "plugin", "list"]
+    result = execute_process(argv, env=clean_env, cwd=root, seconds=60)
     if result.returncode:
-        raise ConfigurationError(f"cannot inspect Codex plugins: {screened_log(result.stdout)[:300]}")
+        raise ConfigurationError(f"cannot inspect {runtime} plugins: {screened_log(result.stdout)[:300]}")
     installed: set[str] = set()
     for line in result.stdout.splitlines():
+        name, _, state = line.partition(": ")
         columns = line.split()
-        if len(columns) >= 3 and columns[1:3] == ["installed,", "enabled"]:
+        if runtime == "claude" and state.rstrip().endswith("✔ Connected"):
+            installed.add(name)
+        elif runtime == "codex" and len(columns) >= 3 and columns[1:3] == ["installed,", "enabled"]:
             installed.add(columns[0])
     return installed
 
@@ -567,14 +593,16 @@ def prepare_model(name: str, *, root: Path = ROOT, environ: dict[str, str] | Non
         if not prompt.is_file():
             raise ConfigurationError(f"{name}: archived routine prompt is missing")
         validate_archived_prompt(prompt)
-    missing = [tool for tool in ["codex", *spec.profile_values["required_clis"]] if shutil.which(tool, path=env.get("PATH")) is None]
+    runtime = model_runtime(spec)
+    missing = [tool for tool in [runtime, *spec.profile_values["required_clis"]] if shutil.which(tool, path=env.get("PATH")) is None]
     if missing:
         raise ConfigurationError(f"{name}: required CLI not on PATH: " + ", ".join(sorted(set(missing))))
     required_plugins = set(spec.profile_values["required_plugins"])
     if required_plugins:
-        missing_plugins = required_plugins - installed_codex_plugins(root=root, environ=env)
+        missing_plugins = required_plugins - installed_plugins(runtime, root=root, environ=env)
         if missing_plugins:
-            raise ConfigurationError(f"{name}: missing required Codex plugins: " + ", ".join(sorted(missing_plugins)))
+            label = "Claude connectors" if runtime == "claude" else "Codex plugins"
+            raise ConfigurationError(f"{name}: missing required {label}: " + ", ".join(sorted(missing_plugins)))
     if spec.rss_sources:
         config = _rss_config(spec, vault=vault)
         try:
@@ -628,7 +656,7 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
         "every connector, CLI, web, or filesystem action not listed, even if an optional integration is installed. "
         "This is not a shell-level connector ACL. "
         f"Read `{root}/AGENTS.md` first, then read `{root / source}` completely and execute "
-        "it in this process using the Codex adaptation table. Treat the Atelier repository as read-only unless "
+        f"it in this process{' using the Codex adaptation table' if model_runtime(spec) == 'codex' else ''}. Treat the Atelier repository as read-only unless "
         "atelier_access is read-write. Do not inspect scheduler state or the private routine registry; Prefect owns "
         "scheduling and run state. Load only files required by the adapter and archived prompt after the mandatory "
         "session-start reads. The scheduled invocation authorizes only autonomous effects explicitly allowed by the "
@@ -651,7 +679,7 @@ def runtime_env(spec: ModelSpec, *, root: Path, vault: Path, cycle: str, environ
         "OV": str(vault),
         "TMPDIR": environ.get("TMPDIR") or "/tmp",
         "LANG": environ.get("LANG") or "en_US.UTF-8",
-        "ATELIER_ACTIVE_RUNTIME": "codex",
+        "ATELIER_ACTIVE_RUNTIME": model_runtime(spec),
         "ATELIER_ROOT": str(root),
         "ATELIER_ROUTINE_PROFILE": spec.profile,
         "ATELIER_ROUTINE_CYCLE": cycle,
@@ -660,7 +688,7 @@ def runtime_env(spec: ModelSpec, *, root: Path, vault: Path, cycle: str, environ
         "ATELIER_PYTHON": environ.get("ATELIER_PYTHON") or sys.executable,
         "ZDOTDIR": str(root / "harness/routine-shell"),
     }
-    for key in ("CODEX_HOME", "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "DRY_RUN"):
+    for key in ("CODEX_HOME", "CLAUDE_CONFIG_DIR", "CODEX_CA_CERTIFICATE", "SSL_CERT_FILE", "DRY_RUN"):
         if environ.get(key):
             env[key] = environ[key]
     return env
@@ -724,6 +752,39 @@ def codex_argv(spec: ModelSpec, *, root: Path, vault: Path, cwd: Path, output: P
     if spec.adapter != "autoevo":
         argv += ["--add-dir", str(vault)]
     return argv
+
+
+def claude_argv(spec: ModelSpec, *, root: Path, vault: Path) -> list[str]:
+    """Headless Claude Code bounded by an explicit allowlist. No user or project
+    settings load, so the user's own allow rules and hooks never apply."""
+    profile = spec.profile_values
+    allow = dict.fromkeys(rule.format(vault=vault) for key in profile["permissions"] for rule in CLAUDE_GRANTS[key])
+    settings = {"permissions": {"allow": list(allow), "deny": list(CLAUDE_DENY)}}
+    # Claude's validator rejects the draft 2020-12 $schema URI; the body is portable.
+    schema = json.loads((root / "harness/routine_result.schema.json").read_text(encoding="utf-8"))
+    argv = ["claude", "-p", "--output-format", "json", "--no-session-persistence",
+            "--json-schema", json.dumps({k: v for k, v in schema.items() if k != "$schema"}),
+            "--permission-mode", "dontAsk", "--setting-sources", "project", "--settings", json.dumps(settings),
+            "--effort", profile["reasoning_effort"], "--add-dir", str(vault)]
+    if spec.model:
+        model = _models.claude_binding(spec.model)
+        if not model:
+            raise ConfigurationError(f"{spec.schedule.name}: model {spec.model!r} has no claude_code binding in profile/models.toml")
+        argv += ["--model", model]
+    return argv
+
+
+def write_claude_result(stdout: str, destination: Path) -> None:
+    """Keep only the schema-bound structured output from Claude's final result line."""
+    for line in reversed(stdout.splitlines()):
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict) and value.get("type") == "result":
+            if not value.get("is_error") and isinstance(value.get("structured_output"), dict):
+                destination.write_text(json.dumps(value["structured_output"]), encoding="utf-8")
+            return
 
 
 def execute_process(
@@ -816,25 +877,21 @@ def screened_log(text: str) -> str:
     )
 
 
-def warm_readwise_cache(spec: ModelSpec, *, env: dict[str, str], root: Path) -> None:
-    """Best-effort refresh of Readwise's user cache before sandbox entry."""
-    if not any(permission.startswith("readwise:") for permission in spec.profile_values["permissions"]):
-        return
-    if not shutil.which("readwise", path=env.get("PATH")):
-        return
-    result = execute_process(
-        ["readwise", "--refresh", "--version"],
-        env=env,
-        cwd=root,
-        seconds=30,
-        input_text="",
-    )
-    message = (
-        "readwise tool cache refreshed before sandbox entry"
-        if result.returncode == 0
-        else "warning: readwise tool cache refresh failed"
-    )
-    print(message, flush=True)
+# CodexBar never refreshes an expired Claude OAuth token, and a sandboxed
+# refresh could rotate it without persisting it; Claude's own CLI does it here.
+PRE_SANDBOX_REFRESHES = {
+    "readwise:read": ("readwise", "--refresh", "--version"),
+    "quota:read": ("claude", "auth", "status", "--json"),
+}
+
+
+def warm_before_sandbox(spec: ModelSpec, *, env: dict[str, str], root: Path) -> None:
+    """Best-effort tool cache and credential refreshes; output is discarded."""
+    for permission, argv in PRE_SANDBOX_REFRESHES.items():
+        if permission in spec.profile_values["permissions"] and shutil.which(argv[0], path=env.get("PATH")):
+            result = execute_process(list(argv), env=env, cwd=root, seconds=30, input_text="")
+            ok = result.returncode == 0
+            print(f"{'' if ok else 'warning: '}{argv[0]} refresh {'done' if ok else 'failed'} before sandbox entry", flush=True)
 
 
 def _rss_config(spec: ModelSpec, *, vault: Path) -> dict[str, Any]:
@@ -1053,7 +1110,7 @@ def execute_model(
         cwd = root if spec.profile_values["atelier_access"] == "read-write" else temporary / "cwd"
         cwd.mkdir(exist_ok=True)
         env = runtime_env(spec, root=root, vault=vault, cycle=cycle, environ=env_source)
-        warm_readwise_cache(spec, env=env, root=root)
+        warm_before_sandbox(spec, env=env, root=root)
         if spec.rss_sources:
             inputs = temporary / "inputs.json"
             stage_rss_inputs(spec, root=root, vault=vault, destination=inputs)
@@ -1065,7 +1122,11 @@ def execute_model(
             snapshot_file = temporary / "runtime-snapshot.json"
             snapshot_file.write_text(json.dumps({**snapshot, "cycle_id": cycle}), encoding="utf-8")
             env["ATELIER_RUNTIME_SNAPSHOT"] = str(snapshot_file)
-        argv = codex_argv(spec, root=root, vault=vault, cwd=cwd, output=result_file)
+        runtime = model_runtime(spec)
+        if runtime == "claude":
+            argv = claude_argv(spec, root=root, vault=vault)
+        else:
+            argv = codex_argv(spec, root=root, vault=vault, cwd=cwd, output=result_file)
         prefix = []
         if env_source.get("ATELIER_SKIP_CAFFEINATE") != "1" and shutil.which("caffeinate", path=env_source.get("PATH")):
             prefix = ["caffeinate", "-i", "-s"]
@@ -1078,21 +1139,24 @@ def execute_model(
             "prefect_flow_run_id": flow_run_id,
             "profile": spec.profile,
             "profile_fingerprint": spec.profile_values["profile_fingerprint"],
-            "runtime": "codex",
+            "runtime": runtime,
             "started_at": started_at,
             "result_summary": "model attempt started; domain outcome is not yet verified",
             "verification": "pending",
         }
         write_receipt(path, pending_receipt)
-        result = execute_observed_model(
-            [*prefix, *argv, prompt],
-            flow_run_id=flow_run_id,
-            env=env,
-            cwd=cwd,
-            seconds=spec.profile_values["timeout_seconds"],
-        )
+        seconds = spec.profile_values["timeout_seconds"]
+        if runtime == "claude":
+            # The prompt goes on stdin so no variadic option can consume it.
+            result = execute_process([*prefix, *argv], env=env, cwd=cwd, seconds=seconds, input_text=prompt)
+            if not result.returncode:
+                write_claude_result(result.stdout, result_file)
+        else:
+            result = execute_observed_model([*prefix, *argv, prompt], flow_run_id=flow_run_id, env=env, cwd=cwd, seconds=seconds)
         if result.returncode:
-            raise ExecutionError(f"Codex exited {result.returncode}; inspect Prefect state and observation coverage")
+            detail = (f": {screened_log(result.stdout)[-300:]}" if runtime == "claude"
+                      else "; inspect Prefect state and observation coverage")
+            raise ExecutionError(f"{runtime} exited {result.returncode}{detail}")
         outcome = _model_result(result_file, spec, vault=vault, started_at=started_at)
     receipt = {
         "contract_version": receipts.VERSION,
@@ -1101,7 +1165,7 @@ def execute_model(
         "prefect_flow_run_id": flow_run_id,
         "profile": spec.profile,
         "profile_fingerprint": spec.profile_values["profile_fingerprint"],
-        "runtime": "codex",
+        "runtime": runtime,
         "started_at": started_at,
         "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "duration_seconds": int(time.time() - started_epoch),
