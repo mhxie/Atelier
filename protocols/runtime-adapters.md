@@ -165,18 +165,15 @@ actual provider/model bindings (model id, endpoint URL, env var, request
 extras) live in `profile/models.toml` (gitignored). Loaders merge schema +
 bindings at runtime.
 
-Voice dispatch model: the single source of truth is
-`protocols/agent-handoff.md`. The agent-to-voices mapping
-lives in `harness/agents.toml` as a `voices` keyed inline table per agent
-(`{native = "...", direct = "..."}` or single-leg variants). `native` means
-the selected runtime's project-agent surface, not Claude specifically. Claude
-resolves its concrete model from agent frontmatter; Codex agents inherit the
-selected Codex model unless their project adapter pins a model. The shared
-`reasoning_tier` maps to Codex `model_reasoning_effort` at the adapter edge:
-`light → low`, `balanced → medium`, `deep → high`, and `xdeep → xhigh`.
-Sonnet execution and retrieval roles use `xdeep`; they never silently inherit
-a lower Codex effort.
-External provider bindings remain in gitignored `profile/models.toml`.
+Voice dispatch: `protocols/agent-handoff.md` owns it, and `harness/agents.toml`
+holds each agent's `voices` table. `native` means the selected runtime's
+project-agent surface, not Claude specifically. Claude resolves its concrete
+model from agent frontmatter; Codex agents inherit the selected Codex model
+unless their project adapter pins a model. The shared `reasoning_tier` maps to
+Codex `model_reasoning_effort` at the adapter edge: `light → low`, `balanced →
+medium`, `deep → high`, and `xdeep → xhigh`. Sonnet execution and retrieval
+roles use `xdeep`; they never silently inherit a lower Codex effort. External
+provider bindings remain in gitignored `profile/models.toml`.
 
 ## Capability Profiles
 
