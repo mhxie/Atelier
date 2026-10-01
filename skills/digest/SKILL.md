@@ -1,6 +1,6 @@
 ---
 name: digest
-description: "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
+description: "Daily and weekly digest: JSON collection, capped overdue TODO reminders, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
 ---
 # Digest
 
@@ -313,6 +313,11 @@ Content rules:
   carries seven days and earns proportionally more.
 - **Language.** Match the user's. Chinese topics and Chinese-language sources get
   Chinese. No em dashes.
+
+Overdue TODOs appear in at most three daily editions per source, text, and due
+date. Successful artifact writes record dates in the existing digest state;
+previews and weekly editions do not count. Same-day rebuilds retain the same
+selection. Exhausted TODOs remain open in their source and `todos.py list`.
 
 ### 5. Write the artifact
 

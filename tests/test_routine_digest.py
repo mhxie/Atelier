@@ -1454,6 +1454,66 @@ class MjmlBridgeTests(unittest.TestCase):
 
 
 class WriteTests(VaultCase):
+    def test_overdue_todos_stop_after_three_daily_artifacts(self):
+        import daily_brief as db
+        import todos
+
+        todo = todos.Todo("Example due:2099-01-01", str(self.vault / "gtd/tasks.md"), 1,
+                          "open", due="2099-01-01")
+        state = self.vault / rc.DIGEST_UPDATES_STATE
+        with patch.object(todos, "collect_open_todos", return_value=[todo]):
+            for number in range(1, 5):
+                today = date(2099, 1, 20 + number)
+                groups = db.load_todos(self.vault, today, [])
+                if number == 4:
+                    self.assertEqual(groups, [])
+                    break
+                self.assertEqual(len(groups[0].items), 1)
+                item = vars(groups[0].items[0])
+                brief = self._brief(item, kind="todo_now")
+                brief["date"] = today.isoformat()
+                manifest = {"mode": "daily", "window": {"until": today.isoformat()}}
+                out = self.vault / f"day-{number}.html"
+                before = state.read_bytes() if state.exists() else None
+                rd.write(self.vault, "digest", manifest, out=out, brief=brief, dry_run=True)
+                self.assertEqual(state.read_bytes() if state.exists() else None, before)
+                with patch.object(rd, "atomic_write", side_effect=OSError("disk full")):
+                    with self.assertRaises(OSError):
+                        rd.write(self.vault, "digest", manifest, out=out, brief=brief)
+                self.assertEqual(state.read_bytes() if state.exists() else None, before)
+                for _ in range(2):
+                    rd.write(self.vault, "digest", manifest, out=out, brief=brief)
+                shown = rc.load_todo_reminders(self.vault)[item["reminder_id"]]
+                self.assertEqual(len(shown), number)
+                todo.line += 1
+                self.assertEqual(db.load_todos(self.vault, today, [])[0].items[0].reminder_id,
+                                 item["reminder_id"])
+            # A previously collected brief cannot bypass the limit on a later day.
+            brief["date"] = manifest["window"]["until"] = "2099-01-24"
+            with self.assertRaisesRegex(SystemExit, "limit reached"):
+                rd.write(self.vault, "digest", manifest, out=self.vault / "stale.html", brief=brief)
+            self.assertFalse((self.vault / "stale.html").exists())
+            rd.write(self.vault, "weekly", self.manifest, out=self.vault / "weekly.html", brief=brief)
+            self.assertEqual(len(rc.load_todo_reminders(self.vault)[item["reminder_id"]]), 3)
+            todo.due, todo.text = "2099-01-23", "Example due:2099-01-23"
+            self.assertEqual(len(db.load_todos(self.vault, date(2099, 1, 24), [])[0].items), 1)
+            self.assertEqual(todo.state, "open")
+
+    def test_unreadable_reminder_state_warns_instead_of_blanking_the_brief(self):
+        import daily_brief as db
+        import todos
+
+        todo = todos.Todo("Example due:2099-01-01", str(self.vault / "gtd/tasks.md"), 1,
+                          "open", due="2099-01-01")
+        state = self.vault / rc.DIGEST_UPDATES_STATE
+        state.parent.mkdir(parents=True, exist_ok=True)
+        state.write_text('{"schema": 99}', encoding="utf-8")
+        warnings: list[str] = []
+        with patch.object(todos, "collect_open_todos", return_value=[todo]):
+            groups = db.load_todos(self.vault, date(2099, 1, 21), warnings)
+        self.assertEqual(len(groups[0].items), 1)
+        self.assertTrue(any("reminder state ignored" in w for w in warnings), warnings)
+
     def test_explicit_and_inferred_routines_land_in_the_declared_directory(self):
         written = self.vault / "inbox" / "digest" / "2099-01-30-weekly-digest.html"
         for name, routine, html in (

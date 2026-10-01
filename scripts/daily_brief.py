@@ -10,6 +10,7 @@ sources reported as warnings instead of blanking the brief.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -24,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import deadlines as dl  # noqa: E402
 from _paths import PathsError, tier, vault_root  # noqa: E402
+
+from routine_collect import TODO_REMINDER_LIMIT, load_todo_reminders  # noqa: E402
 
 BRIEF_SCHEMA = 1
 
@@ -78,6 +81,7 @@ class Item:
     source: str | None = None
     label: str | None = None
     hint: str | None = None
+    reminder_id: str | None = None
     # Set by reconciliation: a note newer than the index mentions this row's
     # due date, so the row may already be handled. `flag_source` names it.
     flag: str | None = None
@@ -441,6 +445,18 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         warnings.append(f"todo scan failed: {exc!r}")
         return []
 
+    try:
+        reminders = load_todo_reminders(_ov)
+    except SystemExit as exc:  # the digest write still refuses this state
+        warnings.append(f"todo reminder state ignored: {exc}")
+        reminders = {}
+
+    def reminder_id(todo: Any) -> str:
+        source = Path(todo.source)
+        identity = [str(source.relative_to(_ov) if source.is_relative_to(_ov) else source),
+                    " ".join(todo.text.split()), todo.due]
+        return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
+
     dated: list[tuple[int, Any]] = []
     for todo in open_todos:
         if not todo.due:
@@ -450,6 +466,9 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         except ValueError:
             continue
         days_left = (due - today).days
+        shown = reminders.get(reminder_id(todo), [])
+        if days_left < 0 and len(shown) >= TODO_REMINDER_LIMIT and today.isoformat() not in shown:
+            continue
         if days_left <= TODO_HORIZON_DAYS:
             dated.append((days_left, todo))
     if not dated:
@@ -461,6 +480,7 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         return Item(
             text=_truncate(f"{_days_phrase(days)} · {clean_todo_text(todo.text)}"),
             due=todo.due,
+            reminder_id=reminder_id(todo),
             days_left=days,
             source=f"{todo.short_source()}:{todo.line}",
             label=_truncate(clean_todo_text(todo.text)),
@@ -969,6 +989,7 @@ def build(
                             ("source", i.source),
                             ("label", i.label),
                             ("hint", i.hint),
+                            ("reminder_id", i.reminder_id),
                             ("flag", i.flag),
                             ("flag_source", i.flag_source),
                         )

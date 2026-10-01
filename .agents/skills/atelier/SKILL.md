@@ -55,7 +55,7 @@ points at the canonical sources and adds only what is Codex-native.
   That procedure and `protocols/session-log.md` own the branches and compact logs.
 - `$digest` uses `collect --json` then `write` with preinstalled markdown-it-py
   and local MJML; optional quota comes from CodexBar OAuth JSON. The shared
-  command owns setup and offline boundaries; never sync during a run.
+  command owns setup, offline boundaries, and the three-edition overdue TODO limit; never sync during a run.
 - Reading feedback connects Curate, Read, Introspect, and explicit policy evaluation through
   `protocols/decision-ledger.md` → Reading feedback loop. Use its typed
   `decisions.py` helpers for compact event batches and stored policy IDs;

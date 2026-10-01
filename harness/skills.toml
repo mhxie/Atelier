@@ -86,7 +86,7 @@ description = "Goal-aware content curation and inbox triage with attributable re
 source = "skills/digest/SKILL.md"
 category = "knowledge"
 status = "canonical"
-description = "Daily and weekly digest: JSON collection, action surface, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
+description = "Daily and weekly digest: JSON collection, capped overdue TODO reminders, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
 
 [skills.promote]
 source = "skills/promote/SKILL.md"

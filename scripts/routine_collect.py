@@ -44,6 +44,7 @@ CONTEXT_SCHEMA = 1  # must match daily_context.CONTEXT_SCHEMA
 DIGEST_UPDATES_CONFIG = "_meta/digest_updates.toml"
 
 DIGEST_UPDATES_STATE = "_meta/digest_update_state.json"
+TODO_REMINDER_LIMIT = 3
 # Daily selection reaches back this many days for files no earlier daily
 # digest delivered. A routine that finishes after the morning run writes a
 # file dated today, and a strict one-day window tomorrow would never see it:
@@ -205,6 +206,17 @@ def _load_state_payload(ov: Path) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(payload, dict) or payload.get("schema") != 1:
         return {}, ["digest update state has unsupported schema"]
     return payload, []
+
+def load_todo_reminders(ov: Path) -> dict[str, list[str]]:
+    payload, warnings = _load_state_payload(ov)
+    reminders = payload.get("todo_reminders", {})
+    if warnings or not isinstance(reminders, dict) or any(
+        not isinstance(days, list) or any(not isinstance(day, str) for day in days)
+        for days in reminders.values()
+    ):
+        raise SystemExit("; ".join(warnings) or "invalid TODO reminder state")
+    return reminders
+
 
 def load_update_state(ov: Path) -> tuple[dict[str, str], list[str]]:
     payload, warnings = _load_state_payload(ov)
@@ -448,12 +460,14 @@ def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any] |
             delivered = {k: v for k, v in delivered.items() if v[:10] >= floor.isoformat()}
         except ValueError:
             pass
-    if not current and not delivered:
+    reminders = load_todo_reminders(ov)
+    if not current and not delivered and not reminders:
         return None
     return {
         "schema": 1,
         "daily": dict(sorted(current.items())),
         "delivered": dict(sorted(delivered.items())),
+        "todo_reminders": reminders,
     }
 
 def effective_date(now: datetime | None = None) -> date:

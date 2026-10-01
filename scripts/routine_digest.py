@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import PathsError, atomic_write, fmt, vault_root  # noqa: E402
 from routine_collect import (  # noqa: E402
     DIGEST_UPDATES_STATE,
+    TODO_REMINDER_LIMIT,
+    load_todo_reminders,
     prepare_update_state,
     collect,
     load_overview,
@@ -74,6 +76,7 @@ def write(
     routine_name: str = "",
     out: Path | None = None,
     dry_run: bool = False,
+    brief: dict[str, Any] | None = None,
 ) -> int:
     """Write the rendered document into $OV as the run's canonical artifact."""
     if out is None:
@@ -101,6 +104,21 @@ def write(
         if exists and out.read_bytes() != html_text.encode("utf-8"):
             raise SystemExit("existing digest differs; keep it or choose a new --out path")
         payload = prepare_update_state(ov, manifest)
+        if manifest.get("mode") == "daily" and brief:
+            day = str(manifest["window"]["until"])[:10]
+            if brief.get("date") != day:
+                raise SystemExit("brief date differs from digest; rebuild the brief")
+            reminders = load_todo_reminders(ov)
+            for group in brief.get("groups", []):
+                for item in group.get("items", []) if group.get("kind") == "todo_now" else []:
+                    if item.get("reminder_id") and item.get("days_left", 0) < 0:
+                        shown = reminders.setdefault(item["reminder_id"], [])
+                        if day not in shown:
+                            if len(shown) >= TODO_REMINDER_LIMIT:
+                                raise SystemExit("TODO reminder limit reached; rebuild the brief")
+                            shown.append(day)
+            payload = payload or {"schema": 1, "daily": {}, "delivered": {}}
+            payload["todo_reminders"] = reminders
         if not exists:
             atomic_write(out, html_text)
         if payload is not None:
@@ -287,6 +305,7 @@ def main(argv: list[str] | None = None) -> int:
             routine_name=args.routine or "",
             out=Path(args.out) if args.out else None,
             dry_run=args.dry_run,
+            brief=brief,
         )
 
     if args.cmd == "mail":
