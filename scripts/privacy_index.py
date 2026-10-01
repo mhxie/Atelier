@@ -266,7 +266,8 @@ def is_direct_child_of_tier(rel: str, public: set[str]) -> bool:
 def index_dirs(idx: Index, *, public: set[str], allowlist: set[str]) -> None:
     tiers = canonical_tiers()
     system_roots = {tiers[k].strip("/") for k in SYSTEM_TIERS if k in tiers}
-    for root, dirnames, _files in os.walk(idx.vault):
+    # Follow the raw/ and secure/ symlinks into the raw store; cache is pruned below.
+    for root, dirnames, _files in os.walk(idx.vault, followlinks=True):
         rel_root = _rel(idx.vault, Path(root)) if Path(root) != idx.vault else ""
         depth = 0 if not rel_root else rel_root.count("/") + 1
         dirnames[:] = [
@@ -413,7 +414,7 @@ def index_frontmatter(idx: Index, *, public: set[str], allowlist: set[str]) -> N
         if key in canonical_tiers()
     }
     for sub in (name for name in pc._discover_private_dirs(idx.vault) if name not in system_roots):
-        for f in (idx.vault / sub).rglob("*.md"):
+        for f in pc.md_files(idx.vault / sub):
             try:
                 head = f.read_text(encoding="utf-8", errors="ignore")[:4096]
             except OSError:

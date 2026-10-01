@@ -68,6 +68,20 @@ class IndexBuildTest(unittest.TestCase):
             self.assertNotIn("research/papers", data["paths"], "a public tier segment is never a path")
             self.assertNotIn("quantum-widgets/raw", " ".join(data["paths"]).replace("research/", ""), "raw is not name-like")
 
+    def test_names_behind_raw_and_secure_symlinks_stay_indexed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = _vault(tmp)
+            store = Path(tmp) / "store"
+            (store / "wip" / "secure").mkdir(parents=True)
+            (store / "travel" / "raw" / "okonkwo-ledger").mkdir(parents=True)
+            (store / "wip" / "secure" / "Hidden Orchard Notes.md").write_text(
+                "---\npeople: [Grace Kelly]\n---\nAsk [[Rosalind Franklin]].\n", encoding="utf-8")
+            (vault / "wip" / "secure").symlink_to(store / "wip" / "secure")
+            (vault / "travel" / "raw").symlink_to(store / "travel" / "raw")
+            terms = pi.build(vault, allowlist=set())["terms"]
+            for name in ("Hidden Orchard Notes", "Grace Kelly", "Rosalind Franklin", "okonkwo-ledger"):
+                self.assertIn(name, terms)
+
     def test_explain_reports_provenance_or_the_reason_for_absence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             data = pi.build(_vault(tmp), allowlist=set())
