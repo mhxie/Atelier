@@ -460,8 +460,12 @@ def query(args: argparse.Namespace) -> list[dict]:
         if isinstance(score, bool) or not isinstance(score, (int, float)) or not math.isfinite(score):
             raise SearchError("QMD returned an invalid score")
         seen.add(path)
-        result.append({**row, "scope": actual_scope, "source": "local", "backend": "qmd", "score_kind": score_kind,
-                       "representation": "raw_text" if actual_scope == "raw" else "authored"})
+        hit = {**row, "scope": actual_scope, "source": "local", "backend": "qmd", "score_kind": score_kind,
+               "representation": "raw_text" if actual_scope == "raw" else "authored"}
+        if row.get("scope") == SECURE:  # local models read secure notes; agents get the path only
+            hit = {key: value for key, value in hit.items() if key not in ("title", "line", "snippet")}
+            hit["representation"] = "path_only"
+        result.append(hit)
         if len(result) == args.top:
             break
     return result

@@ -114,9 +114,15 @@ def load_private_terms() -> set[str]:
     return out
 
 
-def md_files(root: Path):
-    """Markdown under root, following raw/ and secure/ links into the raw store."""
-    for current, _dirs, files in os.walk(root, followlinks=True):
+def md_files(root: Path, *, contents: bool = False):
+    """Markdown under root, following raw/ and secure/ links into the raw store.
+
+    Callers that read the files pass contents=True: secure/ notes lend only
+    their filenames.
+    """
+    for current, dirs, files in os.walk(root, followlinks=True):
+        if contents:
+            dirs[:] = [d for d in dirs if d != "secure"]
         yield from (Path(current) / name for name in files if name.endswith(".md"))
 
 
@@ -184,7 +190,7 @@ def collect_wikilinks(root: Path, allowlist: set[str], dirs: list[str]) -> set[s
         p = root / sub
         if not p.is_dir():
             continue
-        for f in md_files(p):
+        for f in md_files(p, contents=True):
             try:
                 text = f.read_text(encoding="utf-8", errors="ignore")
             except OSError:

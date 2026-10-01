@@ -494,6 +494,11 @@ class QmdAdapterTest(unittest.TestCase):
         self.fake_index()
         self.assertEqual(search(), (["active", semantic.SECURE],
                                     [("personal/secure/ledger.md", "active"), ("wiki/rate-limits.md", "active")]))
+        with patch.object(semantic, "bridge", return_value=rows):
+            hits = {item["path"]: item for item in json.loads(self.cli("query", "notes", "--mode", "lexical")[1])}
+        self.assertEqual(hits["personal/secure/ledger.md"].keys() & {"title", "line", "snippet"}, set())
+        self.assertEqual(hits["personal/secure/ledger.md"]["representation"], "path_only")
+        self.assertEqual(hits["wiki/rate-limits.md"]["snippet"], "bounded")
         self.assertEqual(search("--scope", "raw"), (["raw"], [("raw/import/evidence.md", "raw")]))
         self.assertEqual(search("--scope", "all")[0], [*semantic.SCOPES, semantic.SECURE])
         self.assertEqual(search("--path", "personal/secure")[1], [("personal/secure/ledger.md", "active")])
@@ -655,7 +660,7 @@ class QmdAdapterTest(unittest.TestCase):
             code, output, errors = self.cli("query", text, "--mode", "lexical", *flags)
             self.assertEqual(code, 0, errors)
             return [(row["path"], row["scope"], row["representation"]) for row in json.loads(output)]
-        self.assertEqual(find("securesentinel"), [("personal/secure/ledger.md", "active", "authored")])
+        self.assertEqual(find("securesentinel"), [("personal/secure/ledger.md", "active", "path_only")])
         self.assertEqual(find("rawsentinel"), [])
         self.assertEqual(find("rawsentinel", "--scope", "raw"), [("raw/import/evidence.md", "raw", "raw_text")])
         for sentinel in ("forbiddensentinel", "parkedsentinel"):

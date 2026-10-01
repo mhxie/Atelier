@@ -414,7 +414,7 @@ def index_frontmatter(idx: Index, *, public: set[str], allowlist: set[str]) -> N
         if key in canonical_tiers()
     }
     for sub in (name for name in pc._discover_private_dirs(idx.vault) if name not in system_roots):
-        for f in pc.md_files(idx.vault / sub):
+        for f in pc.md_files(idx.vault / sub, contents=True):
             try:
                 head = f.read_text(encoding="utf-8", errors="ignore")[:4096]
             except OSError:
