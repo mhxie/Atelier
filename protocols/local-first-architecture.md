@@ -74,8 +74,10 @@ than trusting whichever copy it read first. Staleness markers such as
 `$OV` is typically a Git work tree that a sync app such as Reflect commits and
 pushes. Folders named `raw/` or `secure/`, and root `cache`, may instead be
 links into a raw store (`raw_store` in `harness/paths.local.toml`), an
-unsynced-by-Git mirror of vault paths; Git and Reflect skip them and search
-indexes them there. `scripts/zk_audit.py` checks this layout; `--fix-links`
+unsynced-by-Git mirror of vault paths; Git skips them and search indexes them
+there. Reflect skips `raw/`; when its `localOnlyFolders` setting names
+`secure`, it shows those notes read-only on this Mac and never syncs or
+shares them. `scripts/zk_audit.py` checks this layout; `--fix-links`
 repairs missing links. `.gitignore` decides what syncs and what Reflect lists;
 `.reflectignore` only hides folders, such as `<paths.sessions>/`, from Reflect. The harness never commits or
 pushes the vault; `protocols/repo-conventions.md` owns layout.
