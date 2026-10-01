@@ -2,6 +2,10 @@
 
 `$OV` uses plain-Markdown conventions for GitHub rendering and navigation, whether it is a private Git repo or a Drive/iCloud-synced folder. Nothing requires a specific editor.
 
+## Note titles
+
+Reflect titles are flat, so each must be unambiguous without its folder. Reflect reads frontmatter `title:`, then the first H1, then the filename. A generic filename (README, Index, Taxonomy, ...) gets frontmatter `title: "<Scope> <Kind>"`; the body still starts at H2. `scripts/zk_audit.py` flags fallback collisions.
+
 ## Image policy
 
 ### Placement
@@ -44,17 +48,11 @@ Reference syntax (relative path from the .md file's directory):
 
 `$OV/.gitignore` is a whitelist: Markdown and Reflect's attachment types except video sync from any folder but `raw/`, `secure/`, nested `assets/`, and top-level paper PDFs. Reflect commits them on its next sync.
 
-Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`assets/x.png`) break on GitHub from nested notes. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference.
-
-### Legacy image refs
-
-Markdown that still points at `assets/images/<hash>.png` will render broken on GitHub. Acceptable for archive content; for active content, promote on next edit by:
-1. `cp assets/images/<hash>.png <tier>/images/<semantic-name>.png`
-2. Update the `![](path)` reference in the .md; Reflect commits both.
+Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`assets/x.png`) break on GitHub from nested notes. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference. Archive notes may keep broken links.
 
 ### Examples in this file
 
-All filenames, paths, topics, and people referenced in the example blocks above and the table below are placeholders. Replace `<topic>`, `<vendor>`, `<source>`, `<author>`, `<lab>`, `<venue>` with concrete strings when applying the convention; do not commit those concrete strings into protocol or convention files (they belong inside `$OV/`, which is gitignored).
+All filenames, paths, topics, and people referenced in the example blocks above and the table below are placeholders. Replace `<topic>`, `<vendor>`, `<source>`, `<author>`, `<lab>`, `<venue>` with concrete strings when applying the convention; do not commit those concrete strings into protocol or convention files (they belong inside `$OV/`).
 
 ## Folder size — fission rule
 

@@ -77,7 +77,7 @@ links into a raw store (`raw_store` in `harness/paths.local.toml`), an
 unsynced-by-Git mirror of vault paths; Git and Reflect skip them and search
 indexes them there. `scripts/zk_audit.py` checks this layout; `--fix-links`
 repairs missing links. `.gitignore` decides what syncs and what Reflect lists;
-`.reflectignore` only hides folders from Reflect. The harness never commits or
+`.reflectignore` only hides folders, such as `<paths.sessions>/`, from Reflect. The harness never commits or
 pushes the vault; `protocols/repo-conventions.md` owns layout.
 
 Daily notes are user-authored and read-only to the system. Curator refuses
