@@ -43,11 +43,13 @@ attempt cache or environment writes outside the authorized workspace.
 
 ## 2. Gather bounded sweeps
 
-Dispatch native Forgetter once per planned entry, sequentially and await each
-return. Give it the original scope identity, the corresponding workspace
-snapshot directory, `max_candidates`, `time_budget_s`, protected paths and
-the read-only boundary. Findings must retain original vault-relative paths,
-not scratch filenames.
+Run Forgetter sequentially for each planned scope, preserving its snapshots,
+`max_candidates`, `time_budget_s`, protected paths and original path identities.
+For every role below, use native dispatch. If unavailable or explicitly rejected
+before a child starts, follow AGENTS.md: read its canonical brief and handoff
+contract, then perform that role inline with the same limits and evidence.
+Disclose emulation and the dispatch error in notes. Never emulate a started or
+ambiguously started child; retain its missing/failed envelope instead.
 
 Load `protocols/agent-handoff.md` common metadata and Forgetter contract.
 Require `---forgetter-result---` / `---end-result---` and validate the
@@ -66,9 +68,8 @@ envelope before accepting findings:
   with empty findings; add the invalid-return reason to `errors`. Never
   repair it by inventing successful coverage.
 
-Create exactly one sweep row per planned scope. A valid empty finding list is
-fine; an omitted sweep is not. Quarantine filtering belongs to the plan, not
-to you.
+Create one sweep row per planned scope, including empty results; the plan owns
+quarantine filtering.
 
 ## 3. Attach operation and contradiction proposals
 
@@ -80,7 +81,7 @@ source observations in `evidence`; do not invent missing measurements.
 Confidence omitted by an older return becomes medium, never automatic
 authority.
 
-For potentially eligible operations under the protocol's bands, dispatch
+For potentially eligible operations under the protocol's bands, run
 Curator sequentially with the original source identities, their trusted
 snapshot paths, `mode: auto-apply`, matching band and full finding evidence.
 Attach its complete parsed envelope as `curator`, including a refusal.
@@ -94,7 +95,7 @@ preserve the complete source material. Use original vault-relative target
 paths. Do not hide a refusal, missing check or required split. The parent
 will independently recheck the band and contents.
 
-For contradictions, dispatch native Challenger with the claim,
+For contradictions, run Challenger with the claim,
 contradicting peer and signal using its contradiction-probe contract.
 Attach the parsed envelope as `probe`. Only a complete, gap-free rhetorical
 verdict can dismiss the finding; genuine or unproven contradictions remain
@@ -116,7 +117,7 @@ The preview returns trusted-policy routing, pending entries, notes and
 `bundles`. It mutates only its scratch state, never live state. Its output
 is advisory; the parent later recomputes it against the retained plan.
 
-For each bundle, dispatch native precedent-judge with the exact supplied
+For each bundle, run precedent-judge with the exact supplied
 `prompt` and request its JSON response inline, without writing another
 artifact. Write `judgments[entry_id] = {bundle_sha256, judgment}`, using the
 returned hash unchanged. Do not invent a verdict, edit a bundle, substitute

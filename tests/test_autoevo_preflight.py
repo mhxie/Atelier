@@ -193,6 +193,24 @@ class ReadOnlyReadinessTest(unittest.TestCase):
                 self.assertNotIn("output_file", out)
                 self.assertNotIn("owned_audit_recovery", out)
 
+    def test_touch_lock_marks_idle_time_and_honors_routine_skip(self) -> None:
+        for skip in (False, True):
+            with self.subTest(skip=skip), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
+                vault = _make_vault(Path(tmp))
+                out = _run_py(vault, f"""
+                    import os, time
+                    if {skip}:
+                        os.environ["ATELIER_SKIP_LOCK_TOUCH"] = "1"
+                    ap.main(["--touch-lock"])
+                    lock = ap._resolve_segment(ap.tier_segments()["cache"], vault) / "atelier-session-lock"
+                    gates = [ap.inspect_preflight(vault=vault, now=time.time() + age, privacy_probe=ok_probe,
+                                                  semantic_probe=sem_probe)["gate"]
+                             for age in (ap.SESSION_LOCK_TTL_SECONDS - 60, ap.SESSION_LOCK_TTL_SECONDS + 60)]
+                    print(json.dumps({{"exists": lock.exists(), "gates": gates}}))
+                """)
+                self.assertEqual(out["exists"], not skip)
+                self.assertEqual(out["gates"], [None, None] if skip else ["session_active", None])
+
     def test_git_operation_is_preserved_and_blocks(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))

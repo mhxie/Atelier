@@ -2,13 +2,15 @@
 """Read-only deterministic readiness checks for autoevo-nightly.
 
 The scheduled runner decides how to record or defer a blocked result. This
-helper never writes an audit, repairs Git state, commits, or pushes.
+helper never writes an audit, repairs Git state, commits, or pushes; its
+only write is the `--touch-lock` activity marker used by interactive hooks.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -20,7 +22,9 @@ from typing import Callable
 from _paths import _resolve_segment, tier_segments, vault_root
 
 ATELIER_ROOT = Path(__file__).resolve().parents[1]
-SESSION_LOCK_TTL_SECONDS = 6 * 60 * 60
+# Interactive hooks touch the lock on every prompt, tool call, and turn end,
+# so its age is idle time rather than time since a session opened.
+SESSION_LOCK_TTL_SECONDS = 60 * 60
 GENERIC_RETRY_DELAY_SECONDS = 60 * 60
 from _git import default_branch, merge_state  # noqa: E402
 
@@ -469,10 +473,24 @@ def environment_blocker(exc: BaseException, *, now: float | None = None) -> dict
     }
 
 
+def touch_session_lock() -> bool:
+    """Record interactive activity unless a scheduled runtime opted out."""
+    if os.environ.get("ATELIER_SKIP_LOCK_TOUCH"):
+        return False
+    cache = _resolve_segment(tier_segments()["cache"], vault_root().resolve())
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "atelier-session-lock").touch()
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--touch-lock", action="store_true")
     args = parser.parse_args(argv)
+    if args.touch_lock:
+        touch_session_lock()
+        return 0
     try:
         try:
             result = inspect_preflight()

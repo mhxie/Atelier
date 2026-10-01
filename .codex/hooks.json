@@ -27,8 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/cues.py\" --touch-lock",
-            "timeout": 3
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
           }
         ]
       },
@@ -45,6 +45,11 @@
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
+          },
           {
             "type": "command",
             "command": "uv run \"$(git rev-parse --show-toplevel)/scripts/invocation_log_gc.py\" 2>/dev/null || true",
@@ -113,6 +118,17 @@
             "type": "command",
             "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/observability/native.py\" hook codex 2>/dev/null || true",
             "timeout": 1
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
           }
         ]
       }

@@ -4,10 +4,8 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import redirect_stdout
 from datetime import date
 import hashlib
-import io
 import json
 import math
 import os
@@ -79,18 +77,19 @@ def _assert_hashes(vault: Path, hashes: dict[str, str | None]) -> None:
             raise evidence.VerificationError(f"source or decision state changed: {rel}")
 
 
-def _capture(function, *args, **kwargs) -> dict:
-    output = io.StringIO()
-    with redirect_stdout(output):
-        code = function(*args, **kwargs)
-    value = json.loads(output.getvalue())
-    if code or value.get("error") or value.get("invalid"):
+def _pending(queue: Path, ledger: Path, *args: str) -> dict:
+    result = subprocess.run(
+        [sys.executable, pending.__file__, "--queue", str(queue), "--ledger", str(ledger), *args],
+        capture_output=True, text=True, timeout=120,
+    )
+    try:
+        value = json.loads(result.stdout)
+    except ValueError as exc:
+        detail = result.stderr.strip()[-500:] or f"exit {result.returncode}"
+        raise evidence.VerificationError(f"pending helper did not produce JSON: {detail}") from exc
+    if result.returncode or value.get("error") or value.get("invalid"):
         raise evidence.VerificationError(str(value.get("error") or value.get("invalid") or "domain helper failed"))
     return value
-
-
-def _pending(queue: Path, ledger: Path, *args: str) -> dict:
-    return _capture(pending.main, ["--queue", str(queue), "--ledger", str(ledger), *args])
 
 
 BAND_RULES = {

@@ -429,7 +429,8 @@ def check_hooks(payload: dict[str, Any], runtime: str) -> list[Finding]:
     findings: list[Finding] = []
     required = (
         ("SessionStart", ("scripts/cues.py", "--hook", f"--runtime {runtime}")),
-        ("UserPromptSubmit", ("scripts/cues.py", "--touch-lock")),
+        *((event, ("scripts/autoevo_preflight.py", "--touch-lock"))
+          for event in ("UserPromptSubmit", "PostToolUse", "Stop")),
         ("Stop" if runtime == "codex" else "SessionEnd", ("scripts/invocation_log_gc.py",)),
     )
     for event, needles in required:

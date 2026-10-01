@@ -31,8 +31,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/cues.py\" --touch-lock 2>/dev/null || true",
-            "timeout": 3
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
           }
         ]
       },
@@ -47,6 +47,16 @@
       }
     ],
     "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
+          }
+        ]
+      },
       {
         "matcher": "Write",
         "hooks": [
@@ -82,6 +92,11 @@
     "Stop": [
       {
         "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/autoevo_preflight.py\" --touch-lock 2>/dev/null || true",
+            "timeout": 2
+          },
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/observability/native.py\" hook claude 2>/dev/null || true",

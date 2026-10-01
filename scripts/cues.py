@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _paths import date_in_text, tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
 import cron_spec  # noqa: E402
 import intent_coverage  # noqa: E402
+import autoevo_preflight  # noqa: E402
 import autoevo_verify  # noqa: E402
 import routine_status  # noqa: E402
 import routine_receipts  # noqa: E402
@@ -104,25 +105,18 @@ def _routine_registry(ov: Path) -> Path:
 
 
 def _touch_session_lock(verbose: bool, context: str) -> None:
-    """Touch the session-active marker unless the autoevo runtime asked us not to.
-
-    Shared by the SessionStart hook and the UserPromptSubmit `--touch-lock`
-    refresh; the two paths desynced once when the logic lived in two copies.
-    """
-    if os.environ.get("ATELIER_SKIP_LOCK_TOUCH"):
-        if verbose:
-            print(
-                f"# debug: {context} lock touch skipped (ATELIER_SKIP_LOCK_TOUCH set)",
-                file=sys.stderr,
-            )
-        return
+    """SessionStart refresh; the lock itself is owned by autoevo_preflight."""
     try:
-        cache_dir = tier("cache")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        (cache_dir / "atelier-session-lock").touch()
+        touched = autoevo_preflight.touch_session_lock()
     except OSError as exc:
         if verbose:
             print(f"# debug: session-lock touch failed: {exc!r}", file=sys.stderr)
+        return
+    if not touched and verbose:
+        print(
+            f"# debug: {context} lock touch skipped (ATELIER_SKIP_LOCK_TOUCH set)",
+            file=sys.stderr,
+        )
 
 
 # --- individual checks ----------------------------------------------------
@@ -1339,14 +1333,6 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run only the named cue (debug aid).",
     )
-    parser.add_argument(
-        "--touch-lock",
-        action="store_true",
-        help="Refresh the session-active lock and exit. No cue checks run; "
-        "the lock path is resolved via the registry. Used by the "
-        "UserPromptSubmit hook so long-running sessions keep the lock fresh "
-        "without paying for a full sweep on every prompt.",
-    )
     # Snooze subcommand: `cues.py snooze <key> [--days N]` writes a
     # per-key snooze entry to $OV/_meta/cue_snooze.json. The next session
     # skips fired cues whose key matches until the snooze expires.
@@ -1389,35 +1375,13 @@ def main(argv: list[str] | None = None) -> int:
     ov = vault_root()
     today = date.today()
 
-    # --touch-lock: lightweight per-prompt refresh path used by the
-    # UserPromptSubmit hook. Touches the lock and exits without running
-    # any cue check. The lock path is resolved via the registry so a
-    # rename of the `cache` segment in harness/paths.toml propagates
-    # to this hook automatically.
-    #
-    # Critical: the scheduled headless runtime invocation is itself a
-    # UserPromptSubmit event. Without the env-var guard below,
-    # the hook would touch the lock right before the Autoevo routine's
-    # pre-flight gate checks the lock, causing the bot to abort every
-    # night with "session-active lock fresh." The Prefect adapter exports
-    # ATELIER_SKIP_LOCK_TOUCH=1 so the scheduled run bypasses the refresh.
-    if args.touch_lock:
-        _touch_session_lock(args.verbose, "UserPromptSubmit")
-        return 0
-
     snoozes = _load_snoozes(ov)
 
-    # Session-active lock: when invoked as a SessionStart hook, touch a
-    # marker file so the 5am Autoevo routine can detect a recent
-    # session and bail out per `protocols/autoevo.md` § Pre-flight gates.
-    # SessionStart catches the start of a fresh session; the dedicated
-    # `--touch-lock` path (above) handles the UserPromptSubmit per-prompt
-    # refresh so long-running sessions stay protected past the 6h bail window.
-    #
-    # Skip-flag honor: same logic as --touch-lock. The Prefect-invoked
-    # headless autoevo runtime triggers SessionStart as well as
-    # UserPromptSubmit; without this guard, the bot would touch the lock
-    # right before its own pre-flight gate reads it, aborting every run.
+    # Session-active lock: SessionStart marks a fresh session; the
+    # UserPromptSubmit, PostToolUse, and Stop hooks call
+    # `autoevo_preflight.py --touch-lock` directly so the lock age measures
+    # idle time. The Prefect adapter exports ATELIER_SKIP_LOCK_TOUCH=1 so a
+    # headless routine never refreshes the lock its own preflight reads.
     if args.hook:
         _touch_session_lock(args.verbose, "SessionStart")
 

@@ -115,6 +115,19 @@ class AutoevoTest(unittest.TestCase):
             if (self.vault / relative).exists():
                 self.assertEqual((self.vault / relative).stat().st_mode & 0o777, 0o600)
 
+    def test_pending_json_survives_prefect_print_logging(self):
+        from prefect.context import FlowRunContext, TaskRunContext
+        from prefect.logging.loggers import patch_print
+        from types import SimpleNamespace
+
+        plan, proposal = self.prepare()
+        with mock.patch.object(FlowRunContext, "get", return_value=SimpleNamespace(log_prints=True)), \
+                mock.patch.object(TaskRunContext, "get", return_value=None), \
+                mock.patch("prefect.logging.loggers.get_run_logger"), patch_print():
+            record = self.accept(plan, proposal)
+        self.assertEqual(record["status"], "complete")
+        self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["verified"])
+
     def test_snapshot_excludes_dirty_content_and_keeps_original_mtime(self):
         (self.vault / "wip/seed.md").write_text("human edit\n")
         plan, _ = self.prepare()

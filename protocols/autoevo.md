@@ -48,7 +48,7 @@ limits remain in `harness/routine_profiles.toml` and
 |---|---|
 | Git worktree, branch and index | Existing index on the checked-out default branch; a missing index is not ordinary dirtiness. Default is origin's declaration, or an unambiguous local main/master. Never switch branches automatically. |
 | Git lock/operation | No `index.lock`, merge, rebase, cherry-pick, revert, or bisect in progress. Never remove locks or repair Git automatically. |
-| Session lock | No fresh `<paths.cache>/atelier-session-lock` within six hours. |
+| Session lock | No `<paths.cache>/atelier-session-lock` touch within one hour. |
 | Managed state | No dirty `_meta/autoevo_*.toml`; dirty working-tier content instead becomes `protected_paths`. |
 | Privacy | No public-bound privacy hits. |
 | Semantic readiness | QMD status reports ready with stored documents/vectors and cached models. This is not live inference or corpus-freshness proof. |
@@ -61,7 +61,8 @@ Transient inspection failures return structured
 defer evidence. A later Prefect occurrence may retry a pre-model block;
 failed, pending, or uncertain post-model effects never authorize model replay.
 
-Interactive SessionStart/UserPromptSubmit hooks refresh the session lock.
+Interactive SessionStart, UserPromptSubmit, PostToolUse, and Stop hooks refresh
+the session lock, so its age measures idle time.
 The scheduled adapter suppresses its own lock touch. An absent lock means no
 recent session; an unreadable lock is not permission to bypass the gate.
 
