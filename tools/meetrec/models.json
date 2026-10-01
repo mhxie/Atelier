@@ -1,0 +1,17 @@
+{
+  "default": "whisper-large-v3-turbo",
+  "models": [
+    {"key": "whisper-large-v3-turbo", "label": "Whisper large-v3 turbo", "engine": "whisper",
+     "repos": ["mlx-community/whisper-large-v3-turbo"]},
+    {"key": "qwen3-asr-1.7b", "label": "Qwen3-ASR 1.7B (8-bit)", "engine": "qwen3",
+     "repos": ["mlx-community/Qwen3-ASR-1.7B-8bit", "Qwen/Qwen3-ForcedAligner-0.6B"]},
+    {"key": "qwen3-asr-0.6b", "label": "Qwen3-ASR 0.6B (8-bit)", "engine": "qwen3",
+     "repos": ["mlx-community/Qwen3-ASR-0.6B-8bit", "Qwen/Qwen3-ForcedAligner-0.6B"]}
+  ],
+  "families": [
+    {"name": "Whisper", "author": "mlx-community", "search": "whisper-large",
+     "pattern": "^mlx-community/whisper-large-v(?P<version>\\d+)(-turbo)?$", "current": "3"},
+    {"name": "Qwen ASR", "author": "mlx-community", "search": "ASR",
+     "pattern": "^mlx-community/Qwen(?P<version>\\d+(\\.\\d+)?)-ASR-", "current": "3"}
+  ]
+}
