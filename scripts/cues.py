@@ -32,7 +32,7 @@ from typing import Any, Literal
 
 # Allow running as `uv run scripts/cues.py` from atelier root.
 sys.path.insert(0, str(Path(__file__).parent))
-from _paths import date_in_text, tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import date_in_text, raw_store, tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
 import cron_spec  # noqa: E402
 import intent_coverage  # noqa: E402
 import autoevo_preflight  # noqa: E402
@@ -1162,6 +1162,28 @@ def check_intent_misses(ov: Path, today: date) -> tuple[Cue | None, str]:
     )
 
 
+def check_vault_layout(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Split-layout health: a Git vault outside sync folders, raw_store links intact."""
+    from zk_audit import check_layout  # type: ignore[import-not-found]
+
+    findings = check_layout(ov, raw_store())
+    if not findings:
+        return None, "layout ok"
+    first = findings[0]
+    return (
+        Cue(
+            key="vault_layout",
+            severity="hard",
+            command_path="scripts/zk_audit.py",
+            message=(
+                f"Vault 布局有 {len(findings)} 个问题 (例: {first.where}: {first.detail}). "
+                "跑 `uv run scripts/zk_audit.py`; 缺失的链接可加 `--fix-links`."
+            ),
+        ),
+        f"{len(findings)} layout finding(s)",
+    )
+
+
 def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Surface the latest failed Prefect run per local model routine."""
     zone = datetime.now().astimezone().tzinfo
@@ -1205,6 +1227,7 @@ def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 CHECKS = [
+    ("vault_layout", check_vault_layout),
     ("weekly", check_weekly),
     ("intent_misses", check_intent_misses),
     ("reflect_intake", check_reflect_intake),

@@ -42,7 +42,7 @@ Reference syntax (relative path from the .md file's directory):
 
 ### Tracking
 
-`$OV/.gitignore` whitelists `**/images/*.{png,jpg,jpeg,gif,svg,webp}`. Place an image under any `images/` subdir and it auto-tracks on next `git add`.
+`$OV/.gitignore` is a whitelist: Markdown and Reflect's attachment types except video sync from any folder but `raw/`, `secure/`, nested `assets/`, and top-level paper PDFs. Reflect commits them on its next sync.
 
 Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`assets/x.png`) break on GitHub from nested notes. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference.
 
@@ -50,8 +50,7 @@ Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`asse
 
 Markdown that still points at `assets/images/<hash>.png` will render broken on GitHub. Acceptable for archive content; for active content, promote on next edit by:
 1. `cp assets/images/<hash>.png <tier>/images/<semantic-name>.png`
-2. Update the `![](path)` reference in the .md.
-3. `git add -A`.
+2. Update the `![](path)` reference in the .md; Reflect commits both.
 
 ### Examples in this file
 
@@ -75,7 +74,7 @@ The 32 threshold is hard, not "rough". A directory at 32 should be split before 
 | `people/` | first-letter bucket: `A/`, …, `0-9/`, `中/` (CJK) | `people/<X>/<Person Name>.md` |
 | `archive/<subdir>` | first-letter bucket or topical sub-grouping (case-by-case) | `archive/<subdir>/<X>/<Item>.md` |
 
-`daily/` is exempt and flat (`daily/YYYY-MM-DD.md`, attachments in `raw/YYYY/MM/`): Reflect reads dailies only there.
+`daily/` is exempt and flat (`daily/YYYY-MM-DD.md`): Reflect reads dailies only there. Its captures land in root `assets/`; older attachments stay in `daily/raw/YYYY/MM/`, off Git.
 
 ### Rebuilding refs after any move (canonical workflow)
 
@@ -84,7 +83,7 @@ File moves break standard markdown links `[X](path.md)` and image embeds `![](pa
 ```
 1. Move files via any tool         (scripts/fission.py / manual mv / one-off scripts)
 2. uv run scripts/relink.py --apply   ← auto-fixes broken refs
-3. Commit
+3. Reflect commits on its next sync
 ```
 
 `scripts/relink.py` builds a global filename → location index across all tracked `.md`/image files, scans every `[text](path)` and `![alt](path)` reference, and rewrites broken paths to the file's current location. Since refs track filename (not path), any reorganization that doesn't rename files is fully recoverable. Use `--dry-run` first to preview changes.

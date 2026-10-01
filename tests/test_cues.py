@@ -558,5 +558,22 @@ class LocalRoutineMissedTests(unittest.TestCase):
             self.assertIn("3/4", debug)
 
 
+class VaultLayoutCueTest(unittest.TestCase):
+    def test_quiet_on_linked_vault_and_fires_on_stale_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            vault, store = Path(tmp) / "vault", Path(tmp) / "store"
+            (vault / ".git").mkdir(parents=True)
+            (vault / "a").mkdir()
+            (store / "a" / "raw").mkdir(parents=True)
+            (vault / "a" / "raw").symlink_to(store / "a" / "raw")
+            with mock.patch.dict(os.environ, {"OV": str(vault)}), \
+                    mock.patch.object(cues, "raw_store", return_value=store):
+                self.assertIsNone(cues.check_vault_layout(vault, date(2099, 1, 5))[0])
+                cue, _ = cues.check_vault_layout(Path(tmp) / "zk", date(2099, 1, 5))
+        self.assertEqual((cue.key, cue.severity), ("vault_layout", "hard"))
+        self.assertIn("1 个问题", cue.message)
+        self.assertIn("missing", cue.message)
+
+
 if __name__ == "__main__":
     unittest.main()
