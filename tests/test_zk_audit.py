@@ -54,5 +54,28 @@ class LayoutTest(unittest.TestCase):
         self.assertIn("unmounted", za.check_layout(synced, self.base / "missing")[-1].detail)
 
 
+class DuplicateTitleTest(unittest.TestCase):
+    def test_lists_shared_fallback_titles_and_counts_archive_copies(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        notes = {
+            "a/README.md": "## Body\n", "b/README.md": "```\n# fenced\n```\n",
+            "c/README.md": '---\ntitle: "c README"\n---\n', "_meta/README.md": "", ".x/README.md": "",
+            "d/Index.md": "# Index\n", "e/index.md": "", "f/Ideas.md": "", "g/🧠 Ideas.md": "",
+            "h/Solo.md": "", "archive/h/Solo.md": "", "daily/2099-01-01.md": "", "i/2099-01-01.md": "",
+            "j/Named.md": "# Same\n", "k/Other.md": "# Same\n", "m/secure/README.md": "", "m/raw/README.md": "",
+        }
+        for rel, text in notes.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        (root / "l").mkdir()
+        (root / "l" / "README.md").symlink_to(root / "a" / "README.md")
+        (root / ".reflectignore").write_text("# hidden\n_meta/\n", encoding="utf-8")
+        found, archived = za.check_duplicate_titles(root)
+        self.assertEqual([(f.where, f.detail.count(", ") + 1) for f in found], [("ideas", 2), ("index", 2), ("readme", 2)])
+        self.assertEqual(archived, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

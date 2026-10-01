@@ -4,8 +4,10 @@
 Checks missing domain READMEs/digests, archive overlap, root markdown orphans
 (except README.md), empty markdown, suspicious top-level directories, and the
 vault layout: a Git work tree outside file-sync folders whose raw/ and secure/
-folders (and root cache) are links into raw_store. Archive empty stubs are
-counted, not individually listed, to avoid drowning current ingestion debt.
+folders (and root cache) are links into raw_store, plus Reflect titles that
+fall back to a filename another note shares. Archive empty stubs and archive
+duplicate titles are counted, not individually listed, to avoid drowning
+current ingestion debt.
 Individual checks explain their false-positive bias.
 
 Run `uv run scripts/zk_audit.py [--json]` for a human/JSON report. Advisory
@@ -21,6 +23,8 @@ import json
 import os
 import re
 import sys
+import unicodedata
+from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,6 +81,8 @@ class Report:
     empty_md_archive_count: int = 0
     suspicious_dirs: list[Finding] = field(default_factory=list)
     layout: list[Finding] = field(default_factory=list)
+    duplicate_titles: list[Finding] = field(default_factory=list)
+    duplicate_titles_archive_count: int = 0
 
     def total(self) -> int:
         # Includes the aggregated archive empty-stub count so a JSON
@@ -91,7 +97,9 @@ class Report:
             + len(self.empty_md)
             + len(self.suspicious_dirs)
             + len(self.layout)
+            + len(self.duplicate_titles)
             + self.empty_md_archive_count
+            + self.duplicate_titles_archive_count
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -106,6 +114,8 @@ class Report:
                 "empty_md_archive_count": self.empty_md_archive_count,
                 "suspicious_dirs": [f.to_dict() for f in self.suspicious_dirs],
                 "layout": [f.to_dict() for f in self.layout],
+                "duplicate_titles": [f.to_dict() for f in self.duplicate_titles],
+                "duplicate_titles_archive_count": self.duplicate_titles_archive_count,
             },
             "total": self.total(),
         }
@@ -410,6 +420,76 @@ def fix_links(root: Path, store: Path) -> list[Path]:
     return made
 
 
+# Reflect titles a note by frontmatter `title:`, then its first H1, then its
+# filename; a fallback title another note shares leaves [[Title]] ambiguous.
+_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+_H1_RE = re.compile(r"^ {0,3}# +(\S.*?)(?:\s+#+)?\s*$")
+
+
+def _reflect_title(text: str) -> str | None:
+    """Frontmatter `title:`, else the first ATX H1 outside code fences."""
+    lines = text.splitlines()
+    body = 0
+    if lines and lines[0].rstrip() == "---":
+        for i, line in enumerate(lines[1:], 1):
+            if line.rstrip() == "---":
+                body = i + 1
+                break
+            if line.startswith("title:") and (value := line[6:].strip().strip("\"'").strip()):
+                return value
+    fenced = False
+    for line in lines[body:]:
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced and (m := _H1_RE.match(line)):
+            return m.group(1)
+    return None
+
+
+def _title_key(title: str) -> str:
+    """Approximate Reflect's foldFallbackTitleKey: NFC, lowercase, collapsed
+    whitespace, leading emoji (symbol, joiner, and selector code points) dropped."""
+    key = " ".join(unicodedata.normalize("NFC", title).lower().split())
+    while key and (unicodedata.category(key[0]) in ("So", "Sk") or key[0] in "‍️"):
+        key = key[1:]
+    return key.lstrip()
+
+
+def check_duplicate_titles(root: Path) -> tuple[list[Finding], int]:
+    """Reflect-visible notes whose filename-fallback title another note shares.
+
+    Mirrors Reflect's catalog: hidden, .reflectignore'd (folder-name patterns
+    only), raw/, and secure/ folders, root daily notes, and symlinks are
+    skipped, so secure notes are never read. Setext H1s are
+    not parsed, so a note titled only by one is a false positive. Groups whose
+    only extra members sit under the archive tier are counted, not listed.
+    """
+    seg = tier_segments()
+    archive, daily = root / seg["archive"], root / seg["daily_notes"]
+    ignore = root / ".reflectignore"
+    patterns = ignore.read_text(encoding="utf-8").splitlines() if ignore.is_file() else []
+    ignored = {p.strip().strip("/") for p in patterns if p.strip() and not p.lstrip().startswith("#")}
+    groups: dict[str, list[tuple[Path, bool]]] = defaultdict(list)
+    for path in root.rglob("*.md"):
+        rel = path.relative_to(root)
+        if path.is_symlink() or path.parent == daily or any(
+            _is_hidden(p) or p in ignored or p in _STORE_FOLDERS for p in rel.parts[:-1]
+        ):
+            continue
+        title = _reflect_title(path.read_text(encoding="utf-8", errors="replace"))
+        groups[_title_key(title or path.stem)].append((path, title is None))
+    out: list[Finding] = []
+    archive_only = 0
+    for key, notes in sorted(groups.items()):
+        if len(notes) < 2 or all(not fallback for _, fallback in notes):
+            continue
+        if sum(not p.is_relative_to(archive) for p, _ in notes) < 2:
+            archive_only += 1
+            continue
+        out.append(Finding("duplicate_title", key, ", ".join(sorted(_rel(p) for p, _ in notes))))
+    return out, archive_only
+
+
 def _rel(path: Path) -> str:
     """Render a path relative to $OV if possible, else absolute.
 
@@ -431,6 +511,7 @@ def run_audit() -> Report:
     report.root_orphans, report.empty_md, report.empty_md_archive_count = check_root_orphans(OV)
     report.suspicious_dirs = check_suspicious_dirs(OV)
     report.layout = check_layout(OV, raw_store())
+    report.duplicate_titles, report.duplicate_titles_archive_count = check_duplicate_titles(OV)
     return report
 
 
@@ -467,6 +548,16 @@ def format_human(report: Report) -> str:
         ),
         ("[5] Suspicious top-level dirs", report.suspicious_dirs, None),
         ("[6] Vault layout", report.layout, "missing links are fixable with --fix-links"),
+        (
+            "[7] Duplicate Reflect titles",
+            report.duplicate_titles,
+            (
+                f"+ {report.duplicate_titles_archive_count} groups whose other copies are only "
+                f"under the registered archive (aggregated)"
+                if report.duplicate_titles_archive_count
+                else None
+            ),
+        ),
     ]
 
     for title, items, note in sections:
@@ -484,16 +575,16 @@ def format_human(report: Report) -> str:
         lines.append("")
 
     total = report.total()
-    arch = report.empty_md_archive_count
+    arch = report.empty_md_archive_count + report.duplicate_titles_archive_count
     actionable = total - arch
     if arch:
         summary = (
-            f"Summary: 7 categories, {actionable} actionable + {arch} archive-aggregated "
+            f"Summary: 8 categories, {actionable} actionable + {arch} archive-aggregated "
             f"= {total} total finding(s). Audit is advisory; no $OV content was modified."
         )
     else:
         summary = (
-            f"Summary: 7 categories, {total} total finding(s). "
+            f"Summary: 8 categories, {total} total finding(s). "
             "Audit is advisory; no $OV content was modified."
         )
     lines.append(summary)
