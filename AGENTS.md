@@ -55,8 +55,8 @@ keys, paths, command names, and data fields stay literal.
   Never attribute a statement to the user without its source.
 - Match the user's language; use Chinese for Chinese topics and
   reading-intensive output. Do not use em dashes.
-- Markdown bodies normally start at H2. Wiki entries and shadows retain their
-  required H1 title. Session reflections live under `<paths.reflections>/`.
+- Notes other than daily notes open with an H1 title, as Reflect writes them;
+  sections use H2. Session reflections live under `<paths.reflections>/`.
 - Ask rather than lecture. State success criteria before multi-step work,
   clarify materially different readings, and surface uncertainty directly.
 
