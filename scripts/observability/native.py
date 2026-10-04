@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import json
 import os
@@ -20,7 +21,7 @@ import uuid
 from xml.sax.saxutils import escape
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from observability.collector import DARWIN_ARM64_SHA256, ENDPOINT, HEALTH, HOOK_EVENTS, VERSION, configuration, state_dir  # noqa: E402
+from observability.collector import CLAUDE_EVENTS, DARWIN_ARM64_SHA256, ENDPOINT, HEALTH, HOOK_EVENTS, VERSION, configuration, state_dir  # noqa: E402
 from observability.usage import MAX_EVENT, number  # noqa: E402
 
 
@@ -87,14 +88,16 @@ def send(payload: dict) -> None:
 def summary(*, directory: Path | None = None, hours: int = 24) -> dict:
     directory = directory or state_dir()
     result = {"scope": "opt-in-cli-only", "coverage": "unknown", "collector": "unavailable",
-              "desktop": "unverified", "sessions": [], "read_gaps": 0}
+              "desktop": "unverified", "sessions": [], "read_gaps": 0,
+              "observation_window_hours": hours, "last_event_at": None}
     try:
         with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(HEALTH, timeout=0.3) as response:
             result["collector"] = "reachable" if response.status == 200 else "unavailable"
     except OSError:
         pass
     sessions, seen = {}, set()
-    cutoff = (time.time() - hours * 3600) * 1e9
+    now, last_event = time.time_ns(), 0
+    cutoff = now - hours * 3600 * 1e9
     remaining = 32 * 1024 * 1024
     files = []
     for path in directory.glob("events*.jsonl"):
@@ -115,13 +118,32 @@ def summary(*, directory: Path | None = None, hours: int = 24) -> dict:
                     if len(line) > MAX_EVENT:
                         result["read_gaps"] += 1
                         break
-                    value = json.loads(line)
+                    try:
+                        value = json.loads(line)
+                    except ValueError:
+                        result["read_gaps"] += 1
+                        continue
                     for record in value if isinstance(value, list) else [value]:
-                        if record.get("version") != 1 or record.get("time_unix_nano", 0) < cutoff:
+                        if not isinstance(record, dict) or record.get("version") != 1:
                             continue
+                        timestamp = record.get("time_unix_nano")
                         runtime, session = record.get("runtime"), record.get("session")
-                        if runtime not in {"codex", "claude"} or not session:
+                        event = record.get("event", "")
+                        native_events = CLAUDE_EVENTS if runtime == "claude" else ()
+                        allowed = (*native_events, *(f"hook.{name}" for name in HOOK_EVENTS),
+                                   "hook.Interrupt" if runtime == "codex" else "hook.StopFailure")
+                        if (type(timestamp) is not int or not 0 < timestamp <= now
+                                or not isinstance(runtime, str) or runtime not in {"codex", "claude"}
+                                or not isinstance(session, str) or not session
+                                or any(record.get(field) is not None and not isinstance(record[field], str)
+                                       for field in ("request", "client_request", "tool_call", "model"))
+                                or (record.get("event.sequence") is not None
+                                    and not number(record["event.sequence"]))
+                                or event not in allowed):
                             result["read_gaps"] += 1
+                            continue
+                        last_event = max(last_event, timestamp)
+                        if timestamp < cutoff:
                             continue
                         key = (runtime, session)
                         row = sessions.setdefault(key, {"runtime": runtime, "session": session, "coverage": "partial",
@@ -129,7 +151,6 @@ def summary(*, directory: Path | None = None, hours: int = 24) -> dict:
                                   "tools": 0, "models": [], "request_duration_ms": None, "usage": {},
                                   "measured_requests": {}, "cost_usd_estimate": None})
                         # Native request IDs or session sequence deduplicate delivery.
-                        event = record.get("event", "")
                         event_id = record.get("tool_call") if event == "tool_result" else None
                         if event == "api_request":
                             event_id = record.get("request") or record.get("client_request")
@@ -158,6 +179,8 @@ def summary(*, directory: Path | None = None, hours: int = 24) -> dict:
         except (OSError, ValueError, TypeError, AttributeError):
             result["read_gaps"] += 1
     result["sessions"] = list(sessions.values())
+    if last_event:
+        result["last_event_at"] = datetime.fromtimestamp(last_event / 1e9, timezone.utc).isoformat()
     if sessions:
         result["coverage"] = "partial"  # Delivery/lifecycle events cannot prove lossless accounting.
     return result

@@ -68,9 +68,9 @@ points at the canonical sources and adds only what is Codex-native.
   calls; `protocols/agent-handoff.md` also owns responsibilities and voice legs.
   Reader owns the shared reading behavior; Scholar keeps only its role settings
   and the shared-contract pointer.
-- Direct chat-completion calls are unlogged. Runtime hooks only age out legacy
-  full-payload invocation logs through `scripts/invocation_log_gc.py`; opt-in
-  native usage/lifecycle observation is documented in `sources/runtimes/observability.md`.
+- Native observation and routine reports: `sources/runtimes/observability.md`.
+  Direct API calls are unlogged; `scripts/invocation_log_gc.py` ages out legacy
+  payload logs.
 - For runtime capability maintenance, read `sources/runtimes/README.md` and
   the registry's references; CLI discovery does not prove activation.
 

@@ -445,6 +445,29 @@ class RoutineFailureCueTests(unittest.TestCase):
         self.assertIsNone(cue)
         self.assertIn("failed=0", debug)
 
+    def test_process_failures_are_included(self):
+        failure = {"routine": "process-fixture", "state": "FAILED", "state_name": "Failed", "message": "exit 1"}
+
+        def recent_runs(since, *, model_only):
+            return [] if model_only else [failure]
+
+        with mock.patch.object(cues.routine_status, "recent_runs", side_effect=recent_runs):
+            cue, debug = cues.check_routine_failures(self.root, date(2026, 8, 31))
+        self.assertIn("process-fixture", cue.message)
+        self.assertIn("failed=1", debug)
+
+    def test_latest_deferred_state_supersedes_failure_without_counting_as_failure(self):
+        runs = [
+            {"routine": "sample", "state": "CANCELLED", "state_name": "Deferred", "message": "session active"},
+            {"routine": "sample", "state": "FAILED", "state_name": "Failed", "message": "older failure"},
+            {"routine": "cancelled", "state": "CANCELLED", "state_name": "Cancelled", "message": "stopped"},
+        ]
+        with mock.patch.object(cues.routine_status, "recent_runs", return_value=runs):
+            cue, debug = cues.check_routine_failures(self.root, date(2026, 8, 31))
+        self.assertNotIn("sample", cue.message)
+        self.assertIn("cancelled", cue.message)
+        self.assertIn("failed=1", debug)
+
     def test_api_unavailability_surfaces_only_after_installation_evidence(self):
         unavailable = cues.routine_status.StatusUnavailable("offline")
         with mock.patch.object(cues.routine_status, "recent_runs", side_effect=unavailable), mock.patch.dict(
@@ -556,6 +579,20 @@ class LocalRoutineMissedTests(unittest.TestCase):
             cue, debug = cues.check_routine_hitrate(vault, now.date(), now=now)
             self.assertIsNone(cue, debug)
             self.assertIn("3/4", debug)
+
+    def test_hitrate_reports_output_dates_without_claiming_execution(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            for filename in ("2026-08-20.md", "2026-08-20-extra.md", "2026-08-31.md"):
+                (vault / "x" / filename).write_text("output", encoding="utf-8")
+            now = datetime(2026, 8, 31, 22, 0).astimezone()
+            cue, debug = cues.check_routine_hitrate(vault, now.date(), now=now)
+            self.assertEqual(cue.key, "routine_hitrate")
+            self.assertIn("output-date coverage", cue.message)
+            self.assertIn("2/12 expected dates with output", cue.message)
+            self.assertNotIn("runs", cue.message)
+            self.assertNotIn("scheduler is firing", cue.message)
+            self.assertIn("degraded=1", debug)
 
 
 class VaultLayoutCueTest(unittest.TestCase):

@@ -1,8 +1,8 @@
 ## Native observability
 
 Owner: `scripts/observability/`; registry binding: `harness/runtimes.toml`.
-This is measurement, not a business ledger or a billing statement. Receipts,
-domain verification, Prefect run state, and model retry policy remain unchanged.
+Receipts and domain verification establish outcomes; native observations measure
+usage. Neither is a billing statement.
 
 | Source | Measurement authority | Persistence |
 |---|---|---|
@@ -15,15 +15,20 @@ domain verification, Prefect run state, and model retry policy remain unchanged.
 
 ```sh
 uv run --frozen python scripts/routine_status.py --usage --json
+uv run --frozen python scripts/routine_status.py --report --hours 168 --json
 python3 scripts/atelier_runtime.py status --observations
 ```
 
-Scheduled observations belong to an attempt's Prefect flow ID, not the cycle
-receipt. A reused receipt does not create another usage record. The bounded
-status query reads at most 200 logs for the selected runs; a missing record is
-unknown, including older runs, skipped attempts, missing final logs and page
-truncation. It does not backfill from transcripts. Generic process-job logging
-is unchanged; raw model stdout/stderr is not mirrored to Prefect.
+Scheduled observations belong to a Prefect flow ID; receipt reuse creates no
+new usage record. Default status reads at most 200 logs. `--report` paginates
+runs and observations, groups by routine and local day, and separates Deferred
+from failures. Caps or API errors leave an explicitly incomplete report with
+a nonzero exit. Missing usage stays unknown; raw model output is never mirrored.
+
+Flow elapsed includes preparation and verification; model duration is a subset.
+Summed elapsed is cumulative run time, not calendar or CPU time. Model-flow
+counts include preparation failures and receipt reuse, not just model launches.
+Report token totals cover observed fields only; scheduled dollar costs stay null.
 
 The JSONL reader drains malformed and oversized events without keeping their
 contents. It accepts a terminal usage event once per observed turn start and
@@ -32,14 +37,16 @@ coverage. Missing fields stay null. Cached input is a subset of Codex input;
 reasoning output is a subset of output. Do not add either twice. Model duration
 does not include preparation, queues or artifact verification.
 
-Interactive summaries are partial observations, never proof of lossless
-delivery. They deduplicate request/tool identities where available, otherwise
+Interactive summaries expose `last_event_at` from retained screened events and
+`observation_window_hours`; an empty window leaves delivery unverified. Collector
+reachability checks health only, and `read_gaps` describes local reading errors.
+Summaries deduplicate request/tool identities where available, otherwise
 native sequence and timestamp. They keep Claude input, output, cache-read and
 cache-creation buckets separate; `measured_requests` states coverage. Summed
-request duration is not session wall time. API errors and retry exhaustion are
-different counters. Cost is the runtime's estimate, not invoiced cost. Subagent
-summary footprints are not added to request usage. Direct chat-completion calls
-and Desktop-host sessions are outside verified coverage.
+request duration is not session wall time. API errors and retry exhaustion have
+separate counters. Cost is a runtime estimate; subagent summary footprints are
+not added to request usage. Delivery remains partial; direct chat-completion
+calls and Desktop-host sessions are outside verified coverage.
 
 ### Install the local Collector
 

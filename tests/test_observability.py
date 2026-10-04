@@ -1,6 +1,7 @@
 """Small boundary suite; receipt/retry cases reuse test_routine_prefect."""
 
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import io
 import json
 import os
@@ -130,6 +131,90 @@ class BoundaryTests(unittest.TestCase):
                 binary.write_bytes(b"different binary")
                 with self.assertRaisesRegex(ValueError, "different installed Collector"):
                     native.install(archive)
+
+
+class SummaryTests(unittest.TestCase):
+    NOW = 1_800_000_000_000_000_000
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="atelier-summary-test-")
+        self.addCleanup(self.temp.cleanup)
+        self.directory = Path(self.temp.name)
+
+    def event(self, timestamp=None, **fields):
+        return {"version": 1, "time_unix_nano": self.NOW if timestamp is None else timestamp,
+                "runtime": "claude", "session": "fixture", "event": "api_request", **fields}
+
+    def summary(self, **kwargs):
+        with mock.patch.object(native.time, "time_ns", return_value=self.NOW), mock.patch.object(
+            native.urllib.request, "build_opener"
+        ) as opener:
+            opener.return_value.open.return_value.__enter__.return_value.status = 200
+            return native.summary(directory=self.directory, **kwargs)
+
+    def write(self, records, filename="events.jsonl"):
+        (self.directory / filename).write_text("\n".join(json.dumps(row) for row in records) + "\n")
+
+    def iso(self, timestamp):
+        return datetime.fromtimestamp(timestamp / 1e9, timezone.utc).isoformat()
+
+    def test_current_event_exposes_window_and_freshness_with_partial_coverage(self):
+        self.write([self.event(self.NOW - 2_000_000_000), self.event(self.NOW - 1_000_000_000)])
+        result = self.summary(hours=7)
+        self.assertEqual(result["observation_window_hours"], 7)
+        self.assertEqual(result["last_event_at"], self.iso(self.NOW - 1_000_000_000))
+        self.assertEqual((result["collector"], result["coverage"], result["read_gaps"]), ("reachable", "partial", 0))
+        self.assertEqual(result["sessions"][0]["requests"], 2)
+
+    def test_last_event_includes_retained_events_outside_the_window(self):
+        old = self.NOW - 48 * 3600 * 1_000_000_000
+        self.write([self.event(old)], "events-old.jsonl")
+        self.write([self.event(old - 1_000_000_000)])
+        result = self.summary(hours=24)
+        self.assertEqual(result["last_event_at"], self.iso(old))
+        self.assertEqual((result["sessions"], result["coverage"], result["read_gaps"]), ([], "unknown", 0))
+        self.assertEqual(result["collector"], "reachable")
+
+    def test_empty_reachable_collector_keeps_freshness_and_coverage_unknown(self):
+        result = self.summary()
+        self.assertIsNone(result["last_event_at"])
+        self.assertEqual((result["collector"], result["coverage"], result["sessions"]), ("reachable", "unknown", []))
+
+    def test_invalid_records_do_not_poison_freshness_or_hide_later_valid_events(self):
+        invalid = [self.event(timestamp) for timestamp in ("bad", 0, -1, True, float("nan"), self.NOW + 1)]
+        invalid += [self.event(time_unix_nano=None), self.event(runtime="unknown"), self.event(runtime=[]), self.event(session=[]),
+                    self.event(event="unrecognized"), self.event(runtime="codex")]
+        last = self.NOW - 1_000_000_000
+        self.write([*invalid, self.event(last)])
+        result = self.summary()
+        self.assertEqual(result["last_event_at"], self.iso(last))
+        self.assertEqual(result["read_gaps"], len(invalid))
+        self.assertEqual(result["sessions"][0]["requests"], 1)
+
+    def test_malformed_json_does_not_hide_later_valid_events(self):
+        self.write([self.event()])
+        path = self.directory / "events.jsonl"
+        path.write_text("malformed\n" + path.read_text())
+        result = self.summary()
+        self.assertEqual((result["last_event_at"], result["read_gaps"]), (self.iso(self.NOW), 1))
+        self.assertEqual(result["sessions"][0]["requests"], 1)
+
+    def test_malformed_fields_do_not_poison_freshness_or_hide_array_records(self):
+        last = self.NOW - 1_000_000_000
+        for field in ("request", "client_request", "tool_call", "model", "event.sequence"):
+            for value in ([], {}, False):
+                with self.subTest(field=field, value=value):
+                    self.write([[self.event(**{field: value}), self.event(last)]])
+                    result = self.summary()
+                    self.assertEqual((result["last_event_at"], result["read_gaps"]), (self.iso(last), 1))
+                    self.assertEqual(result["sessions"][0]["requests"], 1)
+
+    def test_read_errors_remain_gaps_and_do_not_imply_freshness(self):
+        self.write([self.event()])
+        with mock.patch.object(Path, "open", side_effect=OSError("unreadable")):
+            result = self.summary()
+        self.assertEqual((result["read_gaps"], result["coverage"]), (1, "unknown"))
+        self.assertIsNone(result["last_event_at"])
 
 
 @unittest.skipUnless(os.environ.get("ATELIER_TEST_COLLECTOR"), "set ATELIER_TEST_COLLECTOR to the pinned binary for transport/rotation QA")

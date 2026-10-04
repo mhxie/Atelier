@@ -615,7 +615,7 @@ def check_routine_hitrate(
     *,
     now: datetime | None = None,
 ) -> tuple[Cue | None, str]:
-    """Catch intermittent failures that total-outage staleness misses.
+    """Measure output-date coverage that total-outage staleness misses.
 
     Evaluate weekly-or-faster routines over max(14, 3 * cadence) days;
     longer cadences lack enough samples and remain staleness-only.
@@ -680,7 +680,7 @@ def check_routine_hitrate(
 
         if rate < 0.70:
             pct = int(rate * 100)
-            degraded.append(f"{label} ({actual}/{expected} runs, {pct}%)")
+            degraded.append(f"{label} ({actual}/{expected} expected dates with output, {pct}%)")
             debug_parts.append(
                 f"{label}: {actual}/{expected} in {effective_lookback}d = {pct}%; degraded"
             )
@@ -704,8 +704,8 @@ def check_routine_hitrate(
             severity="soft",
             command_path="_tools/routines/registry.toml",
             message=(
-                f"{len(degraded)} routine(s) with degraded output rate: {listing}. "
-                f"The active scheduler is firing but output is intermittent. "
+                f"{len(degraded)} routine(s) with degraded output-date coverage: {listing}. "
+                f"Artifact dates alone do not establish scheduler execution. "
                 f"Inspect local Prefect state or cloud session and connector logs."
             ),
         ),
@@ -1185,11 +1185,11 @@ def check_vault_layout(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Surface the latest failed Prefect run per local model routine."""
+    """Surface the latest failed Prefect run per local model or process routine."""
     zone = datetime.now().astimezone().tzinfo
     since = datetime.combine(today - timedelta(days=7), datetime.min.time(), tzinfo=zone)
     try:
-        runs = routine_status.recent_runs(since, model_only=True)
+        runs = routine_status.recent_runs(since, model_only=False)
     except routine_status.StatusUnavailable as exc:
         if not (_meta_dir(ov) / "routine_receipts").is_dir() and not os.environ.get("PREFECT_API_URL"):
             return None, "Prefect API unavailable; no installation evidence"
@@ -1207,7 +1207,8 @@ def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
         name = str(run.get("routine") or "")
         if name and name not in latest:
             latest[name] = run
-    failed = [run for run in latest.values() if run.get("state") in {"FAILED", "CRASHED", "CANCELLED"}]
+    failed = [run for run in latest.values() if run.get("state") in {"FAILED", "CRASHED", "CANCELLED"}
+              and run.get("state_name") != "Deferred"]
     if not failed:
         return None, f"queried={len(runs)} latest={len(latest)} failed=0"
     listing = "; ".join(

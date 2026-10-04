@@ -19,6 +19,7 @@ import tomllib
 from types import SimpleNamespace
 import unittest
 from unittest import mock
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -894,6 +895,193 @@ retry_safe = false
         with mock.patch.object(status, "recent_runs", return_value=[]) as recent, redirect_stdout(io.StringIO()):
             self.assertEqual(status.main(["--limit", str(status.MAX_LIMIT), "--json"]), 0)
         self.assertEqual(recent.call_args.kwargs["limit"], status.MAX_LIMIT)
+
+
+class RoutineReportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.until = datetime(2026, 10, 3, 12, tzinfo=timezone.utc)
+        self.since = self.until - timedelta(hours=168)
+        self.client = mock.MagicMock()
+        self.enterContext(mock.patch.object(status, "get_client", return_value=self.client))
+        self.client.__enter__.return_value = self.client
+        self.client.read_flow_runs.return_value = []
+        self.client.read_logs.return_value = []
+
+    def run_row(self, identity, *, kind="model", state="COMPLETED", state_name=None,
+                start=None, end=None, expected=None):
+        start = self.until - timedelta(minutes=2) if start is None else start
+        end = start + timedelta(minutes=1) if end is None and start and state == "COMPLETED" else end
+        return SimpleNamespace(
+            id=uuid.uuid5(uuid.NAMESPACE_OID, str(identity)), parameters={"job" if kind == "process" else "routine": kind},
+            state=SimpleNamespace(type=SimpleNamespace(value=state), name=state_name or state.title(), message=""),
+            start_time=start, expected_start_time=expected, end_time=end,
+        )
+
+    def log_row(self, identity, *, tokens=5, coverage="complete", seconds=30, cost=None):
+        identity = str(uuid.uuid5(uuid.NAMESPACE_OID, str(identity)))
+        record = {
+            "version": 1, "flow_run_id": str(identity), "coverage": coverage,
+            "duration_seconds": seconds, "cost_usd_estimate": cost,
+            "usage": {key: tokens for key in status.TOKEN_KEYS},
+        }
+        return SimpleNamespace(flow_run_id=str(identity), message="atelier.observation " + json.dumps(record))
+
+    @staticmethod
+    def pages(rows):
+        return lambda **kwargs: rows[kwargs["offset"]:kwargs["offset"] + kwargs["limit"]]
+
+    def report(self):
+        return status.routine_report(self.since, self.until)
+
+    def test_more_than_two_pages_of_runs_and_logs_are_deduplicated(self) -> None:
+        rows = [self.run_row(i) for i in range(401)]
+        logs = [self.log_row(0, tokens=9), self.log_row(0, tokens=4)]
+        logs.extend(self.log_row(i) for i in range(1, 401))
+        self.client.read_flow_runs.side_effect = self.pages([rows[0], *rows])
+        self.client.read_logs.side_effect = self.pages(logs)
+        report = self.report()
+        self.assertTrue(report["complete"])
+        overall = report["overall"]
+        self.assertEqual(overall["runs"], 401)
+        self.assertEqual(overall["usage_coverage"], {"complete": 401, "partial": 0, "unknown": 0})
+        self.assertEqual(overall["tokens"]["input_tokens"], {"total": 2009, "measured_runs": 401})
+        self.assertEqual(overall["tokens"]["cached_input_tokens"]["total"], 2009)
+        self.assertEqual(overall["tokens"]["reasoning_output_tokens"]["total"], 2009)
+        self.assertEqual(overall["wall_seconds"], {
+            "total": 24060, "measured_runs": 401, "mean": 60, "median": 60, "p95": 60,
+        })
+        self.assertEqual([call.kwargs["offset"] for call in self.client.read_flow_runs.call_args_list], [0, 200, 400])
+        self.assertEqual([call.kwargs["offset"] for call in self.client.read_logs.call_args_list], [0, 200, 400])
+        for call in self.client.read_flow_runs.call_args_list:
+            self.assertEqual(call.kwargs["flow_run_filter"].start_time.before_, self.until)
+        self.assertEqual(self.client.read_logs.call_args.kwargs["log_filter"].timestamp.before_, self.until)
+
+    def test_latest_invalid_record_does_not_mask_valid_observation(self) -> None:
+        self.client.read_flow_runs.return_value = [self.run_row("1")]
+        self.client.read_logs.return_value = [
+            self.log_row("1", tokens="bad"), self.log_row("1", coverage=[]),
+            self.log_row("1", tokens=None), self.log_row("1", tokens=0, cost=0),
+            self.log_row("1", tokens=20), self.log_row("other", tokens=50),
+        ]
+        overall = self.report()["overall"]
+        self.assertEqual(overall["tokens"]["input_tokens"], {"total": 0, "measured_runs": 1})
+        self.assertEqual(overall["cost_usd_estimate"], {"total": 0, "measured_runs": 1})
+
+    def test_later_run_page_failure_preserves_partial_data_and_screens_error(self) -> None:
+        self.client.read_flow_runs.side_effect = [
+            [self.run_row(i) for i in range(200)], RuntimeError("secret pathname and private API body"),
+        ]
+        report = self.report()
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["overall"]["runs"], 200)
+        self.assertEqual(report["errors"], [{"stage": "runs", "page": 1, "error": "RuntimeError"}])
+        self.assertNotIn("secret", json.dumps(report))
+
+    def test_later_log_page_failure_preserves_observed_tokens(self) -> None:
+        self.client.read_flow_runs.return_value = [self.run_row("1")]
+        self.client.read_logs.side_effect = [
+            [self.log_row("1", tokens=7) for _ in range(200)], RuntimeError("secret"),
+        ]
+        report = self.report()
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["overall"]["tokens"]["input_tokens"], {"total": 7, "measured_runs": 1})
+        self.assertEqual(report["errors"], [{"stage": "observations", "page": 1, "error": "RuntimeError"}])
+
+    def test_page_cap_is_explicit_for_runs_and_logs(self) -> None:
+        self.client.read_flow_runs.return_value = [self.run_row(i) for i in range(200)]
+        self.client.read_logs.return_value = [self.log_row(0) for _ in range(200)]
+        with mock.patch.object(status, "MAX_PAGES", 2):
+            report = self.report()
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["max_pages"], 2)
+        self.assertEqual(report["errors"], [
+            {"stage": "runs", "error": "page_cap", "max_pages": 2},
+            {"stage": "observations", "error": "page_cap", "max_pages": 2},
+        ])
+
+    def test_states_kinds_running_time_and_unknown_vs_zero_usage(self) -> None:
+        overdue = self.run_row("scheduled", state="SCHEDULED", expected=self.until - timedelta(minutes=1))
+        overdue.start_time = None
+        future = self.run_row("future", state="SCHEDULED", expected=self.until + timedelta(minutes=1))
+        future.start_time = None
+        self.client.read_flow_runs.return_value = [
+            self.run_row("complete"), self.run_row("process", kind="process"),
+            self.run_row("failed", state="FAILED"), self.run_row("deferred", state="FAILED", state_name="Deferred"),
+            self.run_row("running", state="RUNNING"), overdue, future,
+            self.run_row("old", start=self.since - timedelta(seconds=1)),
+        ]
+        self.client.read_logs.return_value = [
+            self.log_row("complete", tokens=0, seconds=0), self.log_row("failed", tokens=None, coverage="partial"),
+            self.log_row("process", tokens=999),
+        ]
+        report = self.report()
+        overall = report["overall"]
+        self.assertEqual(overall["runs"], 6)
+        self.assertEqual(overall["kinds"], {"model": 5, "process": 1})
+        self.assertEqual(overall["states"], {"COMPLETED": 2, "FAILED": 1, "DEFERRED": 1, "RUNNING": 1, "SCHEDULED": 1})
+        self.assertEqual(overall["due_unstarted"], 1)
+        self.assertEqual(overall["usage_coverage"], {"complete": 1, "partial": 1, "unknown": 3})
+        self.assertEqual(overall["wall_seconds"]["total"], 240)
+        self.assertEqual(overall["wall_seconds"]["measured_runs"], 3)
+        self.assertEqual(overall["wall_seconds"]["p95"], 120)
+        self.assertEqual(overall["model_seconds"], {"total": 30, "measured_runs": 2})
+        self.assertEqual(overall["tokens"]["input_tokens"], {"total": 0, "measured_runs": 1})
+        self.assertEqual(overall["cost_usd_estimate"], {"total": None, "measured_runs": 0})
+
+    def test_local_day_boundary_and_window_metadata(self) -> None:
+        previous_tz = os.environ.get("TZ")
+        def restore_timezone():
+            if previous_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = previous_tz
+            time.tzset()
+        self.addCleanup(restore_timezone)
+        os.environ["TZ"] = "America/Los_Angeles"
+        time.tzset()
+        self.client.read_flow_runs.return_value = [
+            self.run_row("before", start=datetime(2026, 10, 1, 6, 59, tzinfo=timezone.utc)),
+            self.run_row("after", start=datetime(2026, 10, 1, 7, 0, tzinfo=timezone.utc)),
+        ]
+        report = self.report()
+        self.assertEqual({key: row["runs"] for key, row in report["by_day"].items()}, {"2026-09-30": 1, "2026-10-01": 1})
+        self.assertEqual(report["window"]["since"], self.since.isoformat())
+        self.assertTrue(report["window"]["local_until"].endswith("-07:00"))
+        self.assertEqual(report["window"]["cohort"], "actual_start_or_unstarted_due")
+
+    def test_empty_data_keeps_missing_measurements_null(self) -> None:
+        overall = self.report()["overall"]
+        self.assertEqual(overall["runs"], 0)
+        self.assertEqual(overall["wall_seconds"]["total"], None)
+        self.assertEqual(overall["tokens"]["input_tokens"], {"total": None, "measured_runs": 0})
+        self.assertEqual(overall["usage_coverage"], {"complete": 0, "partial": 0, "unknown": 0})
+
+    def test_invalid_windows_fail_before_query(self) -> None:
+        for since, until in ((self.until, self.since), (self.since.replace(tzinfo=None), self.until)):
+            with self.assertRaises(ValueError):
+                status.routine_report(since, until)
+        self.client.read_flow_runs.assert_not_called()
+
+    def test_report_cli_exits_nonzero_with_reviewable_partial_json(self) -> None:
+        report = {"complete": False, "overall": {"runs": 200}, "errors": [{"error": "RuntimeError"}]}
+        output = io.StringIO()
+        with mock.patch.object(status, "routine_report", return_value=report) as read, redirect_stdout(output):
+            self.assertEqual(status.main(["--report", "--hours", "168", "--json"]), 2)
+        since, until = read.call_args.args
+        self.assertEqual(until - since, timedelta(hours=168))
+        self.assertEqual(json.loads(output.getvalue()), report)
+
+    def test_legacy_reader_is_bounded_and_shape_is_unchanged(self) -> None:
+        self.client.read_flow_runs.return_value = [self.run_row("1")]
+        self.client.read_logs.return_value = [self.log_row("1", tokens=0)]
+        rows = status.recent_runs(self.since, limit=1, usage=True)
+        self.assertEqual(set(rows[0]), {"id", "routine", "state", "state_name", "message",
+                                       "start_time", "expected_start_time", "end_time", "observation"})
+        self.assertEqual(self.client.read_flow_runs.call_count, 1)
+        self.assertEqual(self.client.read_logs.call_count, 1)
+        self.assertEqual(self.client.read_flow_runs.call_args.kwargs["limit"], 1)
+        self.client.read_logs.side_effect = RuntimeError("secret")
+        self.assertIsNone(status.recent_runs(self.since, usage=True)[0]["observation"])
 
 
 CLAUDE_FAKE = """#!/usr/bin/env python3
