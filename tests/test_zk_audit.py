@@ -62,6 +62,8 @@ class LayoutTest(unittest.TestCase):
         (self.vault / "archive").rmdir()
         self.assertIn(self.vault / "archive", za.fix_links(self.vault, self.store))
         self.assertEqual(self.flagged(self.store), ["c/raw", "d/raw"])
+        (self.vault / "a" / "archive").mkdir()
+        self.assertEqual(self.flagged(self.store), ["a/archive", "c/raw", "d/raw"])
 
 
 class ArchiveLinkTest(unittest.TestCase):

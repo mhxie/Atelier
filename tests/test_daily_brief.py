@@ -105,7 +105,7 @@ TODOS = """## Q3
 - [x] 已完成的  due:2099-02-01
 """
 
-HEALTH = """# Longitudinal metrics
+HEALTH = """# Metrics
 
 ## Body composition
 
@@ -114,9 +114,9 @@ HEALTH = """# Longitudinal metrics
 | [2098-09-11](../daily/2098-09-11.md) | scale | 80 |
 | [2098-06-01](../daily/2098-06-01.md) | DEXA | 82 |
 
-## Thyroid
+## Labs
 
-| Date | TSH |
+| Date | Marker |
 |---|---|
 | [2099-01-20](reports/x.md) | 1.0 |
 """

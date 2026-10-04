@@ -15,6 +15,9 @@
 # filename stem despite the regex collision with `<paths.people>/Person Stub.md`.
 people stub
 
+# Shipped feature name (recurring.py, cues, triage); a vault note borrows it.
+recurring obligations
+
 # Public products, standards, libraries, and general concepts used by the
 # shipped implementation or documentation.
 AWS IAM

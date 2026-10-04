@@ -4,7 +4,7 @@
 Checks missing domain READMEs/digests, archive overlap, root markdown orphans
 (except README.md), empty markdown, suspicious top-level directories, and the
 vault layout: a Git work tree outside file-sync folders whose raw/ and secure/
-folders (and root cache and archive) are links into raw_store, files at or
+folders (and root cache and archive, the only folder so named) are links into raw_store, files at or
 above reflect-open's backup size guard outside raw_store, plus Reflect titles that
 fall back to a filename another note shares, and syntax Reflect does not
 render (`_reflect.nonnative`). Archive empty stubs and archive
@@ -66,7 +66,8 @@ _FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 # Folders that live in raw_store and appear in the vault as links; Git skips
 # them and Reflect keeps them local-only. A .git under a file-sync client risks object corruption.
 _STORE_FOLDERS = {"raw", "secure"}
-_ROOT_LINKS = {"cache", tier_segments()["archive"]}
+_ARCHIVE = tier_segments()["archive"]
+_ROOT_LINKS = {"cache", _ARCHIVE}
 _SYNC_ROOTS = ("/Library/CloudStorage/", "/Library/Mobile Documents/")
 
 
@@ -421,6 +422,9 @@ def check_layout(root: Path, store: Path | None) -> list[Finding]:
                 out.append(Finding("layout", _rel(path) + "/", f"real folder: {unsynced}; move it into raw_store and link it"))
             if d in dirnames:
                 dirnames.remove(d)
+        # reflect-open matches local-only folders by name at any depth.
+        out += [Finding("layout", _rel(here / d) + "/", "named like the archive tier, so Reflect keeps it local-only; rename it")
+                for d in dirnames if d == _ARCHIVE and here != root]
     for rel in _store_folders(store):
         if not (root / rel).is_symlink() and not (root / rel).exists():
             out.append(Finding("layout", _rel(root / rel), "raw_store folder has no link here; run with --fix-links"))
