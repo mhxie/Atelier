@@ -94,7 +94,7 @@ For each ingestion task (one domain or one batch):
 3. **Create the destination** under `<domain>/raw/` in the raw store if absent, then run `uv run scripts/zk_audit.py --fix-links`. Preserve source subfolder structure where it makes sense.
 4. **mv files** in. Use `mv -- "$src" "$dst"` to handle filenames with leading dashes / spaces.
 5. **Extract structured data** into markdown in `$OV/<domain>/` (not under `raw/`). Naming convention: `<YYYY-MM-DD>-<slug>.md` for events, `<topic>.md` for cross-cutting indexes. Cross-link related files using `[[wikilink]]`.
-6. **Cross-link source raw**: structured markdown should reference its raw source (`[../raw/<subdir>/<file>]`). Unidirectional: markdown → raw, never edit raw.
+6. **Cross-link source raw**: structured markdown should reference its raw source with a relative, %-encoded link (`[<file>](../raw/<subdir>/<file>)`). Unidirectional: markdown → raw, never edit raw.
 7. **rmdir empty source folders**, including the Drive top-level domain folder if fully drained. Originals stay in Drive through the `raw/` link.
 
 ## Per-domain README
@@ -118,7 +118,7 @@ Use `<paths.health>/README.md` and `<paths.housing>/README.md` as the templates.
 
 ## Privacy boundaries
 
-- Atelier never commits `$OV`; a sync app may push it to its own remote, minus `raw/`, `secure/`, and cache. Personal data (landlord names, MRNs, addresses, lease amounts) can live in synced notes; ID numbers cannot (below).
+- Atelier never commits `$OV`; a sync app may push it to its own remote, minus `raw/`, `secure/`, the archive, and cache. Personal data (landlord names, MRNs, addresses, lease amounts) can live in synced notes; ID numbers cannot (below).
 - Protocols / committed files (this file included) describe the **structure** generically. No personal names, addresses, employer names, or preference policy. `scripts/privacy_check.py` checks discovered private titles, gitignored exact terms, and staged blobs during `/lint` and `/push`; semantic review remains responsible for contextual disclosure.
 - Encrypted vaults (1Password, etc.) are **out of scope**: never extract credentials from there into `$OV` plain text.
 - Identity documents go to `raw/`, and notes with ID, bank, or salary details to a `secure/` folder; never through a Reflect capture, which pushes within seconds.
@@ -140,7 +140,7 @@ uv run scripts/zk_audit.py            # human-readable report
 uv run scripts/zk_audit.py --json     # machine-readable; used by /lint Phase 0b
 ```
 
-The audit walks `$OV/` and surfaces eight categories of finding (advisory; only `--fix-links` mutates, by creating missing links):
+The audit walks `$OV/` and surfaces these categories of finding (advisory; only `--fix-links` and `--fix-large` mutate):
 
 | # | Category | What it flags | Action |
 |---|---|---|---|
@@ -149,8 +149,9 @@ The audit walks `$OV/` and surfaces eight categories of finding (advisory; only 
 | 3 | Archive ↔ working-tier overlap | Archive subtrees whose normalized name matches a working-tier domain (e.g., `archive/practical/health-admin` ↔ `health/`). Often pre-protocol residue duplicating active tiers. | Per-subtree decision: keep as historical archive, merge into the active working tier, or rename to disambiguate. Audit surfaces; user decides. |
 | 4 | Root orphans + empty `.md` | `.md` files at `$OV/` root other than `README.md`; 0-byte `.md` files in working tiers. Empty `.md` under `archive/` aggregated as a count (pre-ingestion stubs, not new debt). | Move root orphans into a tier dir; delete or fill empty stubs. |
 | 5 | Suspicious top-level dirs | Finder-duplicate names (` 2`, ` (2)`), empty dirs, skeleton dirs (no README, fewer than 3 entries). | Rename, remove, or build out. |
-| 6 | Vault layout | `$OV` missing, not a Git work tree, or inside a file-sync folder; raw store unmounted; a `raw/`, `secure/`, or root `cache` that is a real folder, a misdirected link, or a store folder with no link. | Fix `$OV` or mount the store; `--fix-links` adds missing links; move real folders into the store by hand. |
+| 6 | Vault layout | `$OV` missing, not a Git work tree, or inside a file-sync folder; raw store unmounted; a `raw/`, `secure/`, root `cache`, or archive that is a real folder, a misdirected link, or a store folder with no link. | Fix `$OV` or mount the store; `--fix-links` adds missing links; move real folders into the store by hand. |
 | 7 | Duplicate Reflect titles | Reflect-visible notes whose title falls back to a filename another note shares (Reflect reads frontmatter `title:`, then the first H1, then the filename), leaving `[[Title]]` ambiguous. Groups whose other copies are only under `archive/` aggregated as a count. | Folders serve harness retrieval, not Reflect titles: give the note a flat, unambiguous H1 such as `# <Scope>: <Topic>`, or merge the duplicate notes. |
+| 10 | Large files | Files outside `raw/` and `secure/` at or above reflect-open's `backupMaxFileMiB`, which Reflect withholds from Git. | `--fix-large` moves each into its folder's `raw/` link and repoints Markdown links. |
 
 The audit is integrated into `/lint` as Phase 0b (advisory; never blocks). `/lint` surfaces a one-line summary per non-empty category; the full listings are read on demand via the script.
 

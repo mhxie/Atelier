@@ -16,6 +16,7 @@ bug found while building against a live vault:
 from __future__ import annotations
 
 import json
+import re
 import contextlib
 import io
 import os
@@ -342,6 +343,9 @@ class ExtractionTests(unittest.TestCase):
             [meta["slug"] for meta, _ in units],
             ["rate-decision-signal", "trade-order-signal"],
         )
+        hidden = re.sub(r"^---\n((?:\w+: .*\n)+)---$", r"<!--\n\1-->", SIGNAL_REPORT, flags=re.M)
+        self.assertIn("<!--\ndate: 2099-01-25", hidden)
+        self.assertEqual(rc.split_units(hidden), units)
 
         first_body = units[0][1]
         self.assertIn("split vote", first_body)

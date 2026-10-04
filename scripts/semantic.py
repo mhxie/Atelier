@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -26,6 +27,9 @@ SCOPES = ("active", "raw", "archive", "inbox", "process")
 SECURE = "secure"  # QMD collection of raw-store secure notes; results report it as `active`
 BACKENDS = ("auto", "reflect", "qmd")
 REFLECT, REFLECT_TIMEOUT = "reflect", 10  # the Reflect CLI on PATH answers lexically; QMD is the fallback
+# Reflect's index skips .reflectignored raw/ Markdown and process folders, and its CLI never
+# returns local-only secure notes or a linked archive, so QMD answers these beside a Reflect answer.
+REFLECT_UNINDEXED = ("raw", "process", SECURE)
 CONFIG_PATH = ROOT / "semantic.toml"
 HARD_DIRS = ("cache", "_meta", "_routine_prompts", "_tools", "node_modules", ".venv", "__pycache__")
 STAGED_MODEL_DIRECTORY_ENV = "ATELIER_QMD_MODEL_DIRECTORY"
@@ -108,6 +112,11 @@ def zones(vault: Path) -> dict[str, str]:
             for name, default in names.items()}
 
 
+def linked_archive(vault: Path, store: Path | None) -> bool:
+    """Is the archive tier a link into raw_store, local-only to Reflect and unfollowed by QMD?"""
+    return store is not None and (vault / zones(vault)["archive"]).is_symlink()
+
+
 def scope_for(path: str, vault: Path) -> str | None:
     parts = PurePosixPath(path).parts
     if not parts or ".." in parts or PurePosixPath(path).is_absolute():
@@ -142,7 +151,7 @@ def collection_config(vault: Path) -> dict:
     patterns = {
         "active": ("**/*.md", authored),
         "raw": ("**/raw/**/*.{md,txt,text,csv,html,htm}", []),
-        "archive": (zone["archive"] + "/**/*.md", ["**/raw/**"]),
+        "archive": (zone["archive"] + "/**/*.md", ["**/raw/**", "**/secure/**"]),
         "inbox": ("**/inbox/**/*.md", ["**/raw/**", archive, process]),
         "process": (zone["process"] + "/**/*.md", ["**/raw/**"]),
     }
@@ -151,7 +160,8 @@ def collection_config(vault: Path) -> dict:
     return {
         "models": settings()["models"],
         "collections": {name: {
-            "path": str(store if store is not None and name in ("raw", SECURE) else vault),
+            "path": str(store if name in ("raw", SECURE) and store is not None
+                        or name == "archive" and linked_archive(vault, store) else vault),
             "pattern": pattern, "ignore": hard + exclusions, "includeByDefault": name in ("active", SECURE),
         } for name, (pattern, exclusions) in patterns.items()},
     }
@@ -402,12 +412,12 @@ def bridge(vault: Path, command: str, *, roles: list[str] | None = None, **optio
 
 
 def store_mirror(path: str, vault: Path, store: Path | None) -> bool:
-    """Accept one raw or secure folder symlink onto the same path in the raw store, nothing else."""
+    """Accept one raw, secure, or archive tier symlink onto the same path in the raw store, nothing else."""
     if store is None or (vault / path).resolve() != store / path:
         return False
     parts = PurePosixPath(path).parts
-    return [part for depth, part in enumerate(parts[:-1], 1)
-            if vault.joinpath(*parts[:depth]).is_symlink()] in (["raw"], ["secure"])
+    links = [PurePosixPath(*parts[:depth]) for depth in range(1, len(parts)) if vault.joinpath(*parts[:depth]).is_symlink()]
+    return len(links) == 1 and (links[0].name in ("raw", "secure") or links[0].as_posix() == zones(vault)["archive"])
 
 
 def reflect_rows(vault: Path, text: str, limit: int) -> list[dict]:
@@ -431,6 +441,17 @@ def reflect_rows(vault: Path, text: str, limit: int) -> list[dict]:
     if stale:
         print("semantic: Reflect's index is stale; open the graph in Reflect to refresh it", file=sys.stderr)
     return rows
+
+
+def interleave(first: list[dict], second: list[dict], top: int) -> list[dict]:
+    """Merge two engines' rankings by alternating rank, one row per path; their scores never compare."""
+    merged, seen = [], set()
+    for pair in itertools.zip_longest(first, second):
+        for row in pair:
+            if row is not None and row["path"] not in seen:
+                seen.add(row["path"])
+                merged.append(row)
+    return merged[:top]
 
 
 def query(args: argparse.Namespace) -> list[dict]:
@@ -494,19 +515,32 @@ def query(args: argparse.Namespace) -> list[dict]:
                 break
         return result
 
+    collections = requested + ([SECURE] if store is not None and "active" in requested else [])
     if args.backend != "qmd" and args.mode != "vector":  # Reflect is lexical, even for a hybrid request
         try:
             hits = accept(reflect_rows(vault, args.query, limit), "Reflect", "lexical")
-            if hits or args.backend == "reflect":
-                return hits
         except SearchError as exc:
             if args.backend == "reflect":
                 raise
             print(f"semantic: {exc}; falling back to QMD", file=sys.stderr)
+        else:
+            unindexed = [name for name in collections
+                         if name in REFLECT_UNINDEXED or name == "archive" and linked_archive(vault, store)]
+            if hits and unindexed and args.backend == "auto":
+                try:  # model-free, so the whole auto answer stays lexical
+                    require_index(vault)
+                    extra = accept(bridge(vault, "query", query=args.query, mode="lexical", collections=unindexed,
+                                          limit=limit, rerank=False, expand=False), "QMD", "lexical")
+                except SearchError as exc:
+                    print(f"semantic: {exc}; returning Reflect rows without {', '.join(unindexed)}",
+                          file=sys.stderr)
+                else:
+                    hits = interleave(hits, extra, args.top)
+            if hits or args.backend == "reflect":
+                return hits
     elif args.backend == "reflect":
         raise SearchError("Reflect search is lexical; --mode vector needs --backend qmd or auto")
     require_index(vault)
-    collections = requested + ([SECURE] if store is not None and "active" in requested else [])
     return accept(bridge(vault, "query", roles=roles, query=args.query, mode=args.mode, collections=collections,
                          limit=limit, rerank=not args.no_rerank, expand=args.expand), "QMD", score_kind)
 

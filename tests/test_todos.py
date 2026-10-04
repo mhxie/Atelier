@@ -39,6 +39,9 @@ class DueDateTest(unittest.TestCase):
     def test_reflect_task_date_link_is_the_due_date(self) -> None:
         self.assertEqual(_due("File taxes [[2099-04-15]] then [[2099-05-01]]"), "2099-04-15")
 
+    def test_aliased_date_link_is_the_due_date(self) -> None:
+        self.assertEqual(_due("Dental cleaning [[2099-10-17|10/17/2099]]"), "2099-10-17")
+
     def test_explicit_due_wins_over_a_date_link(self) -> None:
         self.assertEqual(_due("Send deck due:2099-03-01, drafted [[2099-02-20]]"), "2099-03-01")
 

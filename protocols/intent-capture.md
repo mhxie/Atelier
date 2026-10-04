@@ -11,7 +11,7 @@ Select one Scribe operation from the content shape:
 | Trip-associated restaurant + score / 必点 | delegate to `/dine` Intent C (`protocols/dining-capture.md`) | meal log and confirmed trip note |
 | Other restaurant + score / 必点 | `dining_row` | configured meal-history tracker |
 | New person with bio context | `people_stub` | `<paths.people>/` |
-| Action item with deadline or area, or close-out toggle | `gtd_entry` (`add` / `toggle_done` / `toggle_killed`); adds use `+ [ ]`, due `[[YYYY-MM-DD]]` | most recently modified file under `<paths.gtd>/` |
+| Action item with deadline or area, or close-out toggle | `gtd_entry` (`add` / `toggle_done` / `toggle_killed`); adds use `+ [ ]`, due `[[YYYY-MM-DD]]` | add: `<paths.gtd>/YYYYQn.md` for the due date, else today's quarter; toggle: the task's file |
 | Other factual capture | `generic` | suitable path under `<paths.wip>/` |
 
 Resolve the exact target from the user's existing private layout. Ask once

@@ -65,7 +65,8 @@ LANE_ORDER = ["Research", "Tech feed", "Finance", "Toolcraft", "Career", "Findin
 
 _FRONTMATTER = re.compile(r"^---\n(.*?)\n---\n?", re.DOTALL)
 
-_FENCED_BLOCK = re.compile(r"^---[ \t]*\n(.*?)\n---[ \t]*$", re.DOTALL | re.MULTILINE)
+# A signal unit's metadata sits in a `---` block or, so Reflect hides it, an own-line comment.
+_FENCED_BLOCK = re.compile(r"^(?:(<!--)|---)[ \t]*\n(?P<body>.*?)\n(?(1)-->|---)[ \t]*$", re.DOTALL | re.MULTILINE)
 
 _META_LINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]*:\s")
 
@@ -557,9 +558,9 @@ def split_units(text: str) -> list[tuple[dict[str, str], str]]:
     digest's leading header), not units.
     """
     units: list[tuple[dict[str, str], str]] = []
-    blocks = [m for m in _FENCED_BLOCK.finditer(text) if _looks_like_meta_block(m.group(1))]
+    blocks = [m for m in _FENCED_BLOCK.finditer(text) if _looks_like_meta_block(m["body"])]
     for index, match in enumerate(blocks):
-        meta = _parse_meta_lines(match.group(1))
+        meta = _parse_meta_lines(match["body"])
         if "slug" not in meta:
             continue
         end = blocks[index + 1].start() if index + 1 < len(blocks) else len(text)

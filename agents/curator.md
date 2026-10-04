@@ -65,7 +65,7 @@ Draft an updated version of an existing local note.
 1. Read the current note from the local mirror (`Grep` for the title in `$OV/` → `Read` the file).
 2. Apply the requested changes.
 3. Present the diff to the user.
-4. The orchestrator applies the change via `Edit` (small substring fix) or `Write` (whole-body rewrite). For renames, the orchestrator runs `mv` plus a grep + Edit pass that rewrites inbound `[[Old Title]]` to `[[New Title]]`; `scripts/wikilink_to_md.py` would turn every wikilink into a path link.
+4. The orchestrator applies the change via `Edit` (small substring fix) or `Write` (whole-body rewrite). For renames, the orchestrator runs `mv` plus a grep + Edit pass that rewrites inbound `[[Old Title]]` to `[[New Title]]`; Reflect does this itself only for a retitle made inside Reflect.
 
 Daily notes (`<paths.daily_notes>/YYYY-MM-DD.md`) are user-authored; the Curator does not propose edits to them.
 
@@ -154,13 +154,13 @@ Before presenting any compact or merge proposal, verify each item:
 
 - [ ] **Images**: count every `![` image syntax in every source note. Report the count (e.g., "42 images across 15 notes"). Copy all image URLs verbatim in original context. Never summarize, omit, or relocate images. The image count in the output MUST equal the count in the sources unless an omission is explicitly listed in `changes_summary`.
 - [ ] **Links**: preserve all `[[backlinks]]`, external URLs, and markdown links.
-- [ ] **Embedded content**: preserve any embedded media (audio, video, iframes, HTML blocks).
+- [ ] **Embedded content**: preserve embedded media, rewriting HTML as Markdown Reflect renders (it shows raw HTML as text; only own-line `<!-- -->` comments stay hidden).
 - [ ] **Tables**: copy tables exactly; do not convert to prose.
 - [ ] **Structured data**: preserve pipelines, timelines, tracking tables, and any structured formats (kanban-style lists, stage progressions, status trackers) exactly. Do not reinterpret meaning. The user's structure IS the content.
 - [ ] **Verbatim text**: the user's original words, especially raw observations, interview notes, Chinese-language text, and personal memos, must be preserved word-for-word. Restructure the surrounding organization, but never paraphrase the user's voice.
 - [ ] **Source attribution**: clearly separate the user's own writing from external content (forum quotes, others' experiences, copied text). Use attribution markers (e.g., `> [From 1point3acres user]` or `**External:**`) so it is always clear what is the user's experience versus someone else's. Never blend external quotes into the user's narrative.
 - [ ] **Factual accuracy**: when source notes describe sequences of events, roles, or outcomes involving specific people or entities, verify facts against the source text rather than inferring. If two notes describe different people's experiences, do not conflate them.
-- [ ] **Tags**: carry over all tags from source notes (deduplicate).
+- [ ] **Tags**: carry over all tags from source notes as body `#tags` (deduplicate); Reflect ignores frontmatter `tags:`.
 - [ ] **Dates/metadata**: preserve original dates and any metadata the user added.
 - [ ] **Line-by-line diff**: for each source note, confirm every non-trivial line appears in the output (either preserved or explicitly noted as removed in `changes_summary`).
 

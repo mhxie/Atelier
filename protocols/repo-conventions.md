@@ -1,6 +1,6 @@
 ## Purpose
 
-`$OV` uses plain-Markdown conventions for GitHub rendering and navigation, whether it is a private Git repo or a Drive/iCloud-synced folder. Nothing requires a specific editor.
+`$OV` is a plain-Markdown vault that Reflect edits and syncs through Git; these conventions target Reflect.
 
 ## Note titles
 
@@ -46,9 +46,9 @@ Reference syntax (relative path from the .md file's directory):
 
 ### Tracking
 
-`$OV/.gitignore` is a whitelist: Markdown and Reflect's attachment types except video sync from any folder but `raw/`, `secure/`, nested `assets/`, and top-level paper PDFs. Reflect commits them on its next sync.
+`$OV/.gitignore` is a whitelist: Markdown and Reflect's attachment types except video sync from any folder but `raw/`, `secure/`, the archive, nested `assets/`, and top-level paper PDFs. Reflect commits them on its next sync, except files above its `backupMaxFileMiB` guard.
 
-Root `assets/` (Reflect's pasted images) is tracked; its vault-root links (`assets/x.png`) break on GitHub from nested notes. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference. Archive notes may keep broken links.
+Root `assets/` (Reflect's pasted images) is tracked; Reflect resolves its vault-root links (`assets/x.png`) from any folder. Nested `assets/` imports stay excluded; to publish one, move it to `<tier>/images/` with a semantic name and update the reference. Archive notes may keep broken links.
 
 ### Examples in this file
 
@@ -56,7 +56,7 @@ All filenames, paths, topics, and people referenced in the example blocks above 
 
 ## Folder size — fission rule
 
-**Magic number: 32 entries (files + subdirectories combined).** When a directory's immediate-child count reaches 32, trigger a fission: split into subdirectories along a natural axis. GitHub's tree view truncates long lists and pagination breaks navigation; most file explorers also slow above that range.
+**Magic number: 32 entries (files + subdirectories combined).** When a directory's immediate-child count reaches 32, trigger a fission: split into subdirectories along a natural axis. Most file explorers slow above that range.
 
 The 32 threshold is hard, not "rough". A directory at 32 should be split before the next addition.
 
@@ -76,17 +76,15 @@ The 32 threshold is hard, not "rough". A directory at 32 should be split before 
 
 ### Rebuilding refs after any move (canonical workflow)
 
-File moves break standard markdown links `[X](path.md)` and image embeds `![](path)`. The relink contract makes reorganization non-destructive:
+`[[Title]]` links survive moves; Reflect resolves them by title. Moves break relative image and attachment links `![](path)` and legacy `[X](path.md)` links. The relink contract makes reorganization non-destructive:
 
 ```
 1. Move files via any tool         (scripts/fission.py / manual mv / one-off scripts)
-2. uv run scripts/relink.py --apply   ← auto-fixes broken refs
+2. uv run scripts/relink.py --to-reflect --apply   ← fixes broken refs; note links become [[Title]]
 3. Reflect commits on its next sync
 ```
 
-`scripts/relink.py` builds a global filename → location index across all tracked `.md`/image files, scans every `[text](path)` and `![alt](path)` reference, and rewrites broken paths to the file's current location. Since refs track filename (not path), any reorganization that doesn't rename files is fully recoverable. Use `--dry-run` first to preview changes.
-
-The wikilink converter (`scripts/wikilink_to_md.py`) handles `[[...]]` → standard markdown link conversion when needed. `relink.py` is the steady-state tool for all path moves once links are standard markdown.
+`scripts/relink.py` builds a global filename → location index across all tracked `.md`/image files, scans every `[text](path)` and `![alt](path)` reference, and rewrites broken paths to the file's current location, %-encoded because Reflect cannot open `<...>` destinations. Since refs track filename (not path), any reorganization that doesn't rename files is fully recoverable. Use `--dry-run` first to preview changes. `--to-reflect` converts legacy note links to `[[Title]]`.
 
 ### Tier-specific semantic restructures
 

@@ -41,11 +41,11 @@ Consider a trip only when the user explicitly says the meal belongs to a named t
 - **Current trip:** resolve only when the same session contains an explicit `current trip → exact existing trip-note path/title` mapping. Aliases, partial titles, implicit associations, and a stale, incidental, or merely present trip mention are insufficient. Otherwise ask one compact question for the intended trip note.
 - **Compatible location:** read the resolved trip note and use only an existing, clearly labelled log or status section that already contains date-prefixed list entries in its local convention. If no such section exists or the match is uncertain, state that the trip-log reference is unavailable and continue with the meal capture; do not create a heading or invent a trip-note schema.
 
-For a compatible location, record its exact section heading, section-content SHA-256, insertion anchor, before/after position, and date-prefixed list shape. Read the meal-history tracker and resolve its existing document title under the user's local title convention; do not substitute a fixed label. Compute the relative local Markdown path from the resolved trip note's directory to that tracker, then prepare only this reference:
+For a compatible location, record its exact section heading, section-content SHA-256, insertion anchor, before/after position, and date-prefixed list shape. Read the meal-history tracker and resolve its existing document title under the user's local title convention, which must name exactly one Reflect note; do not substitute a fixed label. Then prepare only this reference:
 
-`- YYYY-MM-DD: [<resolved-meal-history-title>](<relative-meal-log-path>)`
+`- YYYY-MM-DD: [[<resolved-meal-history-title>]]`
 
-Before offering the side effect, search the resolved compatible section for the exact date plus resolved relative meal-history link in its local list shape. If it already exists, do not offer or write another reference. The trip note must not repeat the restaurant, rating, cost, dishes, or any other meal-row content.
+Before offering the side effect, search the resolved compatible section for the exact date plus the resolved meal-history link in its local list shape. If it already exists, do not offer or write another reference. The trip note must not repeat the restaurant, rating, cost, dishes, or any other meal-row content.
 
 ### C.3 Auto-derive what you can
 
@@ -85,7 +85,7 @@ Before writing, plan side effects. Each is opt-in via the confirm prompt (see C.
 | Gift card update | Receipt shows gift-card balance line OR user volunteers balance | Update existing row in the gift-card catalog file (under `<paths.finance>/`, filename per `profile/diet.md`): Balance + Last updated + Source; or insert new row if first time. |
 | Benefits-tracker claim | Credit slot maps to a tracked benefit cycle in the private profile | Mark the affected cycle row claimed (✅, date, amount, restaurant) in its local convention. Do not copy program policy into it. |
 | Catalog promotion flag | 评分 ≥ 8 AND 再去 = Y AND restaurant not currently in the relevant city catalog file (per `profile/diet.md`) | One-line suggestion at the end: `→ 考虑 promote 到 <city catalog name> (评分 N + 再去 Y, 还没在 catalog)`. Do NOT write. |
-| Trip-log reference | User explicitly associated this meal with a named/current trip, one compatible trip-note location was resolved, and the exact date plus relative meal-history link is not already present | After a successful, audited meal-log append, append the date-only resolved meal-history-title link from C.2a to the trip note. Do not copy meal-row details. |
+| Trip-log reference | User explicitly associated this meal with a named/current trip, one compatible trip-note location was resolved, and the exact date plus meal-history wikilink is not already present | After a successful, audited meal-log append, append the date-only resolved meal-history-title link from C.2a to the trip note. Do not copy meal-row details. |
 | Daily note | (never) | Daily notes are user-authored. Do NOT auto-create even if today's note is missing. |
 
 ### C.5 Confirm gate (non-negotiable)
@@ -126,7 +126,7 @@ python3 scripts/trip_reference.py \
   --section-sha256 "<captured-section-sha256>" \
   --anchor "<exact-insertion-anchor>" \
   --position "<before-or-after>" \
-  --reference "<fully-rendered-date-only-relative-meal-history-link>"
+  --reference "<fully-rendered-date-and-meal-history-wikilink>"
 ```
 
 The helper holds an exclusive advisory lock for the entire final read, validation, insertion, durable write, and release sequence.

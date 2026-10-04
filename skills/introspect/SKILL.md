@@ -100,12 +100,10 @@ Last built: YYYY-MM-DD
 [Recurring topics — what does this person think about most?]
 
 ## Intellectual Taste
-[What you find interesting, elegant, and worth your time — independent of goals.
-Built from session patterns and reading engagement.]
+[What you find interesting, elegant, and worth your time — independent of goals. Built from session patterns and reading engagement.]
 
 ## Curiosity Vectors
-[Areas you're starting to orbit but haven't formalized as goals yet.
-Detected from session patterns, reading saves, and discussion tangents.]
+[Areas you're starting to orbit but haven't formalized as goals yet. Detected from session patterns, reading saves, and discussion tangents.]
 
 ## Key People
 [Important people referenced frequently]

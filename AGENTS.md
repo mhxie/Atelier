@@ -50,13 +50,16 @@ keys, paths, command names, and data fields stay literal.
 - Scribe capture operations may record text the user already authored. Bounded
   session logs follow their protocol. All other `$OV` writes require explicit
   approval and are performed by the orchestrator.
-- Cite L2 files with `[Exact Title](<relative path>)`; wiki and Reflect-created
-  `<paths.notes>/` notes use `[[Title]]` (Reflect renames the latter).
-  Never attribute a statement to the user without its source.
+- Cite notes with `[[Title]]` (frontmatter or H1 title) or `[[Title|text]]`,
+  the only form Reflect backlinks and renames; attachments keep relative
+  paths, never `<...>`. Never attribute a statement to the user without its
+  source.
 - Match the user's language; use Chinese for Chinese topics and
   reading-intensive output. Do not use em dashes.
 - Notes other than daily notes open with an H1 title, as Reflect writes them;
-  sections use H2. Session reflections live under `<paths.reflections>/`.
+  sections use H2, and each paragraph is one line, since Reflect shows every
+  newline. Use only syntax Reflect renders (`zk_audit.py` [9]). Session
+  reflections live under `<paths.reflections>/`.
 - Ask rather than lecture. State success criteria before multi-step work,
   clarify materially different readings, and surface uncertainty directly.
 

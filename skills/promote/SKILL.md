@@ -74,7 +74,7 @@ Instructions:
      - H1 title
      - ## Summary (prose synthesis, no anchors)
      - ## Claims with [C1], [C2], ... headings
-     - Each claim gets a body paragraph and ^cn block ID
+     - Each claim gets a body paragraph (no `^cn` block ID)
      - Each claim gets a fenced ```anchors block with @anchor markers
      - ## Revision Log with today's date and creation context
   2. For @anchor markers:
@@ -108,7 +108,6 @@ For each `(language_code, shadow_dir)` entry:
    - Translate all prose (Summary, claim text, body paragraphs, Revision Log)
    - Leave untranslated: technical terms (e.g., Lance, Ray Data, PyArrow, MVCC), code identifiers, URLs, file paths
    - Leave untranslated: `@anchor`/`@pass` blocks and `@cite` lines, copied exactly as-is
-   - Leave untranslated: block IDs
    - Start the file with frontmatter `title: "<Title> (<language>)"`, e.g. `(中文)`, so title-keyed editors such as Reflect resolve `[[<Title>]]` to the English entry
    - Then keep the `# Title` in English (filename must match the source)
    - Put a localized backreference right below the H1, e.g. for Chinese:
@@ -143,7 +142,7 @@ The command finds notes about distributed locking in daily notes, agent findings
 
 ### [C1] Lease-based locks with TTL are preferred over indefinite locks in distributed systems
 
-[body with evidence...] ^c1
+[body with evidence...]
 
 ```anchors
 @anchor: url:https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html | valid_at: 2026-04-11

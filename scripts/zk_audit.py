@@ -4,15 +4,18 @@
 Checks missing domain READMEs/digests, archive overlap, root markdown orphans
 (except README.md), empty markdown, suspicious top-level directories, and the
 vault layout: a Git work tree outside file-sync folders whose raw/ and secure/
-folders (and root cache) are links into raw_store, plus Reflect titles that
-fall back to a filename another note shares. Archive empty stubs and archive
+folders (and root cache and archive) are links into raw_store, files at or
+above reflect-open's backup size guard outside raw_store, plus Reflect titles that
+fall back to a filename another note shares, and syntax Reflect does not
+render (`_reflect.nonnative`). Archive empty stubs and archive
 duplicate titles are counted, not individually listed, to avoid drowning
 current ingestion debt.
 Individual checks explain their false-positive bias.
 
 Run `uv run scripts/zk_audit.py [--json]` for a human/JSON report. Advisory
 findings exit 0; IO errors exit 2. `--fix-links` only creates missing links
-into raw_store; it never moves or deletes. `_paths.vault_root()` requires $OV,
+into raw_store; it never moves or deletes. `--fix-large` moves each oversized
+file into its folder's raw/ link and repoints Markdown links to it. `_paths.vault_root()` requires $OV,
 with no relative fallback; domain names are discovered, never hardcoded.
 """
 
@@ -22,14 +25,16 @@ import argparse
 import json
 import os
 import re
+import shutil
 import sys
-import unicodedata
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
+from _reflect import TitleIndex, backup_limit, nonnative, notes as reflect_notes, title_key, walk  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
 
@@ -54,9 +59,14 @@ for _path in wiki_dirs():
 # these when iCloud or Drive sync detects a phantom duplicate.
 _FINDER_DUP_RE = re.compile(r"\s(?:\d+|\(\d+\))$")
 
-# Folders that live in raw_store and appear in the vault as links; Git and
-# Reflect skip them. A .git under a file-sync client risks object corruption.
+# Reflect's Tasks view lists every open round task (`+ [ ]`), archived or not.
+_OPEN_TASK_RE = re.compile(r"^[\t ]*\+[\t ]+\[ \]")
+_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
+
+# Folders that live in raw_store and appear in the vault as links; Git skips
+# them and Reflect keeps them local-only. A .git under a file-sync client risks object corruption.
 _STORE_FOLDERS = {"raw", "secure"}
+_ROOT_LINKS = {"cache", tier_segments()["archive"]}
 _SYNC_ROOTS = ("/Library/CloudStorage/", "/Library/Mobile Documents/")
 
 
@@ -81,8 +91,13 @@ class Report:
     empty_md_archive_count: int = 0
     suspicious_dirs: list[Finding] = field(default_factory=list)
     layout: list[Finding] = field(default_factory=list)
+    large_files: list[Finding] = field(default_factory=list)
     duplicate_titles: list[Finding] = field(default_factory=list)
     duplicate_titles_archive_count: int = 0
+    archive_tasks: list[Finding] = field(default_factory=list)
+    reflect_syntax: list[Finding] = field(default_factory=list)
+    reflect_syntax_kinds: dict[str, int] = field(default_factory=dict)
+    reflect_syntax_raw_count: int = 0
 
     def total(self) -> int:
         # Includes the aggregated archive empty-stub count so a JSON
@@ -97,9 +112,13 @@ class Report:
             + len(self.empty_md)
             + len(self.suspicious_dirs)
             + len(self.layout)
+            + len(self.large_files)
             + len(self.duplicate_titles)
+            + len(self.archive_tasks)
+            + len(self.reflect_syntax)
             + self.empty_md_archive_count
             + self.duplicate_titles_archive_count
+            + self.reflect_syntax_raw_count
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -114,8 +133,13 @@ class Report:
                 "empty_md_archive_count": self.empty_md_archive_count,
                 "suspicious_dirs": [f.to_dict() for f in self.suspicious_dirs],
                 "layout": [f.to_dict() for f in self.layout],
+                "large_files": [f.to_dict() for f in self.large_files],
                 "duplicate_titles": [f.to_dict() for f in self.duplicate_titles],
                 "duplicate_titles_archive_count": self.duplicate_titles_archive_count,
+                "archive_tasks": [f.to_dict() for f in self.archive_tasks],
+                "reflect_syntax": [f.to_dict() for f in self.reflect_syntax],
+                "reflect_syntax_kinds": self.reflect_syntax_kinds,
+                "reflect_syntax_raw_count": self.reflect_syntax_raw_count,
             },
             "total": self.total(),
         }
@@ -298,9 +322,8 @@ def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
     empty_listed: list[Finding] = []
     empty_archive = 0
     archive = root / tier_segments()["archive"]
-    for path in root.rglob("*.md"):
-        rel_parts = path.relative_to(root).parts
-        if any(part.startswith(".") for part in rel_parts):
+    for path in (here / name for here, _, files in walk(root, _STORE_FOLDERS) for name in files):
+        if path.suffix != ".md":
             continue
         try:
             if path.stat().st_size != 0:
@@ -389,12 +412,13 @@ def check_layout(root: Path, store: Path | None) -> list[Finding]:
         here = Path(current)
         dirnames[:] = [d for d in dirnames if not _is_hidden(d)]
         # A dangling link is listed with files, not directories.
-        for d in [d for d in dirnames + files if d in _STORE_FOLDERS or (here == root and d == "cache")]:
+        for d in [d for d in dirnames + files if d in _STORE_FOLDERS or (here == root and d in _ROOT_LINKS)]:
             path, rel = here / d, (here / d).relative_to(root).as_posix()
             if path.is_symlink() and (Path(os.readlink(path)) != store / rel or not path.is_dir()):
                 out.append(Finding("layout", _rel(path), f"link should resolve to {store / rel}"))
             elif not path.is_symlink() and path.is_dir():
-                out.append(Finding("layout", _rel(path) + "/", "real folder: local-only and unsynced; move it into raw_store and link it"))
+                unsynced = "local-only and unsynced" if d in _STORE_FOLDERS else "in Git, not raw_store"
+                out.append(Finding("layout", _rel(path) + "/", f"real folder: {unsynced}; move it into raw_store and link it"))
             if d in dirnames:
                 dirnames.remove(d)
     for rel in _store_folders(store):
@@ -411,7 +435,7 @@ def fix_links(root: Path, store: Path) -> list[Path]:
     made: list[Path] = []
     if not (root / ".git").exists():
         return made
-    for rel in _store_folders(store):
+    for rel in sorted(d for d in _ROOT_LINKS if (store / d).is_dir()) + _store_folders(store):
         link = root / rel
         if not link.is_symlink() and not link.exists():
             link.parent.mkdir(parents=True, exist_ok=True)
@@ -420,39 +444,66 @@ def fix_links(root: Path, store: Path) -> list[Path]:
     return made
 
 
-# Reflect titles a note by frontmatter `title:`, then its first H1, then its
-# filename; a fallback title another note shares leaves [[Title]] ambiguous.
-_FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
-_H1_RE = re.compile(r"^ {0,3}# +(\S.*?)(?:\s+#+)?\s*$")
+def _large_files(root: Path, limit: int) -> list[Path]:
+    """Regular files at or above `limit` bytes outside raw/ and secure/ folders and links."""
+    out: list[Path] = []
+    for current, dirnames, files in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if not _is_hidden(d) and d not in _STORE_FOLDERS
+                             and not (Path(current) / d).is_symlink())
+        out += [p for p in (Path(current) / f for f in sorted(files))
+                if not p.is_symlink() and p.stat().st_size >= limit]
+    return out
 
 
-def _reflect_title(text: str) -> str | None:
-    """Frontmatter `title:`, else the first ATX H1 outside code fences."""
-    lines = text.splitlines()
-    body = 0
-    if lines and lines[0].rstrip() == "---":
-        for i, line in enumerate(lines[1:], 1):
-            if line.rstrip() == "---":
-                body = i + 1
-                break
-            if line.startswith("title:") and (value := line[6:].strip().strip("\"'").strip()):
-                return value
-    fenced = False
-    for line in lines[body:]:
-        if _FENCE_RE.match(line):
-            fenced = not fenced
-        elif not fenced and (m := _H1_RE.match(line)):
-            return m.group(1)
-    return None
+def check_large_files(root: Path, limit: int | None) -> list[Finding]:
+    """Files reflect-open's backup guard withholds stay on this Mac until moved into raw_store."""
+    if limit is None:
+        return []
+    return [Finding("large_files", _rel(p), f"{p.stat().st_size / 2**20:.1f} MiB >= {limit // 2**20} MiB; "
+                    "move it into raw_store with --fix-large") for p in _large_files(root, limit)]
 
 
-def _title_key(title: str) -> str:
-    """Approximate Reflect's foldFallbackTitleKey: NFC, lowercase, collapsed
-    whitespace, leading emoji (symbol, joiner, and selector code points) dropped."""
-    key = " ".join(unicodedata.normalize("NFC", title).lower().split())
-    while key and (unicodedata.category(key[0]) in ("So", "Sk") or key[0] in "‍️"):
-        key = key[1:]
-    return key.lstrip()
+def fix_large(root: Path, store: Path, limit: int) -> list[tuple[Path, Path]]:
+    """Move oversized files into their folder's raw/ link, creating it, then repoint links.
+
+    Skips a file whose folder has a real raw/ (a layout finding) or whose name is taken.
+    """
+    from relink import LINK_RE, encode_href, mask_code, relative_path, unmask_code  # type: ignore[import-not-found]
+
+    moved: list[tuple[Path, Path]] = []
+    for path in _large_files(root, limit):
+        raw = path.parent / "raw"
+        if not raw.is_symlink():
+            if raw.exists():
+                continue
+            (store / raw.relative_to(root)).mkdir(parents=True, exist_ok=True)
+            raw.symlink_to(store / raw.relative_to(root))
+        if not (raw / path.name).exists():
+            shutil.move(path, raw / path.name)
+            moved.append((path.relative_to(root), (raw / path.name).relative_to(root)))
+    targets = dict(moved)
+
+    def repoint(match: re.Match, source: Path) -> str:
+        dest = match.group(4).strip("<>")
+        old = unquote(dest.split("#")[0])
+        for candidate in (source.parent / old, Path(old)):
+            new = targets.get(Path(os.path.normpath(candidate)))
+            if new is not None:
+                return match.group(1) + match.group(2) + match.group(3) + encode_href(relative_path(new, source)) + ")"
+        return match.group(0)
+
+    for here, _, files in walk(root, _STORE_FOLDERS) if moved else ():
+        for name in files:
+            note = here / name
+            if name.endswith(".md") and not note.is_symlink():
+                text = note.read_text(encoding="utf-8")
+                if any(old.name in unquote(text) for old in targets):
+                    masked, code = mask_code(text)
+                    source = note.relative_to(root)
+                    new = unmask_code(LINK_RE.sub(lambda m: repoint(m, source), masked), code)
+                    if new != text:
+                        atomic_write(note, new)
+    return moved
 
 
 def check_duplicate_titles(root: Path) -> tuple[list[Finding], int]:
@@ -466,18 +517,11 @@ def check_duplicate_titles(root: Path) -> tuple[list[Finding], int]:
     """
     seg = tier_segments()
     archive, daily = root / seg["archive"], root / seg["daily_notes"]
-    ignore = root / ".reflectignore"
-    patterns = ignore.read_text(encoding="utf-8").splitlines() if ignore.is_file() else []
-    ignored = {p.strip().strip("/") for p in patterns if p.strip() and not p.lstrip().startswith("#")}
     groups: dict[str, list[tuple[Path, bool]]] = defaultdict(list)
-    for path in root.rglob("*.md"):
-        rel = path.relative_to(root)
-        if path.is_symlink() or path.parent == daily or any(
-            _is_hidden(p) or p in ignored or p in _STORE_FOLDERS for p in rel.parts[:-1]
-        ):
-            continue
-        title = _reflect_title(path.read_text(encoding="utf-8", errors="replace"))
-        groups[_title_key(title or path.stem)].append((path, title is None))
+    for note in reflect_notes(root):
+        path = root / note.path
+        if path.parent != daily:
+            groups[title_key(note.title or path.stem)].append((path, note.title is None))
     out: list[Finding] = []
     archive_only = 0
     for key, notes in sorted(groups.items()):
@@ -488,6 +532,53 @@ def check_duplicate_titles(root: Path) -> tuple[list[Finding], int]:
             continue
         out.append(Finding("duplicate_title", key, ", ".join(sorted(_rel(p) for p, _ in notes))))
     return out, archive_only
+
+
+def check_archive_tasks(root: Path) -> list[Finding]:
+    """Archived notes with open `+ [ ]` lines outside code fences.
+
+    Reflect lists them as live tasks; demoting the note's `+` checkboxes to
+    `-` keeps the record and drops it from the Tasks view.
+    """
+    archive = Path(tier_segments()["archive"])
+    out: list[Finding] = []
+    for note in reflect_notes(root):
+        if not note.path.is_relative_to(archive):
+            continue
+        fenced, count = False, 0
+        for line in (root / note.path).read_text(encoding="utf-8", errors="replace").splitlines():
+            if _FENCE_RE.match(line):
+                fenced = not fenced
+            elif not fenced and _OPEN_TASK_RE.match(line):
+                count += 1
+        if count:
+            out.append(Finding("archive_task", _rel(root / note.path), f"{count} open `+ [ ]`"))
+    return out
+
+
+def check_reflect_syntax(root: Path) -> tuple[list[Finding], dict[str, int], int]:
+    """Reflect-visible notes using syntax reflect-open shows raw, ignores, or folds.
+
+    User-authored daily notes and raw inbox captures are counted, not listed.
+    """
+    seg = tier_segments()
+    raw_tiers = [Path(seg["daily_notes"]), Path(seg["inbox"])]
+    titles = TitleIndex(root)
+    out: list[Finding] = []
+    kinds: dict[str, int] = defaultdict(int)
+    raw = 0
+    for note in reflect_notes(root):
+        path = root / note.path
+        hits = nonnative(path.read_text(encoding="utf-8", errors="replace"), path, titles)
+        if not hits:
+            continue
+        if any(note.path.is_relative_to(t) for t in raw_tiers):
+            raw += 1
+            continue
+        for kind, count in hits.items():
+            kinds[kind] += count
+        out.append(Finding("reflect_syntax", _rel(path), ", ".join(f"{k} {v}" for k, v in sorted(hits.items()))))
+    return out, dict(sorted(kinds.items())), raw
 
 
 def _rel(path: Path) -> str:
@@ -511,7 +602,10 @@ def run_audit() -> Report:
     report.root_orphans, report.empty_md, report.empty_md_archive_count = check_root_orphans(OV)
     report.suspicious_dirs = check_suspicious_dirs(OV)
     report.layout = check_layout(OV, raw_store())
+    report.large_files = check_large_files(OV, backup_limit(OV))
     report.duplicate_titles, report.duplicate_titles_archive_count = check_duplicate_titles(OV)
+    report.archive_tasks = check_archive_tasks(OV)
+    report.reflect_syntax, report.reflect_syntax_kinds, report.reflect_syntax_raw_count = check_reflect_syntax(OV)
     return report
 
 
@@ -548,6 +642,7 @@ def format_human(report: Report) -> str:
         ),
         ("[5] Suspicious top-level dirs", report.suspicious_dirs, None),
         ("[6] Vault layout", report.layout, "missing links are fixable with --fix-links"),
+        ("[10] Files above the backup size guard", report.large_files, "Reflect withholds them from Git"),
         (
             "[7] Duplicate Reflect titles",
             report.duplicate_titles,
@@ -557,6 +652,22 @@ def format_human(report: Report) -> str:
                 if report.duplicate_titles_archive_count
                 else None
             ),
+        ),
+        (
+            "[8] Open Reflect tasks in archived notes",
+            report.archive_tasks,
+            "demote the note's `+ [ ]`/`+ [x]` to `-`, or move live items to a GTD quarter",
+        ),
+        (
+            "[9] Syntax Reflect does not render",
+            report.reflect_syntax,
+            "; ".join(
+                filter(None, [
+                    ", ".join(f"{k} {v}" for k, v in report.reflect_syntax_kinds.items()),
+                    f"+ {report.reflect_syntax_raw_count} daily or inbox notes (aggregated)"
+                    if report.reflect_syntax_raw_count else "",
+                ])
+            ) or None,
         ),
     ]
 
@@ -575,16 +686,16 @@ def format_human(report: Report) -> str:
         lines.append("")
 
     total = report.total()
-    arch = report.empty_md_archive_count + report.duplicate_titles_archive_count
+    arch = report.empty_md_archive_count + report.duplicate_titles_archive_count + report.reflect_syntax_raw_count
     actionable = total - arch
     if arch:
         summary = (
-            f"Summary: 8 categories, {actionable} actionable + {arch} archive-aggregated "
+            f"Summary: 11 categories, {actionable} actionable + {arch} aggregated "
             f"= {total} total finding(s). Audit is advisory; no $OV content was modified."
         )
     else:
         summary = (
-            f"Summary: 8 categories, {total} total finding(s). "
+            f"Summary: 11 categories, {total} total finding(s). "
             "Audit is advisory; no $OV content was modified."
         )
     lines.append(summary)
@@ -603,6 +714,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     parser.add_argument("--fix-links", action="store_true", help="Create missing links into raw_store, then audit.")
+    parser.add_argument("--fix-large", action="store_true", help="Move oversized files into raw_store, then audit.")
     args = parser.parse_args(argv)
 
     if not OV.is_dir():
@@ -616,6 +728,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.fix_links and (store := raw_store()) is not None and store.is_dir():
         for link in fix_links(OV, store):
             sys.stderr.write(f"zk_audit: linked {_rel(link)}\n")
+    if args.fix_large and (store := raw_store()) is not None and store.is_dir() and (limit := backup_limit(OV)):
+        for old, new in fix_large(OV, store, limit):
+            sys.stderr.write(f"zk_audit: moved $OV/{old.as_posix()} to $OV/{new.as_posix()}\n")
     report = run_audit()
 
     if args.json:

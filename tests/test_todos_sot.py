@@ -22,7 +22,7 @@ class TodoSotTests(unittest.TestCase):
         self.owner = self.root / 'finance' / 'Example Ledger.md'
         self.owner.parent.mkdir()
         self.task = self.gtd / '2099Q1.md'
-        self.ref = '[sot](<../finance/Example Ledger.md#benefit-a>)'
+        self.ref = '[[Example Ledger#Benefit|sot]]'
         self.set_owner('✅')
         self.task.write_text(f'+ [ ] Claim benefit {self.ref} due:2099-01-01\n+ [ ] Ordinary task\n')
         for target, value in [('GTD_DIR', self.gtd), ('DAILY_NOTES_DIR', self.root / 'daily-notes')]:
@@ -37,7 +37,7 @@ class TodoSotTests(unittest.TestCase):
     def set_owner(self, state):
         self.owner.write_text('| Credit | Face | Status | Evidence |\n'
                               '|---|---|---|---|\n'
-                              f'| Benefit <a id="benefit-a"></a> | $10 | {state} | confirmed |\n')
+                              f'| Benefit | $10 | {state} | confirmed |\n')
 
     def run_sync(self, apply=False):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -47,7 +47,7 @@ class TodoSotTests(unittest.TestCase):
         before = self.task.read_bytes()
         tasks = todos.collect_all_todos(load_age=False)
         self.assertEqual([t.state for t in tasks], ['done', 'open'])
-        self.assertNotIn('[sot]', tasks[0].text)
+        self.assertNotIn('|sot]]', tasks[0].text)
         self.assertEqual(len(todos.collect_open_todos(load_age=False)), 1)
         self.assertEqual(self.task.read_bytes(), before)
         self.set_owner('📅')
@@ -78,28 +78,32 @@ class TodoSotTests(unittest.TestCase):
         self.assertEqual(self.task.read_bytes(), before.replace(b'+ [ ] Claim', b'+ [x] Claim'))
 
     def test_reopens_derived_completion_but_preserves_explicit_cancellation(self):
-        source = self.ref.replace('[sot]', '[source]')
-        self.task.write_text(f'+ [x] Claim {self.ref}\n+ [~] Cancelled {source}\n')
+        source = self.ref.replace('|sot]]', '|source]]')
+        self.task.write_text(f'+ [x] Claim {self.ref}\n+ [x] ~~Cancelled {source}~~\n')
         self.set_owner('☐')
         self.run_sync(apply=True)
-        self.assertEqual(self.task.read_text(), f'+ [ ] Claim {self.ref}\n+ [~] Cancelled {source}\n')
+        self.assertEqual(self.task.read_text(), f'+ [ ] Claim {self.ref}\n+ [x] ~~Cancelled {source}~~\n')
+        self.assertEqual([t.state for t in todos.collect_all_todos(load_age=False)], ['open', 'killed'])
 
-    def test_derived_cancellation_can_reopen(self):
+    def test_derived_cancellation_strikes_through_and_can_reopen(self):
+        before = self.task.read_text()
         self.set_owner('🚫')
         self.run_sync(apply=True)
-        self.assertTrue(self.task.read_text().startswith('+ [~]'))
+        self.assertEqual(self.task.read_text(), before.replace(
+            f'+ [ ] Claim benefit {self.ref} due:2099-01-01', f'+ [x] ~~Claim benefit {self.ref} due:2099-01-01~~'))
+        self.assertEqual(todos.collect_all_todos(load_age=False)[0].state, 'killed')
         self.set_owner('☐')
         self.run_sync(apply=True)
-        self.assertTrue(self.task.read_text().startswith('+ [ ]'))
+        self.assertEqual(self.task.read_text(), before)
 
     def test_bad_link_keeps_its_marker_and_spares_other_tasks(self):
-        self.task.write_text('+ [ ] Broken [sot](<../finance/Missing.md#benefit-a>)\n'
+        self.task.write_text('+ [ ] Broken [[Missing#Benefit|sot]]\n'
                              f'+ [ ] Claim {self.ref}\n')
         with contextlib.redirect_stderr(io.StringIO()) as err:
             tasks = todos.collect_all_todos(load_age=False)
         self.assertEqual([(t.text, t.state) for t in tasks], [('Broken', 'open'), ('Claim', 'done')])
-        self.assertEqual(tasks[1].sot, '../finance/Example Ledger.md#benefit-a')
-        self.assertIn('Missing.md', tasks[0].sot_error)
+        self.assertEqual(tasks[1].sot, 'Example Ledger#Benefit')
+        self.assertIn('Missing', tasks[0].sot_error)
         self.assertIn('2099Q1.md:1', err.getvalue())
         with self.assertRaises((ValueError, OSError)):
             self.run_sync()
@@ -117,8 +121,8 @@ class TodoSotTests(unittest.TestCase):
 
     def test_bad_owners_block_all_writes(self):
         good = self.owner.read_text()
-        for bad in [good + good, good.replace('benefit-a', 'benefit-b'),
-                    good.replace('✅', 'unknown'), '<a id="benefit-a"></a>\n',
+        for bad in [good + good, good.replace('Benefit', 'Other'),
+                    good.replace('✅', 'unknown'), 'Benefit\n',
                     '```markdown\n' + good + '```\n',
                     '```markdown\n```python\n' + good + '```\n']:
             with self.subTest(owner=bad):
@@ -129,11 +133,14 @@ class TodoSotTests(unittest.TestCase):
                 self.assertEqual(self.task.read_bytes(), before)
 
     def test_missing_and_malformed_links_block_writes(self):
-        for ref in ['[sot](<../finance/Missing.md#benefit-a>)',
-                    '[sot](broken)', self.ref + ' ' + self.ref,
-                    '[sot](<../../outside.md#benefit-a>)',
-                    '[sot](<2099Q1.md#benefit-a>)',
-                    '[sot](<../daily-notes/example.md#benefit-a>)']:
+        (self.root / 'daily-notes').mkdir()
+        (self.root / 'daily-notes' / 'example.md').write_text('note\n')
+        for ref in ['[[Missing#Benefit|sot]]',
+                    '[[Example Ledger#^benefit-a|sot]]', '[[Example Ledger#benefit|sot]]',
+                    self.ref + ' ' + self.ref,
+                    '[sot](<../finance/Example Ledger.md#benefit-a>)',
+                    '[[2099Q1#Benefit|sot]]',
+                    '[[example#Benefit|sot]]']:
             with self.subTest(ref=ref):
                 self.task.write_text(f'+ [ ] Claim {ref}\n')
                 before = self.task.read_bytes()
@@ -192,7 +199,7 @@ class TodoSotTests(unittest.TestCase):
         self.set_owner('☐')
         groups = daily_brief.load_todos(self.root, date(2099, 1, 1), warnings)
         self.assertTrue(groups)
-        self.assertNotIn('[sot]', str(groups))
+        self.assertNotIn('|sot]]', str(groups))
 
     def test_digest_latest_reflection_uses_owner(self):
         reflection = self.root / 'reflections' / '2099-01-01-reflection.md'

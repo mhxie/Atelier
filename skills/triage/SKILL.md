@@ -183,7 +183,7 @@ reason: `uv run scripts/decisions.py record --class triage/intent-coverage
 
 Batch the cue's `items` (hubs and transcripts already skipped). Propose a tier
 per note; `mv` only approved ones. Filed notes stop being renamed, `[[Title]]`
-links survive, `relink.py --apply` repairs path links. Snoozing hides the lane.
+links survive, `relink.py --apply` repairs attachment links. Snoozing hides the lane.
 
 ## Phase 3: batch close
 

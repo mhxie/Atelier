@@ -14,11 +14,13 @@ import re
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import atomic_write, tier, tier_files, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _reflect import TitleIndex  # type: ignore[import-not-found]  # noqa: E402
 
 GTD_DIR = tier("gtd")
 REFLECTIONS_DIR = tier("reflections")
@@ -37,10 +39,12 @@ INLINE_META = {
     "area": re.compile(r"\barea:(#[\w\-]+)\b"),
 }
 
-# Reflect reads a `+ [ ]` task's first [[YYYY-MM-DD]] as its due date; `due:` still wins.
-REFLECT_DUE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})\]\]")
+# Reflect reads a `+ [ ]` task's first [[YYYY-MM-DD]] (aliased or not) as its due date; `due:` still wins.
+REFLECT_DUE_RE = re.compile(r"\[\[(\d{4}-\d{2}-\d{2})(?:\|[^\]\n]*)?\]\]")
 
 STATE_MAP = {" ": "open", "x": "done", "X": "done", "~": "killed", "/": "wip"}
+# Reflect knows only open and done, so a struck-through done task is cancelled; `[~]` and `[/]` are legacy.
+STRUCK_RE = re.compile(r"^~~(.*)~~$")
 
 NEXT_ACTION_HEADERS = ("## Next Action", "## Next Actions")
 SKIP_SUBSECTIONS = ("不做", "不要做", "Parked", "Skip", "Don't")
@@ -176,9 +180,9 @@ def scan_gtd_file(path: Path) -> list[Todo]:
         if not m:
             continue
         state_char, content = m.groups()
-        state = STATE_MAP.get(state_char, "open")
+        state, text = checkbox_state(state_char, content)
         todo = Todo(
-            text=content.strip(),
+            text=text,
             source=str(path),
             line=i,
             state=state,
@@ -253,29 +257,52 @@ def scan_reflection_next_actions(path: Path) -> list[Todo]:
     return out
 
 
-SOT_REF_RE = re.compile(r'\[sot\]\(<([^<>\n]+)#([a-z0-9][a-z0-9-]*)>\)')
+SOT_REF_RE = re.compile(r'\[\[([^\[\]|#\n]+)#([^\[\]|\n]+)\|sot\]\]')
 SOT_STATES = {"☐": "open", "📅": "open", "✅": "done", "🚫": "killed"}
-SOT_MARKERS = {"open": " ", "done": "x", "killed": "~"}
+SOT_MARKERS = {"open": " ", "done": "x", "killed": "x"}
+
+
+def checkbox_state(marker: str, content: str) -> tuple[str, str]:
+    """(state, text) of a checkbox; a done task struck through is cancelled."""
+    state, text = STATE_MAP.get(marker, "open"), content.strip()
+    if state == "done" and (struck := STRUCK_RE.match(text)):
+        return "killed", struck[1].strip()
+    return state, text
+
+
+def render_checkbox(line: str, match: re.Match, state: str, text: str) -> str:
+    """`line` rewritten to `state` the way Reflect shows it, keeping the rest of the line."""
+    body = f"~~{text}~~" if state == "killed" else text
+    tail = match[2][len(match[2].rstrip()):]
+    return (line[:match.start(1)] + SOT_MARKERS[state] + line[match.end(1):match.start(2)]
+            + body + tail + line[match.end(2):])
+
+
+@lru_cache(maxsize=4)
+def _titles(root: Path) -> TitleIndex:
+    return TitleIndex(root)
 
 
 def resolve_sot(todo: Todo, snapshots: dict[Path, str]) -> str:
     """Resolve an opted-in ledger row, never infer completion from prose."""
-    if '[sot]' not in todo.text:
+    if '[sot](' in todo.text or any(row.startswith('^') for _, row in SOT_REF_RE.findall(todo.text)):
+        raise ValueError(f'{todo.source}:{todo.line}: legacy SoT link; rewrite as '
+                         '[[<owner note>#<row>|sot]], <row> being the owner row\'s first cell')
+    if '|sot]]' not in todo.text:
         return todo.state
     refs = SOT_REF_RE.findall(todo.text)
-    if len(refs) != 1 or todo.text.count('[sot]') != 1:
-        raise ValueError(f'{todo.source}:{todo.line}: expected one [sot](<path#id>)')
-    relative, anchor = refs[0]
-    path = (Path(todo.source).parent / relative).resolve()
-    if (Path(relative).is_absolute() or not path.is_relative_to(vault_root())
-            or path.is_relative_to(GTD_DIR.resolve())
+    if len(refs) != 1 or todo.text.count('|sot]]') != 1:
+        raise ValueError(f'{todo.source}:{todo.line}: expected one [[<owner note>#<row>|sot]]')
+    title, anchor = refs[0]
+    rel = _titles(vault_root()).resolve(title)
+    if rel is None:
+        raise ValueError(f'{todo.source}:{todo.line}: missing or ambiguous SoT owner: {title}')
+    path = (vault_root() / rel).resolve()
+    if (path.is_relative_to(GTD_DIR.resolve())
             or path.is_relative_to(DAILY_NOTES_DIR.resolve()) or path.suffix != '.md'):
-        raise ValueError(f'{todo.source}:{todo.line}: invalid SoT owner: {relative}')
+        raise ValueError(f'{todo.source}:{todo.line}: invalid SoT owner: {title}')
     if path not in snapshots:
         snapshots[path] = path.read_bytes().decode('utf-8')
-    needle = f'<a id="{anchor}"></a>'
-    if snapshots[path].count(needle) != 1:
-        raise ValueError(f'{path}: expected exactly one owner anchor {anchor}')
     fenced = None
     rows = []
     for line in snapshots[path].splitlines():
@@ -286,13 +313,15 @@ def resolve_sot(todo: Todo, snapshots: dict[Path, str]) -> str:
             elif (fence[1][0] == fenced[0] and len(fence[1]) >= len(fenced)
                   and not line[fence.end():].strip()):
                 fenced = None
-        elif needle in line and fenced is None:
-            rows.append(line)
+        elif fenced is None and line.startswith('|'):
+            cells = [cell.strip() for cell in re.split(r'(?<!\\)\|', line)]
+            if len(cells) > 1 and cells[1] == anchor.strip():
+                rows.append(cells)
     if len(rows) != 1:
-        raise ValueError(f'{path}#{anchor}: owner must be outside code fences')
-    row = rows[0]
-    cells = [cell.strip() for cell in re.split(r'(?<!\\)\|', row)]
-    if not row.startswith('|') or len(cells) < 5 or cells[3] not in SOT_STATES:
+        raise ValueError(f'{path}#{anchor}: expected exactly one owner row, outside code fences, '
+                         'whose first cell is the link fragment')
+    cells = rows[0]
+    if len(cells) < 5 or cells[3] not in SOT_STATES:
         raise ValueError(f'{path}#{anchor}: expected ledger Status in third column')
     return SOT_STATES[cells[3]]
 
@@ -327,13 +356,12 @@ def sot_changes(paths: list[Path]) -> tuple[dict[Path, str], dict[Path, str], li
             match = CHECKBOX_RE.match(line)
             if not match:
                 continue
-            state = STATE_MAP[match[1]]
-            todo = Todo(match[2], str(path), index + 1, state)
+            state, text = checkbox_state(match[1], match[2])
+            todo = Todo(text, str(path), index + 1, state)
             expected = linked_state(state, resolve_sot(todo, snapshots))
             if state != expected:
                 findings.append(f'{path}:{index + 1}: {state} -> {expected}')
-                start, end = match.span(1)
-                lines[index] = line[:start] + SOT_MARKERS[expected] + line[end:]
+                lines[index] = render_checkbox(line, match, expected, text)
         updated = ''.join(lines)
         if updated != snapshots[path]:
             updates[path] = updated

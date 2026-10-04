@@ -59,7 +59,7 @@ For multi-turn input, merge chronologically using event-time signals in the cont
 
 `raw_content` is the user's words. Daily-note capture is verbatim-only: write what the orchestrator passed in `raw_content`, nothing else. If the user listed categories like `1. X 2. Y 3. Z`, those are wayfinding pointers, not outline headers — do not invent paragraph bodies underneath them. If `raw_content` arrives with multi-paragraph synthesis content composed under such categories, that is an orchestrator error: return a one-line clarification "raw_content appears synthesized rather than verbatim, re-dispatch with user's original words" and stop.
 
-**Link pass-through for `daily_note`.** If `raw_content` already contains GitHub-navigable markdown links (`[Display](<relative/path.md>)`, with angle brackets when the path contains spaces), preserve them verbatim. Do not invent new links, do not auto-resolve person names, and do not convert to or from `[[Wiki]]` syntax. Link composition — when it happens — is the orchestrator's responsibility upstream, not Scribe's.
+**Link pass-through for `daily_note`.** If `raw_content` already contains links (`[[Title]]` or Markdown links), preserve them verbatim. Do not invent new links, do not auto-resolve person names, and do not convert between link forms. Link composition, when it happens, is the orchestrator's responsibility upstream, not Scribe's.
 
 ### 2. `dining_row` — dining-log row append
 
@@ -77,7 +77,7 @@ The orchestrator passes the exact marker glyphs to use (e.g., what an unchecked 
 
 For `add`: read the target file to confirm the bullet style and any in-file section conventions; append in matching style.
 
-For toggle ops (`toggle_done` / `toggle_killed`): re-read the line at `line_no` and verify it begins with `expected_text`. If it does not match (the user manually edited mid-session), abort and return a one-line "line drifted" error. Never risk overwriting unrelated content.
+For toggle ops (`toggle_done` / `toggle_killed`): re-read the line at `line_no` and verify it begins with `expected_text`. Reflect has no cancelled state, so `toggle_killed` sets the done marker and wraps the task text in `~~`. If it does not match (the user manually edited mid-session), abort and return a one-line "line drifted" error. Never risk overwriting unrelated content.
 
 For `prefix_line`: re-read the line at `line_no` and verify it begins with `expected_text`. Then prepend `prefix` to the bullet's text portion (after the bullet marker). Used for closure-style edits where the marker stays unchanged but a status prefix is prepended (e.g., prepend `DONE <date>: ` to a reflection-file bullet so the scanner excludes it from open-TODO scans). Same line-drift guard as toggles.
 

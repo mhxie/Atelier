@@ -833,6 +833,97 @@ class QmdAdapterTest(unittest.TestCase):
         row = search()["personal/secure/ledger.md"]
         self.assertEqual((row["representation"], row.keys() & {"title", "snippet"}), ("path_only", set()))
 
+    def test_auto_fills_scopes_reflect_never_indexes_from_qmd_lexically(self):
+        reflected = [self.hit(path) for path in ("wiki/rate-limits.md", "archive/old-plan.md", "work/任务编排.md")]
+        self.fake_reflect(reflected)
+        # Without a QMD index the Reflect rows still answer, and the gap is announced.
+        with patch.object(semantic, "bridge") as child:
+            code, out, err = self.cli("query", "retry", "--scope", "all")
+        self.assertEqual(code, 0, err)
+        child.assert_not_called()
+        self.assertEqual([row["backend"] for row in json.loads(out)], ["reflect"] * 3)
+        self.assertIn("index is absent", err)
+        self.assertIn("returning Reflect rows without raw, process", err)
+        self.fake_index()
+        filled = [{**self.qmd_row(), "path": "sessions/run.md", "scope": "process"},
+                  {**self.qmd_row(), "path": "raw/import/evidence.md", "scope": "raw"}]
+        with patch.object(semantic, "bridge", return_value=filled) as child:
+            code, out, err = self.cli("query", "retry", "--scope", "all")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(child.call_count, 1)
+        self.assertEqual((child.call_args.kwargs["mode"], child.call_args.kwargs["collections"]),
+                         ("lexical", ["raw", "process"]))
+        self.assertNotIn("roles", child.call_args.kwargs)  # no model loads beside a Reflect answer
+        self.assertEqual([(row["path"], row["backend"], row["score_kind"]) for row in json.loads(out)], [
+            ("wiki/rate-limits.md", "reflect", "lexical"), ("sessions/run.md", "qmd", "lexical"),
+            ("archive/old-plan.md", "reflect", "lexical"), ("raw/import/evidence.md", "qmd", "lexical"),
+            ("work/任务编排.md", "reflect", "lexical")])
+        with patch.object(semantic, "bridge", return_value=filled):
+            self.assertEqual([row["path"] for row in json.loads(self.cli("query", "retry", "--scope", "all",
+                                                                         "--top", "2")[1])],
+                             ["wiki/rate-limits.md", "sessions/run.md"])
+        # A vault that does not hide its process folder from Reflect gets one row per path.
+        self.fake_reflect([self.hit("sessions/run.md"), self.hit("wiki/rate-limits.md")])
+        with patch.object(semantic, "bridge", return_value=filled[:1]):
+            code, out, err = self.cli("query", "retry", "--scope", "process")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([row["path"] for row in json.loads(out)], ["sessions/run.md"])
+        # Scopes Reflect fully indexes never touch QMD.
+        self.fake_reflect([self.hit("archive/old-plan.md")])
+        with patch.object(semantic, "bridge") as child:
+            self.assertEqual(self.cli("query", "retry", "--scope", "archive")[0], 0)
+        child.assert_not_called()
+
+    def link_archive(self, store):
+        """Move archive/ into the store beside an archived secure note; the vault keeps one link."""
+        shutil.move(self.vault / "archive", store / "archive")
+        (store / "archive/old/secure").mkdir(parents=True)
+        (store / "archive/old/secure/parked.md").write_text("# Parked\n\nparkedsentinel ledger\n")
+        (self.vault / "archive").symlink_to(store / "archive", target_is_directory=True)
+
+    def test_linked_archive_is_read_from_the_store_and_fills_reflect_answers(self):
+        store = self.mirror_store()
+        self.use_store(store)
+        self.link_archive(store)
+        archive = semantic.collection_config(self.vault)["collections"]["archive"]
+        self.assertEqual(archive["path"], str(store))
+        self.assertIn("**/secure/**", archive["ignore"])
+        self.assertTrue(semantic.store_mirror("archive/old-plan.md", self.vault, store))
+        self.fake_index()
+        self.fake_reflect([self.hit("wiki/rate-limits.md")])
+        parked = {**self.qmd_row(), "path": "archive/old-plan.md", "scope": "archive"}
+        with patch.object(semantic, "bridge", return_value=[parked]) as child:
+            code, out, err = self.cli("query", "plan", "--scope", "all")
+        self.assertEqual(code, 0, err)
+        self.assertIn("archive", child.call_args.kwargs["collections"])
+        self.assertEqual([row["path"] for row in json.loads(out)], ["wiki/rate-limits.md", "archive/old-plan.md"])
+
+    @unittest.skipUnless((semantic.ROOT / "node_modules/@tobilu/qmd/package.json").is_file(), "run npm ci for real QMD")
+    def test_real_qmd_indexes_a_linked_archive_but_not_its_secure_notes(self):
+        store = self.mirror_store()
+        self.use_store(store)
+        self.link_archive(store)
+        code, _, err = self.cli("index", "--lexical-only")
+        self.assertEqual(code, 0, err)
+        for sentinel, expected in (("archivesentinel", ["archive/old-plan.md"]), ("parkedsentinel", [])):
+            code, out, err = self.cli("query", sentinel, "--mode", "lexical", "--scope", "all", "--backend", "qmd")
+            self.assertEqual(code, 0, err)
+            self.assertEqual([row["path"] for row in json.loads(out)], expected)
+
+    def test_auto_adds_secure_paths_beside_reflect_hits(self):
+        self.use_store(self.mirror_store())
+        self.fake_index()
+        self.fake_reflect([self.hit("wiki/rate-limits.md")])
+        secure = {**self.qmd_row(), "path": "personal/secure/ledger.md", "scope": semantic.SECURE}
+        with patch.object(semantic, "bridge", return_value=[secure]) as child:
+            code, out, err = self.cli("query", "ledger")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(child.call_args.kwargs["collections"], [semantic.SECURE])
+        rows = json.loads(out)
+        self.assertEqual([(row["path"], row["scope"], row["representation"]) for row in rows], [
+            ("wiki/rate-limits.md", "active", "authored"), ("personal/secure/ledger.md", "active", "path_only")])
+        self.assertEqual(rows[1].keys() & {"title", "line", "snippet"}, set())
+
     def test_qmd_backend_keeps_the_qmd_path_and_never_runs_reflect(self):
         self.fake_reflect([self.hit("wiki/rate-limits.md")])
         code, out, err = self.cli("query", "retry", "--backend", "qmd", "--mode", "lexical")

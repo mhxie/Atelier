@@ -80,10 +80,11 @@ export OV="/absolute/path/to/your/existing-vault"
 
 Atelier can also run on a split vault: a Git work tree that reflect-open, or
 another sync app, commits and pushes, with every `raw/` and `secure/` folder
-kept in a separate raw store such as a cloud-drive folder. Set `raw_store` in
+and the archive kept in a separate raw store such as a cloud-drive folder. Set `raw_store` in
 `harness/paths.local.toml`, then run `uv run scripts/zk_audit.py --fix-links`
-to link those folders into the vault. Git and Reflect skip the links; local
-search indexes them from the store.
+to link those folders into the vault. Git skips the links, reflect-open
+shows them read-only without syncing, and local search indexes them from
+the store.
 
 Follow [local search setup](sources/semantic.md#setup-and-hardware) to initialize
 models and index your notes. The [path registry](harness/paths.toml) maps the

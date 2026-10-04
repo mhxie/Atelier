@@ -62,10 +62,10 @@ sources:
 
 | Type | <attr 1> | Status | <date col 1> | <date col 2> | Scan(s) |
 |---|---|---|---|---|---|
-| <doc kind> | <attr value> | ✅ | <date or TODO> | <date or TODO> | [[vault-relative/path/file.ext]] |
+| <doc kind> | <attr value> | ✅ | <date or TODO> | <date or TODO> | [file.ext](raw/<sub>/file.ext) |
 | ... |
 
-(One row per logical document. If the same logical doc has multiple file copies, list each as a separate `[[wikilink]]` in the same cell, separated by ` · ` (middot).)
+(One row per logical document. If the same logical doc has multiple file copies, list each as a separate link in the same cell, separated by ` · ` (middot).)
 
 ## ⛔ Missing 优先补
 
@@ -93,13 +93,12 @@ sources:
 - <related digests / timelines / domain READMEs>
 ```
 
-## Wikilink rules
+## Link rules
 
-- **Use vault-relative paths.** Wikilink resolvers expect paths from the vault root, not from the index file's directory. Write `[[abroad/raw/<sub>/<file>.pdf]]`, not `[[../abroad/...]]`.
-- **Include extension for non-md files.** PDFs, JPEGs, PNGs need the suffix to resolve: `[[abroad/raw/<sub>/<file>.pdf]]`. Markdown files omit `.md`: `[[abroad/timeline]]`.
+- **Notes use `[[Title]]`** (the note's H1), e.g. `[[Example Note]]`. Reflect resolves `[[...]]` only to notes.
+- **Scans and other files use a relative Markdown link** from the index file, %-encoded: `[<file>.pdf](raw/<sub>/<file>%20name.pdf)`. Reflect opens it as an attachment; it cannot open `<...>` destinations, and parentheses in paths become `%28`/`%29`.
 - **Multi-file cells separator: ` · `** (U+00B7 middle dot, not comma). Reads cleanly when the cell has 3+ links.
-- **Spaces in paths are fine** inside `[[]]` — no escaping needed. Folder names with parentheses (`Scans (old)`) work; avoid square brackets in paths since they collide with link syntax.
-- **For directory-level references** (no specific file), use plain backticks not wikilinks: `` `<domain>/raw/<sub>/` ``. Wikilinks don't address folders.
+- **For directory-level references** (no specific file), use plain backticks, not links: `` `<domain>/raw/<sub>/` ``.
 - **Retrofitting plain date cells**: when adopting this convention on a pre-existing index, convert bare `YYYY-MM-DD` values in markdown-table date columns into `[[YYYY-MM-DD]]` daily-note wikilinks by hand or with a one-off script.
 
 ## Multi-copy / duplicate handling

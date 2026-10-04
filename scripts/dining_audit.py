@@ -18,6 +18,7 @@ from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import date_in_text  # noqa: E402
+from _reflect import WIKILINK_RE, TitleIndex  # noqa: E402
 
 REQUIRED_ROLES = (
     "Regional dining catalog",
@@ -722,12 +723,28 @@ def _audit_branch_resolution(
 
 def _audit_local_links(paths: set[Path], vault: Path) -> list[Finding]:
     findings: list[Finding] = []
+    titles: TitleIndex | None = None
     for path in sorted(paths):
         if not path.is_file():
             continue
         for line_number, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
+            for match in WIKILINK_RE.finditer(re.sub(r"`[^`]*`", "", line)):
+                target = match.group(1).split("#", 1)[0].strip()
+                if not target or re.fullmatch(r"\d{4}-\d{2}-\d{2}", target):
+                    continue  # `[[#Heading]]` is this note; Reflect opens or creates a daily note
+                titles = titles or TitleIndex(vault)
+                if titles.resolve(target) is None:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "local_link_broken",
+                            _display_path(path, vault),
+                            f"[[{target}]] names no single Reflect note",
+                            line_number,
+                        )
+                    )
             for match in LINK_RE.finditer(line):
                 raw_target = (match.group(1) or match.group(2)).strip()
                 if (

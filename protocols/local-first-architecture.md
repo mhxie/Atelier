@@ -36,8 +36,6 @@ in `$OV`; private harness configuration is gitignored. `harness/paths.toml`
 and its local override own the path inventory, not a second directory tree here.
 Repo paths are project-relative; `<paths.*>` resolves through that registry.
 
-`<paths.sessions>/` holds process records.
-
 ## Search Projections
 
 The physical vault is authoritative; the machine-local QMD index is a projection.
@@ -73,15 +71,27 @@ than trusting whichever copy it read first. Staleness markers such as
 `freshness: required` catch an old view, not two views that contradict.
 
 `$OV` is typically a Git work tree that a sync app such as Reflect commits and
-pushes. Folders named `raw/` or `secure/`, and root `cache`, may instead be
-links into a raw store (`raw_store` in `harness/paths.local.toml`), an
-unsynced-by-Git mirror of vault paths; Git skips them and search indexes them
-there. Reflect skips `raw/`; when its `localOnlyFolders` setting names
-`secure`, it shows those notes read-only on this Mac and never syncs or
-shares them. `scripts/zk_audit.py` checks this layout; `--fix-links`
-repairs missing links. `.gitignore` decides what syncs and what Reflect lists;
-`.reflectignore` only hides folders, such as `<paths.sessions>/`, from Reflect. The harness never commits or
+pushes. Git serves the phone, not completeness: every note stays searchable on
+this Mac. Folders named `raw/` or `secure/`, and root `cache` and archive, may
+instead be links into a raw store (`raw_store` in `harness/paths.local.toml`),
+a mirror of vault paths that Git skips and search indexes. reflect-open's
+`localOnlyFolders` setting names `raw`, `secure`, and `archive`, so it shows
+them read-only on this Mac and never syncs or shares them; `.reflectignore`
+hides Markdown under `raw/`. Its per-graph `backupMaxFileMiB` guard withholds larger
+files from Git. `scripts/zk_audit.py` checks this layout; `--fix-links`
+repairs missing links and `--fix-large` moves oversized files into `raw/`. `.gitignore` decides what syncs
+and what Reflect lists; `.reflectignore` only hides folders, such as
+`<paths.sessions>/`, from Reflect and its index. The harness never commits or
 pushes the vault; `protocols/repo-conventions.md` owns layout.
+
+Each part of a note has its own reader. Reflect renders the body, so the body
+is written for the user, agent-written notes included. Reflect hides
+frontmatter and searches only the title, body, and asset descriptions, so
+frontmatter carries machine metadata such as `freshness: required` for scripts
+and `rg`, never restating the body beyond a `title` that matches the H1.
+Folders serve harness retrieval; derivable facts live in indexes or sidecars.
+A need that would put agent-only text in a body is met in `scripts/` or
+reflect-open instead.
 
 Daily notes are user-authored and read-only to the system. Curator refuses
 daily-note targets; only Scribe `daily_note` may record user-dictated text
@@ -121,11 +131,12 @@ Adoption is forward-looking. Unlinked prose and numerical aggregates remain manu
 
 ## Derived task status
 
-For ledger-backed tasks, put a stable `<a id="benefit-a"></a>` in the owning
-Markdown table row. Its third column owns Status: `☐` or `📅` means open,
-`✅` done, `🚫` cancelled. Add one `[sot](<../domain/ledger.md#benefit-a>)`
-to its GTD checkbox. Paths are relative to GTD; owner files stay inside the
-vault and outside GTD and daily notes. Split tasks with distinct owners.
+For ledger-backed tasks, the owning Markdown table row's first cell names it
+and its third column owns Status: `☐` or `📅` means open, `✅` done, `🚫`
+cancelled. Add one `[[Ledger Title#First Cell|sot]]` to its GTD checkbox; the
+title must name exactly one note outside GTD and daily notes, and the fragment
+exactly one row. Reflect opens the ledger and shows `sot`. Split tasks with
+distinct owners.
 
 Update the owner row and evidence first. `todos.py` derives linked status for
 list, stale, digest, and daily brief; `check` reports saved-marker drift.
@@ -135,7 +146,8 @@ one GTD file atomically, then reads it back. Reruns are idempotent; simultaneous
 external edits after validation remain a filesystem race. Missing, duplicate,
 or invalid owners fail visibly. Linked status always follows the owner,
 including reopening. For a separate scheduling cancellation or migration,
-change `[sot]` to `[source]` before marking `[~]`; the citation remains ordinary.
+change `|sot]]` to `|source]]` before cancelling; the citation remains ordinary.
+Reflect has only open and done, so a cancelled task is `+ [x] ~~text~~`.
 
 `check` covers explicit links only. Historical prose stays dated; current
 summaries link to owners instead of copying state. Other executor/planner pairs

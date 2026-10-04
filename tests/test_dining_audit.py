@@ -90,6 +90,20 @@ class CaptureTierTest(unittest.TestCase):
         self.assertIn("revisit_invalid", _codes("奶茶", "Maybe?", "note"))
 
 
+class LocalLinkTest(unittest.TestCase):
+    def test_wikilinks_must_name_one_note(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="atelier-dining-links-") as tmp:
+            vault = Path(tmp)
+            (vault / "travel").mkdir()
+            (vault / "travel" / "City Dining.md").write_text("# City Dining\n", encoding="utf-8")
+            log = vault / "travel" / "Log.md"
+            log.write_text(
+                "# Log\n[[City Dining#Lunch|lunch]] [[2099-01-01]] [[#Top|top]] `[[Code Only]]`\n[[Missing]]\n",
+                encoding="utf-8",
+            )
+            findings = dining_audit._audit_local_links({log}, vault)
+        self.assertEqual([(f.code, f.row) for f in findings], [("local_link_broken", 3)])
+
 class EstablishmentRegistryTest(unittest.TestCase):
     def test_validates_branch_lifecycle_and_identity(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-establishments-") as tmp:

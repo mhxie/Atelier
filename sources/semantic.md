@@ -77,8 +77,11 @@ stderr, when Reflect is missing, fails, emits unexpected JSON, exceeds 10 s, or
 leaves no row after filtering. `--backend reflect|qmd` pins one engine; vector
 search, `--expand`, and `--no-rerank` are QMD-only. Reflect rows report
 `score_kind: lexical` and keep Reflect's order: their bm25 `score` is
-lower-is-better, 0 for title matches. Reflect's CLI never returns `raw/` or
-local-only `secure/` notes, so those come only from QMD.
+lower-is-better, 0 for title matches. Reflect's index omits `raw`, the
+`.reflectignore`d `process` folder, and local-only `secure/` notes and linked archive. When
+Reflect answers a request covering any of them, a model-free QMD lexical query
+over just those collections joins it: rows alternate by rank, one per path,
+and a QMD failure leaves the Reflect rows with a stderr note.
 
 Path and file-mtime date filters apply to at most 200 retrieved candidates.
 They never broaden source access, but can return fewer results than requested
@@ -97,9 +100,9 @@ All collections exclude operational directories (cache, metadata, routine
 prompts, private tools, hidden directories and dependency trees) and orphan
 stubs. QMD does not follow symlinks; the adapter also rejects replaced
 symlinks, out-of-vault paths, deleted sources, and scope-mismatched results.
-If `harness/paths.local.toml` sets `raw_store`, the `raw` scope and `secure/`
-notes (searched as `active`) are indexed from that mirror of vault paths; a hit
-may then cross one `raw` or `secure` folder link onto the same path there.
+If `harness/paths.local.toml` sets `raw_store`, the `raw` scope, `secure/`
+notes (searched as `active`), and a linked archive are indexed from that mirror
+of vault paths; a hit may then cross one such link onto the same path there.
 A secure hit, from QMD or a Reflect hit inside any `secure/` folder, carries
 only its path, with no title or snippet; agents never open it. Read the
 original source before quoting. Scope is provenance, not certification.
@@ -118,8 +121,9 @@ JSON is always a list of bounded result objects: `path`, `scope`, `title`,
 Paths are vault-relative; one row per source file.
 TSV contains path, score and scope. Output goes to stdout; diagnostics to stderr.
 
-A score ranks this retrieval mode's candidates. It is not confidence, a
-probability, or interchangeable with old similarity thresholds.
+A score ranks this retrieval mode's candidates and compares only within one
+`backend`. It is not confidence, a probability, or interchangeable with old
+similarity thresholds.
 Redundancy retrieval produces candidates for content review; QMD findings
 route to human review, never the legacy score-based automatic merge band.
 

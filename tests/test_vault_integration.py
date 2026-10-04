@@ -102,7 +102,7 @@ def check_dining_audit() -> None:
             encoding="utf-8",
         )
         (vault / mapped["Regional dining catalog"]).write_text(
-            "[broken](missing.md)\n[remote](readwise:fixture)\n",
+            "[broken](missing.md)\n[remote](readwise:fixture)\n[[Missing Title]] [[2099-01-01]] `[[Name]]`\n",
             encoding="utf-8",
         )
         (vault / mapped["Credit-perks catalog"]).write_text(
@@ -124,6 +124,11 @@ def check_dining_audit() -> None:
         expect(
             "local_link_broken" in error_codes,
             "dining audit missed a broken mapped-catalog link",
+        )
+        expect(
+            any("[[Missing Title]]" in f["detail"] for f in invalid["errors"])
+            and not any(t in f["detail"] for f in invalid["errors"] for t in ("2099-01-01", "[[Name]]")),
+            "dining audit missed a broken [[Title]] link or flagged a daily date or code span",
         )
         expect(
             "live_state_in_eligibility_catalog" in error_codes,
@@ -245,42 +250,70 @@ class KnowledgeCLITests(unittest.TestCase):
         )
         source = self.put("research/source.md", examples + "[Plain](old/Plain.md)\n[Draft](<old/Paren (Draft).md#section>)\n")
         self.cli("relink.py", "--apply", "--quiet")
-        expected = examples + "[Plain](moved/Plain.md)\n[Draft](<moved/Paren (Draft).md#section>)\n"
+        expected = examples + "[Plain](moved/Plain.md)\n[Draft](moved/Paren%20%28Draft%29.md#section)\n"
         self.assertEqual(source.read_text(), expected)
         self.cli("relink.py", "--apply", "--quiet")
         self.assertEqual(source.read_text(), expected)
 
-    def test_wikilink_preserves_fences_and_inline_code(self):
+    def test_to_reflect_preserves_fences_and_inline_code(self):
         self.put("research/Plain.md", "target\n")
         examples = (
-            "`[[Plain]]`\n``[[Plain]] with ` inside``\n"
-            "~~~markdown\n[[Plain]]\n~~~~\n"
-            "````markdown\n```\n[[Plain]]\n````\n"
+            "`[Plain](Plain.md)`\n``[Plain](Plain.md) with ` inside``\n"
+            "~~~markdown\n[Plain](Plain.md)\n~~~~\n"
+            "````markdown\n```\n[Plain](Plain.md)\n````\n"
         )
-        trailing = "~~~markdown\n[[Plain]]\n"
-        source = self.put("research/source.md", examples + "[[Plain]]\n" + trailing)
-        self.cli("wikilink_to_md.py", "--file", source, "--apply", "--quiet")
-        self.assertEqual(source.read_text(), examples + "[Plain](Plain.md)\n" + trailing)
+        trailing = "~~~markdown\n[Plain](Plain.md)\n"
+        source = self.put("research/source.md", examples + "[Plain](Plain.md)\n" + trailing)
+        self.cli("relink.py", "--apply", "--to-reflect", "--quiet")
+        self.assertEqual(source.read_text(), examples + "[[Plain]]\n" + trailing)
 
-    def test_link_tools_resolve_frontmatter_titles_and_personal_notes(self):
+    def test_to_reflect_links_titles_or_rooted_paths(self):
         self.put("research/labs/acme/Profile.md", '---\ntitle: "Acme Profile"\n---\n\nbody\n')
         self.put("personal/Plan.md", "target\n")
-        source = self.put("research/source.md", "[[Acme Profile]] [[Plan]]\n")
-        self.cli("wikilink_to_md.py", "--file", source, "--apply", "--quiet")
-        self.assertEqual(source.read_text(), "[Acme Profile](labs/acme/Profile.md) [Plan](../personal/Plan.md)\n")
-        self.put("personal/moved/Plan.md", "target\n")
-        (self.vault / "personal/Plan.md").unlink()
-        self.cli("relink.py", "--apply", "--quiet")
-        self.assertEqual(source.read_text(), "[Acme Profile](labs/acme/Profile.md) [Plan](../personal/moved/Plan.md)\n")
+        self.put("research/a/Same.md", "# Same\n")
+        self.put("research/b/Other.md", "# Same\n")
+        self.put("research/images/a b.png", "png\n")
+        body = (
+            "[Acme Profile](labs/acme/Profile.md) [the plan](<../personal/Plan.md>)\n"
+            "[Same](a/Same.md) [part](labs/acme/Profile.md#h) [gone](Missing.md)\n"
+            "| [Plan](../personal/Plan.md) | [the plan](../personal/Plan.md) |\n"
+            "![chart](<images/a b.png>)\n"
+        )
+        source = self.put("research/source.md", body)
+        daily = self.put("daily/2099-01-01.md", "[Plan](../personal/Plan.md)\n")
+        result = self.cli("relink.py", "--apply", "--to-reflect", "--quiet")
+        expected = (
+            "[[Acme Profile]] [[Plan|the plan]]\n"
+            "[[/research/a/Same|Same]] [[Acme Profile#h|part]] [gone](Missing.md)\n"
+            "| [[Plan]] | [[Plan]] |\n"
+            "![chart](images/a%20b.png)\n"
+        )
+        self.assertEqual(source.read_text(), expected)
+        self.assertEqual(daily.read_text(), "[Plan](../personal/Plan.md)\n")
+        self.assertIn("converted_path=1", result.stderr)
+        self.assertIn("converted_table=1", result.stderr)
+        self.cli("relink.py", "--apply", "--to-reflect", "--quiet")
+        self.assertEqual(source.read_text(), expected)
+
+    def test_to_reflect_keeps_uris_fragments_and_wrapped_text(self):
+        self.put("research/Plan.md", "target\n")
+        self.put("research/Scope: Thing.md", "# Scope: Thing\n")
+        kept = (
+            "[call](<tel:123 456>) [ref](<doi:10.1/x y>) [pdf](<doi:10.1/paper.md>)\n"
+            "[soft\nwrap](Plan.md)\n"
+        )
+        source = self.put("research/source.md", kept + "[Scope: Thing](<Scope: Thing.md>) [jump](<#Section One>)\n")
+        self.cli("relink.py", "--apply", "--to-reflect", "--quiet")
+        self.assertEqual(source.read_text(), kept + "[[Scope: Thing]] [[#Section One|jump]]\n")
 
     def test_code_spans_do_not_cross_markdown_blocks(self):
         self.put("research/Plain.md", "target\n")
         source = self.put(
             "research/source.md",
-            "` first\n\n~~~markdown\n[[Plain]]\n~~~\n\n[[Plain]] last `\n\n[[Plain]]\n",
+            "` first\n\n~~~markdown\n[Plain](Plain.md)\n~~~\n\n[Plain](Plain.md) last `\n\n[Plain](Plain.md)\n",
         )
-        self.cli("wikilink_to_md.py", "--file", source, "--apply", "--quiet")
-        self.assertEqual(source.read_bytes(), b"` first\n\n~~~markdown\n[[Plain]]\n~~~\n\n[Plain](Plain.md) last `\n\n[Plain](Plain.md)\n")
+        self.cli("relink.py", "--apply", "--to-reflect", "--quiet")
+        self.assertEqual(source.read_bytes(), b"` first\n\n~~~markdown\n[Plain](Plain.md)\n~~~\n\n[[Plain]] last `\n\n[[Plain]]\n")
         self.put("research/moved/Other.md", "target\n")
         source.write_bytes(b"` first\n\n~~~markdown\n[code](old/Other.md)\n~~~\n\n[link](old/Other.md) last `\n\n[link](old/Other.md)\n")
         self.cli("relink.py", "--apply", "--quiet")

@@ -61,7 +61,7 @@ Rationale:
 - **Persistence**: routine sessions are ephemeral. Without a vault write, weekly state is lost across runs.
 - **Auditability**: a per-run markdown file is grep-able, linkable from notes, and survives the routine being deleted.
 
-`$OV` is a Git work tree, so Drive MCP writes land in the raw store, not the vault. Cloud routines push to the vault's Git remote, which Reflect merges, or run under local Prefect. If delivery fails, the prompt MUST print the full content as its return value.
+`$OV` is a Git work tree, so Drive MCP writes land in the raw store, not the vault. Cloud routines push to the vault's Git remote, which Reflect merges, or run under local Prefect. The archive tier is a raw-store link Git ignores, so only local runs may write under `<paths.archive>/`. If delivery fails, the prompt MUST print the full content as its return value.
 
 **Conflict-resolution rule (multi-channel routines).** When a routine uses more than one output channel (any combination of vault, email, Calendar, or future MCP backends), the `$OV` file is the canonical output. Every secondary channel MUST point at it (`see $OV/<path>/<file>.md`) and cap its own content at 5 lines of summary. The user reads one source of truth, not parallel summaries.
 

@@ -140,11 +140,11 @@ Before saving the result, finish any authorized raw capture. Use
 daily-note facts. Skip content already recorded. Dispatch independent target
 files in parallel; do not substitute a parent write for a refused Scribe operation.
 
-For a linked `[sot]` TODO, update its owner and evidence first, then use
+For a `|sot]]`-linked TODO, update its owner and evidence first, then use
 `todos.py sync --file <quarter>.md --apply`; the contract is in
 `protocols/local-first-architecture.md` → Derived task status.
 For an unlinked confirmed TODO change, pass its exact source, `line_no`, `expected_text`,
-and marker glyphs from `todos.py`'s `STATE_MAP` (done `[x]`, killed `[~]`):
+and the marker: done `[x]`; killed `[x]` with the text struck through, `~~text~~`:
 
 | Source | Done | Killed |
 |---|---|---|
