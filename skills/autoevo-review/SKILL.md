@@ -1,6 +1,6 @@
 ---
 name: autoevo-review
-description: Triage the pending queue produced by the Autoevo routine.
+description: Triage actionable Autoevo findings; empty cycles remain machine receipts.
 ---
 # /autoevo-review
 

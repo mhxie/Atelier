@@ -20,6 +20,8 @@ profile
 personal
 # Handoff plans with personal note references
 handoffs
+# Local design references and previews
+/work/wiki-reading/
 # Local MCP server URL
 .mcp.json
 # Per-machine permission grants with personal absolute paths (also covered by

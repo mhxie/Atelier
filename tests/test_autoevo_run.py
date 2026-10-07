@@ -78,11 +78,11 @@ class AutoevoTest(unittest.TestCase):
         stamp = (datetime.fromisoformat(CYCLE) - timedelta(days=days)).timestamp()
         os.utime(self.vault / relative, (stamp, stamp))
 
-    def prepare(self):
+    def prepare(self, cycle=CYCLE):
         readiness = preflight.inspect_preflight(vault=self.vault)
         self.assertTrue(readiness["ready"], readiness)
-        plan = run.prepare_workspace(self.vault, self.workspace, CYCLE, readiness, now=NOW)
-        proposal = {"schema_version": 1, "cycle_id": CYCLE, "sweeps": [
+        plan = run.prepare_workspace(self.vault, self.workspace, cycle, readiness, now=NOW)
+        proposal = {"schema_version": 1, "cycle_id": cycle, "sweeps": [
             {"scope": dispatch["scope"], "outcome": "envelope_returned", "mode": "full",
              "completion_status": "complete", "remaining_work": "", "gaps": "", "findings": [], "notes": []}
             for dispatch in plan["dispatches"]], "judgments": {}, "notes": [], "errors": []}
@@ -133,12 +133,15 @@ class AutoevoTest(unittest.TestCase):
         pending.atomic_write(path, pending.render({"schema_version": 1, "pending": [entry]}))
         return entry
 
-    def test_empty_cycle_writes_plain_files_that_verify_before_and_after_reflect_commits(self):
+    def test_empty_cycle_keeps_a_verified_receipt_without_visible_notes(self):
         plan, proposal = self.prepare()
         head = self.git("rev-parse", "HEAD")
         record = self.read_only_git(lambda: self.accept(plan, proposal))
         self.assertEqual(record["status"], "complete")
-        self.assertEqual([(op["kind"], op["state"]) for op in record["operations"]], [("queue", "applied"), ("audit", "applied")])
+        self.assertEqual([(op["kind"], op["state"]) for op in record["operations"]], [("queue", "applied")])
+        self.assertEqual(record["output_file"], evidence.record_path(self.vault, CYCLE).relative_to(self.vault).as_posix())
+        self.assertEqual(record["reports"], {})
+        self.assertFalse(list((self.vault / "agent-findings").iterdir()))
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertEqual(set(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["operations"].values()), {"pending-commit"})
         self.reflect()
@@ -149,6 +152,105 @@ class AutoevoTest(unittest.TestCase):
         for relative in record["plan"]["state_files"]:
             if (self.vault / relative).exists():
                 self.assertEqual((self.vault / relative).stat().st_mode & 0o777, 0o600)
+
+    def test_fresh_pending_finding_publishes_once_and_unchanged_pending_does_not(self):
+        plan, proposal = self.prepare()
+        finding = self.archive(plan, proposal)
+        finding["category"] = "time-stale-A"
+        record = self.accept(plan, proposal)
+        self.assertEqual(len(record["pending"]), 1)
+        report = self.vault / record["output_file"]
+        self.assertTrue(report.is_file())
+        self.assertIn(record["pending"][0], report.read_text())
+        for detail in ("wip/seed.md", finding["evidence"], finding["proposed_action"]):
+            self.assertIn(detail, report.read_text())
+        self.assertEqual(record["reports"], {})
+        self.assertEqual(list((self.vault / "agent-findings").iterdir()), [report])
+        self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["verified"])
+        plan, proposal = self.prepare(NEXT)
+        self.archive(plan, proposal)["category"] = "time-stale-A"
+        repeated = self.accept(plan, proposal)
+        self.assertEqual(repeated["pending"], [])
+        self.assertEqual(list((self.vault / "agent-findings").iterdir()), [report])
+        self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=NEXT)["verified"])
+
+    def test_coverage_failure_without_findings_keeps_only_machine_evidence(self):
+        plan, proposal = self.prepare()
+        proposal["sweeps"][1].update(outcome="forgetter_no_envelope", mode="absent",
+                                      completion_status="aborted", remaining_work="worker interrupted")
+        record = self.accept(plan, proposal)
+        self.assertEqual(record["status"], "failed")
+        self.assertTrue((self.vault / record["output_file"]).is_file())
+        self.assertFalse(list((self.vault / "agent-findings").iterdir()))
+        with self.assertRaises(evidence.VerificationError):
+            evidence.verify_cycle(vault=self.vault, cycle=CYCLE)
+
+    def test_actionable_result_cannot_hide_its_report_behind_a_machine_receipt(self):
+        plan, proposal = self.prepare()
+        self.archive(plan, proposal)
+        record = self.accept(plan, proposal)
+        self.assertTrue((self.vault / record["output_file"]).is_file())
+        path = evidence.record_path(self.vault, CYCLE)
+        record["output_file"] = path.relative_to(self.vault).as_posix()
+        record["operations"] = [op for op in record["operations"] if op["kind"] != "audit"]
+        evidence.write_record(path, record)
+        with self.assertRaisesRegex(evidence.VerificationError, "cannot omit"):
+            evidence.verify_cycle(vault=self.vault, cycle=CYCLE)
+
+    def test_applied_evolution_still_publishes_if_post_write_lint_raises(self):
+        plan, proposal = self.prepare()
+        self.archive(plan, proposal)
+        lint = mock.Mock(side_effect=[CLEAN_LINT, RuntimeError("lint unavailable")])
+        with self.assertRaisesRegex(RuntimeError, "lint unavailable"):
+            self.accept(plan, proposal, lint_check=lint)
+        record = self.record()
+        report = self.vault / record["output_file"]
+        self.assertEqual(record["status"], "failed")
+        self.assertTrue(report.is_file())
+        self.assertIn("lint unavailable", report.read_text())
+        self.assertIn("low-signal-high applied", report.read_text())
+        self.assertFalse((self.vault / "wip/seed.md").exists())
+
+    def test_newly_armed_existing_decision_publishes_evidence_and_veto_deadline(self):
+        entry = self.default()
+        del entry["default_action"], entry["default_at"]
+        queue = self.vault / "_meta/autoevo_pending.toml"
+        pending.atomic_write(queue, pending.render({"schema_version": 1, "pending": [entry]}))
+        plan, proposal = self.prepare()
+        preview = run.preview(self.vault, proposal, plan, self.workspace / "preview")
+        proposal["judgments"][entry["id"]] = {
+            "bundle_sha256": preview["bundles"][entry["id"]]["bundle_sha256"],
+            "judgment": {"verdict": "apply", "confidence": 1, "cited": [0, 1, 2]}}
+        with mock.patch.object(run.precedent, "gate", return_value={
+                "default": True, "verdict": "apply", "cited": [0, 1, 2], "reason": "fixture precedent"}):
+            record = self.accept(plan, proposal)
+        self.assertEqual(record["pending"], [entry["id"]])
+        report = (self.vault / record["output_file"]).read_text()
+        for detail in (entry["evidence_summary"], entry["proposed_action"], "2099-02-03", "stale-banner"):
+            self.assertIn(detail, report)
+        self.assertTrue(evidence.verify_cycle(vault=self.vault, cycle=CYCLE)["verified"])
+
+    def test_interrupted_queue_mutation_publishes_review_and_blocks_later_cycles(self):
+        entry = self.default()
+        entry["default_action"] = "dismiss"
+        queue = self.vault / "_meta/autoevo_pending.toml"
+        pending.atomic_write(queue, pending.render({"schema_version": 1, "pending": [entry]}))
+        plan, proposal = self.prepare()
+        original_write = run.atomic_write
+
+        def interrupted(path, *args, **kwargs):
+            if path == self.vault / "_meta/autoevo_quarantine.toml":
+                raise OSError("queue mutation interrupted")
+            return original_write(path, *args, **kwargs)
+
+        with mock.patch.object(run, "atomic_write", interrupted), self.assertRaises(OSError):
+            self.accept(plan, proposal)
+        record = self.record()
+        self.assertEqual(record["status"], "needs_review")
+        self.assertIn("queue mutation interrupted", (self.vault / record["output_file"]).read_text())
+        self.assertEqual(pending.load(queue)["pending"][0]["status"], "dismissed")
+        with self.assertRaisesRegex(evidence.VerificationError, "half-applied"):
+            run.prior_result(self.vault, NEXT)
 
     def test_pending_json_survives_prefect_print_logging(self):
         from prefect.context import FlowRunContext, TaskRunContext
@@ -192,7 +294,7 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(run.route_row(self.vault, row, today)[0], "auto_apply")
         self.assertEqual(run.route_row(self.vault, row, today, plan["age_guard"]), ("invalid", "low-signal", plan["age_guard"]))
         record = self.accept(plan, proposal)
-        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue"])
         self.assertTrue((self.vault / "wip/seed.md").is_file())
         self.assertIn(plan["age_guard"], self.record()["plan"]["notes"])
 
@@ -247,7 +349,7 @@ class AutoevoTest(unittest.TestCase):
         head = self.git("rev-parse", "HEAD")
         record = self.accept(plan, proposal)
         self.assertEqual(record["status"], "complete")
-        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue"])
         self.assertTrue(any(note.startswith("skipped low-signal-high: wip/seed.md differs") for note in record["notes"]))
         self.assertEqual(self.git("rev-parse", "HEAD"), head)
         self.assertEqual((self.vault / "wip/seed.md").read_text(), "changed by human\n")
@@ -262,7 +364,7 @@ class AutoevoTest(unittest.TestCase):
         seed.write_text(original)  # the snapshot's bytes again, but no longer what HEAD holds
         self.old("wip/seed.md")
         record = self.accept(plan, proposal)
-        self.assertEqual([op["kind"] for op in record["operations"]], ["queue", "audit"])
+        self.assertEqual([op["kind"] for op in record["operations"]], ["queue"])
         self.assertTrue(any("not committed at HEAD" in note for note in record["notes"]))
         self.assertEqual(seed.read_text(), original)
 
@@ -370,7 +472,7 @@ class AutoevoTest(unittest.TestCase):
         with self.assertRaises(evidence.VerificationError):
             evidence.verify_cycle(vault=self.vault, cycle=CYCLE)
 
-    def test_new_lint_error_marks_written_result_failed(self):
+    def test_new_lint_error_marks_written_result_failed_and_publishes_triage(self):
         plan, proposal = self.prepare()
         bad = {"counts": {"error": 1, "warn": 0, "info": 0}, "findings": [{"severity": "ERROR", "code": "fixture"}]}
         lint = mock.Mock(side_effect=[CLEAN_LINT, bad])
@@ -378,6 +480,8 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(record["status"], "failed")
         self.assertEqual(len(record["lint"]["new_errors"]), 1)
         self.assertIn("introduced lint errors", record["errors"][-1])
+        self.assertTrue((self.vault / record["output_file"]).is_file())
+        self.assertIn("introduced lint errors", (self.vault / record["output_file"]).read_text())
 
     def test_interrupted_write_is_half_applied_and_blocks_until_resolved(self):
         plan, proposal = self.prepare()
@@ -393,11 +497,12 @@ class AutoevoTest(unittest.TestCase):
             self.accept(plan, proposal)
         operation = self.record()["operations"][0]
         self.assertEqual((self.record()["status"], operation["state"]), ("needs_review", "applying"))
+        self.assertIn("fixture interruption", (self.vault / self.record()["output_file"]).read_text())
         for cycle in (CYCLE, NEXT):
             with self.assertRaisesRegex(evidence.VerificationError, "half-applied"):
                 run.prior_result(self.vault, cycle)
         (self.vault / next(rel for rel in operation["paths"] if rel.startswith("archive/"))).unlink()
-        self.assertEqual(self.states(), {operation["candidate_id"]: "skipped"})
+        self.assertEqual(self.states()[operation["candidate_id"]], "skipped")
         self.assertIsNone(run.prior_result(self.vault, NEXT))
         with self.assertRaisesRegex(evidence.VerificationError, "no automatic replay"):
             run.prior_result(self.vault, CYCLE)
@@ -462,6 +567,7 @@ class AutoevoTest(unittest.TestCase):
                          ["committed", "superseded", "committed", "committed"])
 
     def test_historical_json_requires_a_recognized_state(self):
+        self.default()
         plan, proposal = self.prepare()
         complete = self.accept(plan, proposal)
         path = evidence.record_path(self.vault, CYCLE)
@@ -490,6 +596,7 @@ class AutoevoTest(unittest.TestCase):
                     run.prior_result(self.vault, CYCLE)
 
     def test_only_half_applied_or_malformed_operations_block_later_cycles(self):
+        self.default()
         plan, proposal = self.prepare()
         failed = {**self.accept(plan, proposal), "status": "failed", "errors": ["interrupted after a write"]}
         path = evidence.record_path(self.vault, CYCLE)

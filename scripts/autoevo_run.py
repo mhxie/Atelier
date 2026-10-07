@@ -1,8 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare isolated Autoevo proposals and accept them through one trusted writer.
-
-Accepted operations are plain file writes; Reflect commits and pushes them.
-"""
+"""Prepare isolated Autoevo proposals; the trusted writer applies plain-file operations."""
 
 from __future__ import annotations
 
@@ -36,7 +33,7 @@ import precedent
 ROOT = Path(__file__).resolve().parents[1]
 WORKING_TIERS = ("wip", "research", "reflections")
 RESEARCH_EXCLUDED_SUBDIRS = ("cache", "images", "raw")
-NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner")
+NOTE_KINDS = evidence.NOTE_KINDS
 RESULT_STATUSES = ("prepared", "publishing", "needs_review", "failed", "complete")
 TOMBSTONE_DAYS = 90
 # A note touched this recently may still be mid-edit or not yet committed by Reflect.
@@ -129,14 +126,7 @@ def _age_days(vault: Path, rel: str, today: date) -> int | None:
 
 
 def _norm_rel(rel: str) -> str:
-    """Vault-relative path with `.` and `..` collapsed, POSIX separators.
-
-    A lexical prefix test accepts `wip/../wiki/X.md`, which every later
-    filesystem and git call normalizes into the protected tier. Collapse the
-    traversal first so containment is decided on the path that is actually
-    touched. Purely lexical: no filesystem access, so it cannot be defeated by
-    a missing file and cannot break on a network-mounted vault.
-    """
+    """Collapse traversal before tier containment checks, without filesystem access."""
     return PurePosixPath(os.path.normpath(str(rel).strip().lstrip("/"))).as_posix()
 
 
@@ -146,13 +136,7 @@ def _under_tiers(vault: Path, rel: str, tiers: tuple[str, ...]) -> bool:
 
 
 def route_row(vault: Path, row: dict, today: date, age_guard: str | None = None) -> tuple[str, str, str]:
-    """(bucket, band, reason) for one Forgetter row.
-
-    bucket: auto_apply | pending | probe | invalid. The band is the label the
-    op records; the reason explains a downgrade so the audit can show it.
-    `age_guard` says why mtimes cannot measure age tonight; no age-based band
-    matches while it is set.
-    """
+    """(bucket, band, reason); age_guard disables mtime-based eligibility."""
     category = str(row.get("category", ""))
     confidence = str(row.get("confidence", "medium") or "medium")
     candidate = str(row.get("candidate", "")).strip()
@@ -343,11 +327,7 @@ def _mtime_reset(stamps: list[float]) -> str | None:
 
 
 def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict, *, now: float | None = None) -> dict:
-    """Snapshot eligible committed sources; the parent retains this plan, not the model.
-
-    A source is eligible when it is tracked at HEAD, its bytes are that blob,
-    it has no conflict markers, and it is older than the recent-edit window.
-    """
+    """Snapshot eligible committed sources; the parent retains the authoritative plan."""
     now = time.time() if now is None else now
     today = date.fromisoformat(cycle)
     meta = _segment("meta")
@@ -534,11 +514,7 @@ def _error_set(lint: dict) -> set[str]:
 
 
 def _stale(vault: Path, rel: str, expected: str | None, *, note: bool) -> str | None:
-    """Why `rel` no longer holds the bytes its write was planned against.
-
-    A note must also still be its HEAD blob without conflict markers, so the
-    bytes a write replaces stay recoverable with plain Git.
-    """
+    """Why the planned bytes or a note's recoverable HEAD blob no longer match."""
     try:
         path = _file(vault, rel)
         data = path.read_bytes() if path.is_file() else None
@@ -553,12 +529,7 @@ def _stale(vault: Path, rel: str, expected: str | None, *, note: bool) -> str | 
 
 def _apply(vault: Path, record: dict, path: Path, kind: str, after: dict[str, str | None],
            expected: dict[str, str | None], **fields: str) -> bool:
-    """Write one operation as plain files after receipting its intent; Reflect commits them.
-
-    A changed note skips the operation before its first write. A change found
-    between writes stops the run with a half-applied operation for review.
-    Queue and audit state is hash-pinned, so a change there fails instead.
-    """
+    """Receipt atomic file writes; skip changed sources before their first write."""
     note, plan = kind in NOTE_KINDS, record["plan"]
     scope = {"queue": [*plan["state_files"]], "audit": [f"{_segment('agent_findings')}/"]}.get(
         kind, [*plan["source_files"], f"{_segment('archive')}/decayed/"])
@@ -603,6 +574,13 @@ def _ready(vault: Path) -> None:
         raise evidence.VerificationError(f"publication deferred: {status['gate']}: {status['detail']}")
 
 
+def _report(vault: Path, record: dict, path: Path) -> None:
+    if evidence.needs_report(record):
+        rel = f"{_segment('agent_findings')}/autoevo-applied-{record['cycle_id']}.md"
+        record["output_file"] = rel
+        _apply(vault, record, path, "audit", {rel: evidence.render_report(record)}, {rel: _hash(_file(vault, rel))})
+
+
 def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str, lint_check=None) -> dict:
     """Only the trusted Prefect process calls this; the model cannot write the vault."""
     proposal = evidence.validate_proposal(proposal, plan)
@@ -616,8 +594,8 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
         raise evidence.VerificationError("cycle already has a result; do not overwrite or replay it")
     record = {"schema_version": evidence.VERSION, "cycle_id": cycle, "run_id": plan["run_id"], "prefect_flow_run_id": flow_run_id,
               "status": "prepared", "plan": plan, "proposal": proposal, "operations": [], "notes": [],
-              "errors": evidence.coverage_errors(proposal, plan), "pending": [], "reports": {},
-              "output_file": f"{_segment('agent_findings')}/autoevo-applied-{cycle}.md"}
+              "errors": evidence.coverage_errors(proposal, plan), "pending": [], "triage": [], "reports": {},
+              "output_file": path.relative_to(vault).as_posix()}
     auto, entries, notes = route_proposal(vault, proposal, plan)
     record["notes"] = notes
     expected_state = dict(plan["state_files"])
@@ -681,8 +659,10 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                     action = "dismiss" if judgment["verdict"] == "dismiss" else pending.default_for(entry)
                     if action:
                         _pending(queue, ledger, "set-default", "--id", entry_id, "--action", action, "--today", cycle,
-                                 "--reason", f"precedent ({len(judgment['cited'])} cited): {judgment['reason']}", "--by", "precedent", "--source", "nightly")
+                                  "--reason", f"precedent ({len(judgment['cited'])} cited): {judgment['reason']}", "--by", "precedent", "--source", "nightly")
+                        record["pending"].append(entry_id)
             record_undos(vault, ledger, today)
+            record["triage"] = [entry for entry in pending.load(queue)["pending"] if entry["id"] in record["pending"]]
             quarantine.update_state(outcomes={str(vault / row["scope"]): row["outcome"] for row in proposal["sweeps"]},
                                     state_path=shadow / _segment("meta") / "autoevo_quarantine.toml", today=today)
             _apply(vault, record, path, "queue", {rel: (shadow / rel).read_text(encoding="utf-8") if (shadow / rel).is_file() else None
@@ -691,11 +671,7 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
             record["lint"] = {"counts": after_lint["counts"], "new_errors": sorted(_error_set(after_lint) - _error_set(before_lint))}
             if record["lint"]["new_errors"]:
                 record["errors"].append("written operations introduced lint errors; review the receipted operations")
-            record["reports"] = {row["scope"]: f"{_segment('agent_findings')}/decay-{plan['run_id']}-{evidence.digest(row['scope'])[:12]}.md"
-                                 for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
-            reports = {record["reports"][row["scope"]]: evidence.sweep_report(row) for row in proposal["sweeps"] if row["outcome"] == "envelope_returned"}
-            reports[record["output_file"]] = evidence.render_report(record)
-            _apply(vault, record, path, "audit", reports, {rel: _hash(_file(vault, rel)) for rel in reports})
+            _report(vault, record, path)
             record["status"] = "failed" if record["errors"] else "complete"
             evidence.write_record(path, record)
         except BaseException as exc:
@@ -703,6 +679,12 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                 record["status"] = "needs_review" if any(op["state"] == "applying" for op in record["operations"]) else "failed"
                 record["errors"].append(f"{type(exc).__name__}: {exc}")
                 evidence.write_record(path, record)
+            if not any(op["kind"] == "audit" for op in record["operations"]):
+                try:
+                    _report(vault, record, path)
+                except Exception as report_error:
+                    record["errors"].append(f"review report deferred: {report_error}")
+                    evidence.write_record(path, record)
             raise
     if record["status"] == "complete":
         evidence.verify_cycle(vault=vault, cycle=cycle)
@@ -710,11 +692,7 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
 
 
 def prior_result(vault: Path, cycle: str) -> dict | None:
-    """Return this cycle's verified result, refusing to replay it.
-
-    Every receipt's operations are checked against live content; only a
-    half-applied or malformed operation (or an unrecognized receipt) blocks.
-    """
+    """Verify prior effects and return this cycle's result without replay."""
     path = evidence.record_path(vault, cycle)
     for legacy in sorted(path.parent.glob("*.toml")):
         try:

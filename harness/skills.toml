@@ -131,4 +131,4 @@ source = "skills/autoevo-review/SKILL.md"
 category = "ops"
 status = "canonical"
 direct_only = true
-description = "Triage the pending queue produced by the Autoevo routine."
+description = "Triage actionable Autoevo findings; empty cycles remain machine receipts."

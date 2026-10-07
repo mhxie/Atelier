@@ -32,7 +32,7 @@ The trusted adapter performs these phases:
    safety. HEAD may advance meanwhile; `base_head` is provenance only.
 5. Write each operation as plain files, update the queue, quarantine and
    decision ledger through their deterministic owners, run lint, derive
-   reports, and verify the receipt against live content.
+    actionable reports, and verify the receipt against live content.
 
 The model never writes the live queue, ledger, quarantine, reports or notes;
 touches Git; or performs lint/finalize. The routine adapter owns its
@@ -76,17 +76,18 @@ work recorded in Notes; only independently supported findings may proceed.
 A missing envelope supplies no accepted findings and is an error, never a
 successful empty sweep. An invalid or aborted return cannot authorize an op.
 
-The receipt `<paths.meta>/routine_receipts/autoevo-nightly/<cycle>.json` is
-the record. It contains the retained plan, proposal, operations,
-deterministic lint and report mapping. Human-visible
-`autoevo-applied-<cycle>.md` and decay reports are derived views, not inputs
-parsed back into machine truth. Prefect owns execution state and
-pre-model-block cues.
+The receipt `<paths.meta>/routine_receipts/autoevo-nightly/<cycle>.json` holds
+the plan, sweeps, proposal, operations and lint. Publish one
+`autoevo-applied-<cycle>.md` only for applied note changes, newly queued
+findings, newly armed veto-window decisions or mutation failures needing
+review. Include triage evidence, proposed actions and veto deadlines.
+Unchanged pending entries, empty/skipped sweeps and input/runtime failures
+stay in receipts and Prefect. Reports are derived views, never machine inputs.
 
 `autoevo_verify.py --cycle <YYYY-MM-DD> --vault <vault> --json` requires a
 complete matching result, at least three returned sweeps, no coverage/errors
 or newly introduced lint errors, no half-applied or malformed operation,
-and a final audit write matching the derived reports. Quarantine skips
+and a matching audit write when a review note is required. Quarantine skips
 or missing sweeps cannot masquerade as a clean cycle.
 
 ## Trust bands

@@ -1,20 +1,7 @@
 #!/usr/bin/env python3
-"""Quiet-by-default cue checks for native ``hi`` session start.
+"""Quiet-by-default session cues: key, severity, command path, message as TSV.
 
-No cue means no stdout. Fired cues render as tab-separated rows:
-
-    <key>\\t<severity>\\t<command_path>\\t<user-facing message>
-
-Output formats:
-    default            tab-separated lines (one per fired cue)
-    --json             JSON array of objects (for hook consumption)
-    --verbose          add a `# debug: ...` line per check explaining the decision
-
-Snooze:
-    cues.py snooze <key> [--days N]    suppress a cue until N days from today
-
-Checks return a cue or stay silent and are registered in ``CHECKS``. An
-unconfigured vault and individual check failures never block session start.
+Missing configuration and individual check failures never block session start.
 """
 
 from __future__ import annotations
@@ -123,11 +110,7 @@ def _touch_session_lock(verbose: bool, context: str) -> None:
 
 
 def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Weekly review cadence cue.
-
-    Hard floor: >10 days since last weekly, or no weekly ever.
-    Soft cue: >6 days since last weekly AND today is Sunday or Monday.
-    """
+    """Surface weekly review cadence debt."""
     if not tier("reflections").is_dir():
         return None, "reflections dir missing; skip weekly cue"
 
@@ -188,12 +171,7 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_reflect_intake(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Notes Reflect created in <paths.notes>/ that still await filing.
-
-    Reflect's own notes stay put: the `Links` and `Audio memos` hubs, and
-    transcripts, which pair with `<paths.audio_memos>/<base>.*` by basename.
-    Hard floor: >=5 unfiled notes, or the oldest is >14 days old. Soft: >=1.
-    """
+    """Surface intake debt, excluding Reflect hubs and paired audio transcripts."""
     notes = tier("notes")
     if not notes.is_dir():
         return None, "notes/ missing; skip"
@@ -219,13 +197,7 @@ def check_reflect_intake(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_recurring(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Recurring obligations cue.
-
-    Fires when one or more recurring items in $OV/gtd/recurring.md are overdue
-    (today > last-done + every) or due-soon (within 7 days). Severity escalates
-    to `hard` when any item is overdue by more than 30 days — a 100-day-overdue
-    health/maintenance task should not register as a soft cue.
-    """
+    """Surface due-soon and overdue obligations from the recurring ledger."""
     sys.path.insert(0, str(Path(__file__).parent))
     try:
         from recurring import parse_file  # type: ignore[import-not-found]
@@ -268,13 +240,7 @@ def check_recurring(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_aggregate_freshness(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Self-declared aggregate trackers lagging their subject SOT.
-
-    Fires when `aggregate_freshness.py --discover --stale-only` reports one
-    or more stale aggregates. Soft cue: the divergence is advisory, the
-    user may still want to read the aggregate, but should know it's stale
-    before quoting it.
-    """
+    """Warn before quoting aggregates that lag their subject source."""
     # Import lazily so cues.py doesn't take an import-time dep on the script.
     sys.path.insert(0, str(Path(__file__).parent))
     try:
@@ -333,17 +299,7 @@ def _routine_files(ov: Path, row: dict[str, Any]) -> list[Path] | None:
 
 
 def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Unreviewed outputs from remote cron routines.
-
-    Vault-agnostic mechanism: reads the private routine registry to learn
-    which output directories belong to which routine. Each routine entry
-    declares its `output_dir`, `file_pattern`, and human `label`. User policy
-    lives in the TOML; this function is the engine.
-
-    Ack mechanism: `$OV/_meta/routine_acks.json` stores `{output_dir: last_acked_filename}`.
-    Cue fires when a directory's latest file (sorted by filename) > acked filename.
-    User mutes by updating that JSON after reading a report.
-    """
+    """Surface outputs newer than the registry directory's acknowledged filename."""
     import json
 
     routines, skip = _routine_rows(ov)
@@ -408,26 +364,14 @@ def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Policy compliance for remote-routine $OV-persistence.
-
-    Per `protocols/remote-routines.md` § Policy, every routine MUST persist
-    canonical output to $OV. Each routine entry in
-    the private routine registry should declare either:
-      - `drive_write_enforced = true`  (compliant), OR
-      - `needs_drive_write_update = true`  (acknowledged migration debt)
-    A routine missing both flags violates the policy without acknowledgment.
-    Surfaces the count of non-compliant routines as a soft cue.
-    """
+    """Surface routines lacking both enforced vault writes and acknowledged migration debt."""
 
     routines, skip = _routine_rows(ov)
     if skip:
         return None, skip
     violators: list[str] = []
     for r in routines:
-        # Local routines write to $OV directly via the filesystem; the Drive-write
-        # policy applies only to remote (claude.ai) routines that persist over MCP.
-        # Per protocols/remote-routines.md: local entries
-        # carry no drive_write_enforced flag.
+        # Drive-write flags govern remote routines; local routines use the filesystem.
         if r.get("execution") == "local":
             continue
         if r.get("drive_write_enforced") is True:
@@ -515,13 +459,7 @@ def _scheduled_dates(cron: object, start: date, now: datetime, timezone_name: st
 
 
 def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Detect routines that fire but produce no output.
-
-    For each private routine, estimates expected cadence from
-    the cron field, then checks whether the latest output file is older than
-    cadence + tolerance. Catches silent Drive-write failures that
-    check_routine_outputs (which only reports *new* files) cannot see.
-    """
+    """Detect stale output artifacts from declared cadence; this does not prove a run fired."""
 
     routines, skip = _routine_rows(ov)
     if skip:
@@ -532,6 +470,8 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
 
     for r in routines:
         name = r.get("name", "?")
+        if r.get("adapter") == "autoevo":
+            continue  # Conditional notes; Prefect and receipt checks own execution health.
         label = r.get("label", r.get("name", "?"))
         output_dir = r.get("output_dir")
         cron = r.get("cron", "")
@@ -615,11 +555,7 @@ def check_routine_hitrate(
     *,
     now: datetime | None = None,
 ) -> tuple[Cue | None, str]:
-    """Measure output-date coverage that total-outage staleness misses.
-
-    Evaluate weekly-or-faster routines over max(14, 3 * cadence) days;
-    longer cadences lack enough samples and remain staleness-only.
-    """
+    """Measure output-date coverage for routines frequent enough to have usable samples."""
 
     routines, skip = _routine_rows(ov)
     if skip:
@@ -630,6 +566,8 @@ def check_routine_hitrate(
     debug_parts: list[str] = []
 
     for r in routines:
+        if r.get("adapter") == "autoevo":
+            continue  # Empty verified cycles intentionally have no Markdown output.
         label = r.get("label", r.get("name", "?"))
         output_dir = r.get("output_dir")
         cron = r.get("cron", "")
@@ -724,11 +662,7 @@ def _estimate_cadence_days(cron: object) -> int | None:
 
 
 def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Surface pending decisions for /autoevo-review (protocols/autoevo.md).
-
-    Malformed dates can hide old entries; repeated skips can precede a silent
-    sweep. Both escalate like old entries. Missing/empty/resolved queues stay silent.
-    """
+    """Surface pending Autoevo decisions, including malformed dates and repeated skips."""
 
     config_path = _meta_dir(ov) / "autoevo_pending.toml"
     if not config_path.is_file():
@@ -791,10 +725,7 @@ def check_autoevo_pending(ov: Path, today: date) -> tuple[Cue | None, str]:
                 oldest_age = age
         except (ValueError, TypeError):
             corrupt_dates += 1
-        # surface_count >= 3 is the auto-dismiss threshold per
-        # protocols/autoevo.md § Pending queue. If any entry has been
-        # repeatedly skipped, escalate so the user sees them before /autoevo-review
-        # auto-dismisses them on its next run.
+        # Escalate repeated skips before the next review can auto-dismiss them.
         try:
             if int(e.get("surface_count", 0)) >= 3:
                 repeat_skips += 1
@@ -992,11 +923,7 @@ def check_local_routine_missed(
     *,
     now: datetime | None = None,
 ) -> tuple[Cue | None, str]:
-    """Detect expected cycles that have no verified domain receipt.
-
-    Prefect remains authoritative for run state and errors. The receipt only
-    answers whether a scheduled routine produced its declared artifact.
-    """
+    """Detect missing verified artifact receipts; Prefect remains authoritative for run state."""
     now = now or datetime.now().astimezone()
     if now.hour < 6:
         return None, "before 06:00 local; skip"
@@ -1061,11 +988,7 @@ def check_local_routine_missed(
 
 
 def check_career_growth(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Prompt Sunday growth review, or catch a missed Sunday after nine days.
-
-    Goals stay in the current private plan, never public code. No plan means
-    silence; a current review or `cues.py snooze career_growth` suppresses the cue.
-    """
+    """Prompt growth review from the private plan, respecting completed reviews and snoozes."""
     career_dir = tier("career")
     plan_candidates = [
         path
@@ -1125,17 +1048,11 @@ def check_career_growth(ov: Path, today: date) -> tuple[Cue | None, str]:
     )
 
 
-# Registry. To add a new cue, append a `check_*` function above and
-# register it here.
+    # Session-start cue registry.
 
 
 def check_intent_misses(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Catalog coverage feedback: a recurring unrouted `/hi` request needs a row.
-
-    Reads the route ledger (`intent_routes/`) through the same reader and
-    aggregation as `intent-misses`, so the cue fires exactly when that review
-    would propose something: a phrase unrouted on 3+ distinct days in 14.
-    """
+    """Surface recurring unrouted requests through the shared intent-misses aggregation."""
     log_dir = _meta_dir(ov) / "intent_routes"
     if not log_dir.is_dir():
         return None, "no route log; skip"
@@ -1354,9 +1271,7 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Run only the named cue (debug aid).",
     )
-    # Snooze subcommand: `cues.py snooze <key> [--days N]` writes a
-    # per-key snooze entry to $OV/_meta/cue_snooze.json. The next session
-    # skips fired cues whose key matches until the snooze expires.
+    # Snoozes suppress matching fired cues until their stored expiry.
     if argv is None:
         argv_list = sys.argv[1:]
     else:
@@ -1398,11 +1313,7 @@ def main(argv: list[str] | None = None) -> int:
 
     snoozes = _load_snoozes(ov)
 
-    # Session-active lock: SessionStart marks a fresh session; the
-    # UserPromptSubmit, PostToolUse, and Stop hooks call
-    # `autoevo_preflight.py --touch-lock` directly so the lock age measures
-    # idle time. The Prefect adapter exports ATELIER_SKIP_LOCK_TOUCH=1 so a
-    # headless routine never refreshes the lock its own preflight reads.
+    # Hooks measure user idle time; headless routines must not refresh their own lock.
     if args.hook:
         _touch_session_lock(args.verbose, "SessionStart")
 
@@ -1429,9 +1340,7 @@ def main(argv: list[str] | None = None) -> int:
             cue.message = _format_runtime_message(cue.message, output_runtime)
             fired.append(cue)
     if errors:
-        # A check that crashes is itself a finding: it means the one surface
-        # that would report last night's failure may be blind. Log durably
-        # and say so, instead of degrading silently to "no cue".
+        # Persist and surface check failures so a broken cue cannot report false silence.
         log_path = record_cue_errors(errors, today)
         fired.append(cue_errors_cue(errors, log_path))
 

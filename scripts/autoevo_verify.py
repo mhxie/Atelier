@@ -16,6 +16,7 @@ from _paths import atomic_write, retry_transient, tier_segments, vault_root
 VERSION = 1
 CATEGORIES = ("redundant", "time-stale-A", "time-stale-B", "contradicted", "low-signal")
 BLOCKING_STATES = ("half-applied", "malformed")
+NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -164,6 +165,8 @@ def _operation_line(op: dict) -> str:
 def render_report(record: dict) -> str:
     proposal = record["proposal"]
     lines = [f"## Autoevo Run: {record['cycle_id']}", "", f"Run ID: {record['run_id']}", "", "### Sweep coverage"]
+    if "triage" in record:
+        lines = [f"# Autoevo: {record['cycle_id']}", "", *lines]
     lines += [f"- {row['scope']}: {row['outcome']} ({row['mode']})" for row in proposal["sweeps"]]
     lines += ["", "### Operations"]
     lines += [_operation_line(op) for op in record["operations"] if op["kind"] != "audit"] or ["- (none)"]
@@ -174,7 +177,22 @@ def render_report(record: dict) -> str:
         ("Errors", record["errors"]),
     ):
         lines += ["", f"### {heading}", *[f"- {item}" for item in values]] if values else ["", f"### {heading}", "- (none)"]
+    for entry in record.get("triage", []):
+        lines += ["", f"### Review {entry['category']}: {entry['id']}",
+                  f"- Sources: {', '.join(entry['peers'])}",
+                  f"- Proposed action: {entry['proposed_action']}",
+                  f"- Evidence: {entry['evidence_summary']}"]
+        if entry.get("default_action"):
+            lines += [f"- Veto before {entry['default_at']}: {entry['default_action']}"]
     return "\n".join(lines) + "\n"
+
+
+def needs_report(record: dict) -> bool:
+    """Publish applied note changes or fresh human decisions, not routine metadata."""
+    return bool(record.get("pending") or record.get("lint", {}).get("new_errors")
+                or record.get("status") == "needs_review") or any(
+        op["kind"] in NOTE_KINDS and op.get("state", "applied") in {"applied", "applying"}
+        for op in record["operations"])
 
 
 def operation_paths(operation: dict) -> dict[str, tuple[str | None, str | None]]:
@@ -196,14 +214,7 @@ def _current(vault: Path, rel: str) -> str | None:
 
 
 def operation_state(vault: Path, operation: object) -> str:
-    """Classify one operation by comparing live content with its receipt.
-
-    Every path at its after bytes is committed once HEAD holds them, else
-    pending-commit. An applied operation whose paths all hold their before
-    bytes is reverted (a user veto); any other mix is superseded. An operation
-    that never finished writing is skipped when nothing changed and
-    half-applied otherwise.
-    """
+    """Classify receipted bytes; interrupted writes block only after a change."""
     try:
         paths = operation_paths(operation)
         if not isinstance(operation["kind"], str) or not isinstance(operation["candidate_id"], str):
@@ -253,18 +264,22 @@ def verify_cycle(*, vault: Path, cycle: str) -> dict:
     if lint.get("new_errors"):
         raise VerificationError("cycle introduced lint errors")
     operations = record.get("operations", [])
-    if not operations or operations[-1].get("kind") != "audit":
-        raise VerificationError("cycle has no final audit write")
     states = verify_operations(vault, record)
-    audit = operation_paths(operations[-1])
-    expected_reports = {record["output_file"]: render_report(record)}
-    for sweep in proposal["sweeps"]:
-        if sweep["outcome"] == "envelope_returned":
-            expected_reports[record["reports"][sweep["scope"]]] = sweep_report(sweep)
-    if any(audit.get(relative(name), (None, None))[1] != hashlib.sha256(body.encode()).hexdigest()
-           for name, body in expected_reports.items()):
-        raise VerificationError("written report does not represent the structured result")
-    return {"verified": True, "sweeps_completed": len(expected_reports) - 1,
+    if record["output_file"] == path.relative_to(vault).as_posix():
+        if needs_report(record) or record["reports"] or any(op["kind"] == "audit" for op in operations):
+            raise VerificationError("actionable result cannot omit its review note")
+    else:
+        if not operations or operations[-1].get("kind") != "audit":
+            raise VerificationError("cycle has no final audit write")
+        audit = operation_paths(operations[-1])
+        expected_reports = {record["output_file"]: render_report(record)}
+        for sweep in proposal["sweeps"]:
+            if sweep["scope"] in record["reports"]:
+                expected_reports[record["reports"][sweep["scope"]]] = sweep_report(sweep)
+        if any(audit.get(relative(name), (None, None))[1] != hashlib.sha256(body.encode()).hexdigest()
+               for name, body in expected_reports.items()):
+            raise VerificationError("written report does not represent the structured result")
+    return {"verified": True, "sweeps_completed": len(proposal["sweeps"]),
             "operations": states, "record_file": str(path)}
 
 

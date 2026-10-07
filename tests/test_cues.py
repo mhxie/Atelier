@@ -594,6 +594,18 @@ class LocalRoutineMissedTests(unittest.TestCase):
             self.assertNotIn("scheduler is firing", cue.message)
             self.assertIn("degraded=1", debug)
 
+    def test_conditional_autoevo_notes_do_not_trigger_artifact_cadence_alerts(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            watch = vault / "_tools/routines/registry.toml"
+            watch.write_text(self.WATCH + '\nadapter = "autoevo"\n', encoding="utf-8")
+            now = datetime(2026, 8, 31, 22, 0).astimezone()
+            (vault / "x/2026-08-01.md").write_text("old actionable report", encoding="utf-8")
+            self.assertIsNone(cues.check_routine_staleness(vault, now.date())[0])
+            self.assertIsNone(cues.check_routine_hitrate(vault, now.date(), now=now)[0])
+            cue, _ = cues.check_local_routine_missed(vault, now.date(), now=now)
+            self.assertIsNotNone(cue)
+
 
 class VaultLayoutCueTest(unittest.TestCase):
     def test_quiet_on_linked_vault_and_fires_on_stale_root(self) -> None:
