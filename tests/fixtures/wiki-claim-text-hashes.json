@@ -1,0 +1,32 @@
+{
+  "description": "Claim text hashes a harness must produce (Plan 30): SHA-256, lowercase hex, of the UTF-8 bytes between a claim's opening and closing markers, after CRLF and lone CR become LF. Legacy `### [Cn]` claims get none. Reflect's wikiClaimTextHashes and any harness must agree on every case.",
+  "cases": [
+    {
+      "name": "two claims in one paragraph",
+      "markdown": "# T\n\nLead <!-- claim:c1 -->**first** [ref][one]<!-- /claim:c1 --> and <!-- claim:c4 -->second<!-- /claim:c4 -->.\n\n## Evidence\n\n```anchors c1\n```\n\n[one]: https://example.org/one\n",
+      "hashes": {
+        "c1": "276757e99e5d134329446d177a52f6fb769b860a61d2005eb47d2917601339fb",
+        "c4": "16367aacb67a4a017c8da8ab95682ccb390863780f7114dda0a0e0c55644c7c4"
+      }
+    },
+    {
+      "name": "a range across paragraphs, written with CRLF",
+      "markdown": "# T\r\n\r\n<!-- claim:c7 -->\r\n\r\nThird paragraph.\r\n\r\nFourth paragraph.<!-- /claim:c7 -->\r\n",
+      "hashes": {
+        "c7": "bf2c8ff45c013d4bea928c746bd2997ce79070b44bccdec72e4a17a600f8b679"
+      }
+    },
+    {
+      "name": "non-ASCII text",
+      "markdown": "First <!-- claim:c2 -->甲😀 é<!-- /claim:c2 --> end.\n",
+      "hashes": {
+        "c2": "25b19880baea4ed5c7cb28b55a8fa22d0ceb241cdc9ee2747d3fddb1b013af6a"
+      }
+    },
+    {
+      "name": "legacy heading claims carry no hash",
+      "markdown": "# T\n\n## Claims\n\n### [C1] A legacy claim\n\nBody.\n\n```anchors\n@anchor: doi:10.1/x | valid_at: 2020-01-01\n```\n",
+      "hashes": {}
+    }
+  ]
+}

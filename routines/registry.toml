@@ -40,3 +40,14 @@ timeout_seconds = 600
 retry_safe = true
 retries = 1
 retry_delay_seconds = 300
+
+[[routine]]
+name = "wiki-trust-report"
+runner = "process"
+cron = ["0 7 * * *"]
+timezone = "local"
+argv = ["{python}", "scripts/wiki_trust.py", "--write"]
+timeout_seconds = 300
+retry_safe = true
+retries = 1
+retry_delay_seconds = 300

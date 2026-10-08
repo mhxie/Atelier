@@ -217,6 +217,9 @@ def _parse_marker(kind: str, first: str, extras: list[str], line_no: int, raw: s
         if fields["_agent"] == "editor" and fields.get("at") != fields["valid_at"]:
             return None, f"line {line_no}: editor/pending requires an ISO at date matching valid_at"
 
+    if kind == "@anchor" and fields.get("kind", "primary") not in {"primary", "secondary"}:
+        return None, f"line {line_no}: @anchor kind must be primary or secondary"
+
     return Marker(kind, fields, line_no, raw), None
 
 

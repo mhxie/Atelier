@@ -1,0 +1,149 @@
+{
+  "title": "Reflect wiki trust report",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "format": {
+      "type": "string",
+      "const": "reflect-wiki-trust"
+    },
+    "version": {
+      "type": "number",
+      "const": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "minLength": 1
+    },
+    "harness": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": ["name"]
+    },
+    "notes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "claims": {
+            "type": "object",
+            "propertyNames": {
+              "type": "string",
+              "pattern": "^c[1-9]\\d*$"
+            },
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "tier": {
+                  "type": "string",
+                  "enum": ["solid", "supported", "needs-work"]
+                },
+                "overlays": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "text_sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "evaluated_at": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                },
+                "reasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "text": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "kind": {
+                        "type": "string"
+                      }
+                    },
+                    "required": ["text"]
+                  }
+                },
+                "next": {
+                  "type": "string"
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": ["tier", "text_sha256", "evaluated_at"]
+            }
+          }
+        },
+        "required": ["claims"]
+      }
+    },
+    "sources": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "trusted": {
+            "type": "boolean"
+          },
+          "url": {
+            "type": "string"
+          },
+          "reasons": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "required": ["text"]
+            }
+          }
+        },
+        "required": ["label", "weight", "trusted"]
+      }
+    },
+    "source_threshold": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  },
+  "required": ["format", "version", "generated_at", "harness", "notes"]
+}

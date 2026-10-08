@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -154,10 +155,18 @@ def check_daily_digest_routine() -> None:
     )
 
 
+def check_wiki_trust_routine() -> None:
+    jobs = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))["routine"]
+    row = next(row for row in jobs if row["name"] == "wiki-trust-report")
+    expect(row["cron"] == ["0 7 * * *"] and row["argv"] == ["{python}", "scripts/wiki_trust.py", "--write"]
+           and row["retry_safe"] is True, "wiki trust report Prefect declaration drift")
+
+
 class VaultIntegrationTest(unittest.TestCase):
     test_dining_audit = staticmethod(check_dining_audit)
     test_tracking_refresh_declaration = staticmethod(check_tracking_refresh_routine)
     test_daily_digest_declaration = staticmethod(check_daily_digest_routine)
+    test_wiki_trust_declaration = staticmethod(check_wiki_trust_routine)
 
 
 class KnowledgeCLITests(unittest.TestCase):
@@ -357,8 +366,9 @@ class KnowledgeCLITests(unittest.TestCase):
         self.assertEqual([Path(n["path"]).name for n in notes if n["category"] == "promote"], ["Topic.md"])
 
     def test_review_overlays_match_reflects_shared_claim_trust_cases(self):
-        """Pinned to Reflect's fixtures/wiki-claim-trust.json: tiers are Reflect's, the edited/disputed overlays are shared."""
+        """The canonical claim-trust cases: Atelier computes tiers and overlays; Reflect renders them."""
         import trust
+        import wiki_trust
 
         source = self.put("wiki/Case.md", "")
         for case in json.loads((ROOT / "tests/fixtures/wiki-claim-trust.json").read_text())["cases"]:
@@ -369,6 +379,43 @@ class KnowledgeCLITests(unittest.TestCase):
                 as_of = date.fromisoformat(case["asOf"])
                 overlays = {"disputed": claim.dispute(as_of) is not None, "edited": claim.review(as_of) == "pending"}
                 self.assertEqual(sorted(name for name, on in overlays.items() if on), sorted(case["overlays"]))
+                result = wiki_trust.claim_trust(claim, as_of, case["citedTiers"])
+                self.assertEqual((result["tier"], sorted(result["overlays"])), (case["tier"], sorted(case["overlays"])))
+
+    def test_claim_text_hashes_match_reflects_vectors(self):
+        import trust
+        import wiki_trust
+
+        source = self.put("wiki/Hash.md", "")
+        for case in json.loads((ROOT / "tests/fixtures/wiki-claim-text-hashes.json").read_text())["cases"]:
+            with self.subTest(case=case["name"]):
+                source.write_bytes(case["markdown"].encode("utf-8"))
+                data = source.read_bytes()
+                hashes = {f"c{c.number}": wiki_trust.claim_hash(data, c) for c in trust.parse_wiki_note(source, date.today()).claims}
+                self.assertEqual({k: v for k, v in hashes.items() if v}, case["hashes"])
+
+    def test_trust_report_hashes_claim_bytes_and_publishes_to_meta(self):
+        anchors = ("@anchor: arxiv:2409.19256 | valid_at: 2020-01-01\n"
+                   "@anchor: url:https://docs.example.org/a | valid_at: 2020-01-01\n")
+        self.put("wiki/Source.md", "# Source\n\nIntro <!-- claim:c1 -->Café claims hold.<!-- /claim:c1 -->\n\n## References\n\n"
+                 "```anchors c1\n" + anchors + "@pass: challenger | status: verified | at: 2020-02-01\n```\n")
+        metadata = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        self.put("wiki/Reader.md", "# Reader\n\nIntro <!-- claim:c1 -->Derived [[Source#^c1|ref]]" + metadata
+                 + "<!-- /claim:c1 -->\n\n## References\n\n```anchors c1\n```\n")
+        self.put("wiki/Hidden.md", "---\nprivate: true\n---\n# Hidden\n\nIntro <!-- claim:c1 -->Secret.<!-- /claim:c1 -->\n")
+        report = json.loads(self.cli("wiki_trust.py").stdout)
+        from jsonschema import Draft202012Validator
+
+        schema = json.loads((ROOT / "tests/fixtures/wiki-trust-report.schema.json").read_text())
+        self.assertEqual(list(Draft202012Validator(schema).iter_errors(report)), [])
+        claims = {path: note["claims"]["c1"] for path, note in report["notes"].items()}
+        self.assertEqual((claims["wiki/Source.md"]["tier"], claims["wiki/Reader.md"]["tier"]), ("solid", "supported"))
+        self.assertEqual(claims["wiki/Source.md"]["text_sha256"], hashlib.sha256("Café claims hold.".encode()).hexdigest())
+        self.assertNotIn("wiki/Hidden.md", report["notes"])
+        self.assertTrue(report["sources"]["arxiv:2409.19256"]["trusted"])
+        self.cli("wiki_trust.py", "--write")
+        written = json.loads((self.vault / "_meta/wiki-trust.json").read_text())
+        self.assertEqual({**written, "generated_at": None}, {**report, "generated_at": None})
 
     def test_shadow_drift_matches_nested_domain_paths(self):
         note = "# Entry\n\n## Claims\n### [C1] Claim\nProse.\n```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n"

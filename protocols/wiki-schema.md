@@ -70,7 +70,7 @@ Internal citations are inline wikilinks with attached metadata, outside fences s
 An external source. This is a **seed** in the trust graph: only `@anchor` markers contribute initial trust mass to the personalized PageRank.
 
 ```
-@anchor: <type>:<id> | valid_at: <YYYY-MM-DD> [| invalid_at: <YYYY-MM-DD>] [| weight: <float>] [| readwise: <document_id>]
+@anchor: <type>:<id> | valid_at: <YYYY-MM-DD> [| invalid_at: <YYYY-MM-DD>] [| weight: <float>] [| readwise: <document_id>] [| kind: primary|secondary]
 ```
 
 Anchor types and id formats:
@@ -86,7 +86,7 @@ Anchor types and id formats:
 
 **URL escaping rule.** Marker fields are pipe-separated, so URLs (in `url` and `gist` anchors and in `ref:` fields) must not contain literal pipe characters. If a URL contains `|`, encode it as `%7C` before storing it in the marker. The parser will not try to be clever about pipe placement; it splits on the first occurrence of ` | ` (space-pipe-space) per line, then on `:` for each field's key. Multi-line values are not supported; each marker is exactly one line.
 
-`weight` is optional and defaults to `1.0`. For papers, weight may be set to `s2.influentialCitationCount`-derived values or OpenAlex FWCI when the user wants to bias trust toward higher-quality anchors. The trust engine treats all weights as `1.0` unless explicitly set.
+`kind` is the writer's judgment of the source's fit to its claim; without it, papers and books are primary. `weight` is optional and defaults to `1.0` (see Open v2 Items).
 
 ### Anchor Evidence Resolution
 
@@ -142,7 +142,7 @@ A record of an agent pass or an editor's review-needed event. **`@pass` markers 
 
 `<agent>` is one of: `reviewer`, `challenger`, `thinker`, `scout`, `curator`. The optional `ref` field points at the session reflection or another note where the pass was recorded, for audit.
 
-A `reader` records the user's doubt from Reflect and may record only `flagged`, as editor may record only `pending`. A claim is disputed while its latest active non-editor record, ordered as below, is `flagged` or `inconclusive`; a later record by another agent resolves it. `/lint` reports disputed claims and claims whose evidence has all expired as `claim-attention`. Reflect and `scripts/trust.py` share these rules through `tests/fixtures/wiki-claim-trust.json`.
+A `reader` records the user's doubt from Reflect and may record only `flagged`, as editor may record only `pending`. A claim is disputed while its latest active non-editor record, ordered as below, is `flagged` or `inconclusive`; a later record by another agent resolves it. `/lint` reports disputed claims and claims whose evidence has all expired as `claim-attention`.
 
 The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass, renewing evidence, or revoking the existing note-level verified floor. Preserve earlier records. A claim is pending while its latest active editor or reviewer record, ordered by `at` with a later line winning a tie, is `editor/pending`; Reflect and `scripts/trust.py` share this rule. Nightly Autoevo appends only reviewer records.
 
@@ -237,6 +237,16 @@ A note **passes structural integrity** if all of the following hold. `scripts/tr
 12. The introduction, narrative order, examples, and qualifications make the article useful without claim IDs.
 13. Revision Log records substantive changes; evidence and audit details stay outside the article's prose.
 14. Claims have retrievable support, and source locators refer to the correct occurrence. `/lint` owns its deterministic checks; it does not establish scientific validity or poll every URL.
+
+## Claim Tiers and the Trust Report
+
+Atelier owns tiers and source reputation; Reflect only renders the trust report, which `scripts/wiki_trust.py --write` atomically refreshes nightly where `reflect trust-report` points (default `.harness/wiki-trust.json`; `<paths.meta>/` outside Reflect). `tests/fixtures/wiki-claim-trust.json` is the canonical conformance corpus.
+
+A claim's sources count by independent origin: a paper or book by identifier (an arXiv or DOI link names its paper), a code host by owner, any other page by host. One primary origin, or two origins, make a claim **Supported**; a Supported or Solid cited claim also lifts it to Supported. Two origins including a primary one plus a `challenger` or `scout` `verified` pass after the last edit make it **Solid**. Otherwise it **Needs work**. A disputed claim always needs work; overlays `disputed` and `edited` (pending) accompany the tier. Reflect ignores an editor record other than `pending` and a reader record other than `flagged`; this parser rejects them.
+
+Source reputation is per origin: prior (primary 1.0; documentation, code host, `.edu` or Apache site 0.6; other 0.3; `kind` overrides) times `1 + ln(1 + min(entries, cap))` times the undisputed share of claims it supports, divided by the cap's maximum so the scale never drifts with corpus size. Only origins at or above the threshold count toward tiers. The report's `thresholds` block records the formula and constants in force.
+
+The report follows Reflect's contract (`reflect-wiki-trust` v1; schema in `tests/fixtures/wiki-trust-report.schema.json`). Notes are keyed by NFC vault-relative path and claims by `cN`. `text_sha256` is the SHA-256 of the UTF-8 bytes between a claim's markers after CRLF and CR become LF, pinned by `tests/fixtures/wiki-claim-text-hashes.json`; legacy claims and `private: true` notes are omitted. `sources` maps origins to `label`, `weight`, `trusted` and reasons under `source_threshold`.
 
 ## Open v2 Items
 
