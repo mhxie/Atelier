@@ -12,7 +12,7 @@ layer.
 | `models.toml` | Model identity registry with runtime-neutral reasoning tiers (identity names like opus, sonnet, deepseek_pro_max; no provider bindings). Provider/model bindings live in gitignored `profile/models.toml` and merge at runtime. |
 | `capabilities.toml` | Runtime-neutral capability names and the Codex-side tool that implements each. Claude tool declarations live in canonical agent frontmatter. |
 | `retrieval.toml` | Local QMD models and hardware resource presets; `semantic.toml` carries gitignored machine overrides. |
-| `runtimes.toml` | Native CLI registry and shipped Codex default; each runtime also declares its surface (instruction file, agent dir/format, skills dir, hooks file, supported primitives) for the edge renderer. A user can persist Claude in gitignored `runtime.local.toml`. |
+| `runtimes.toml` | Native CLI registry and shipped Codex default; each runtime also declares its surface (instruction file, agent dir, skills dir, hooks file, supported primitives) for the edge renderer. A user can persist Claude in gitignored `runtime.local.toml`. |
 | `runtime.local.toml.example` | Template for the optional per-user runtime default. `scripts/atelier_runtime.py use <runtime>` writes the gitignored live file. |
 | `paths.toml` | Canonical logical-name → vault-path registry for L1–L4 surfaces and private component roots (the `<paths.<name>>` placeholders in docs). |
 | `paths.local.toml.example` | Template for the gitignored per-user `paths.local.toml` (localized wikis, sandbox overrides, private tiers). |

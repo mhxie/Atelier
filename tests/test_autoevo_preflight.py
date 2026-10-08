@@ -194,59 +194,6 @@ class ReadOnlyReadinessTest(unittest.TestCase):
             self.assertEqual(out["health"]["privacy_hits"], 2)
             self.assertEqual(list((vault / "agent-findings").iterdir()), [])
 
-    def test_legacy_state_requires_review_without_reading_or_mutating_it(self) -> None:
-        for contents in ("{}", "{not json"):
-            with self.subTest(contents=contents), tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-                vault = _make_vault(Path(tmp))
-                state = vault / "cache" / "autoevo-preflight-owned-audit.json"
-                state.write_text(contents, encoding="utf-8")
-                audit = vault / "agent-findings" / "autoevo-applied-2099-01-02.md"
-                audit.write_text("user-owned audit edit\n", encoding="utf-8")
-                head = (vault / ".git" / "index").read_bytes()
-                out = _run_py(vault, """
-                    from unittest.mock import patch
-                    original = Path.read_text
-                    def guarded(path, *args, **kwargs):
-                        if path.name == ap.LEGACY_OWNED_AUDIT_STATE:
-                            raise AssertionError("legacy state must not be read")
-                        return original(path, *args, **kwargs)
-                    with patch.object(Path, "read_text", guarded):
-                        raise SystemExit(ap.main(["--json"]))
-                """)
-                self.assertFalse(out["ready"], out)
-                self.assertEqual(out["gate"], "legacy_audit_review_required")
-                self.assertIsNone(out["retry_after_epoch"])
-                self.assertIn("review and migrate", out["detail"])
-                self.assertEqual(state.read_text(), contents)
-                self.assertEqual(audit.read_text(), "user-owned audit edit\n")
-                self.assertEqual((vault / ".git" / "index").read_bytes(), head)
-
-    def test_broken_legacy_symlink_also_requires_review(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            state = vault / "cache" / "autoevo-preflight-owned-audit.json"
-            state.symlink_to("missing-state")
-            out = _run_py(vault, 'raise SystemExit(ap.main(["--json"]))')
-            self.assertEqual(out["gate"], "legacy_audit_review_required", out)
-            self.assertTrue(state.is_symlink())
-
-    def test_legacy_stat_error_defers_instead_of_ignoring_state(self) -> None:
-        with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
-            vault = _make_vault(Path(tmp))
-            out = _run_py(vault, """
-                from unittest.mock import patch
-                original = Path.lstat
-                def unavailable(path, *args, **kwargs):
-                    if path.name == ap.LEGACY_OWNED_AUDIT_STATE:
-                        raise OSError("fixture storage unavailable")
-                    return original(path, *args, **kwargs)
-                with patch.object(Path, "lstat", unavailable):
-                    raise SystemExit(ap.main(["--json"]))
-            """)
-            self.assertEqual(out["gate"], "environment_unavailable", out)
-            self.assertIsInstance(out["retry_after_epoch"], int)
-            self.assertIn("legacy audit state", out["detail"])
-
     def test_environment_failure_is_structured_and_deferred(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-preflight-") as tmp:
             vault = _make_vault(Path(tmp))

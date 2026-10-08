@@ -109,7 +109,6 @@ AVRO
 # --- Databases and storage ---
 ACID
 ANSI
-B-tree
 BLOB
 CDC
 CRUD
@@ -158,7 +157,6 @@ VCS
 CAS
 CPS
 DAG
-FIFO
 LIFO
 MPSC
 MPI
@@ -170,9 +168,7 @@ API
 AWS
 AZ
 CDK
-CLI
 CRD
-DNS
 EBS
 EC2
 ECS
@@ -218,7 +214,6 @@ CNN
 GAN
 GAT
 GNN
-GPU
 LLM
 LSTM
 ML
@@ -231,14 +226,10 @@ GBM
 NaN
 
 # --- Data engineering ---
-CDC
-DAG
 ELT
-ETL
 SCD
 
 # --- Distributed systems ---
-2PC
 CAP
 CP
 AP
@@ -246,7 +237,6 @@ CRDT
 FLP
 GST
 OCC
-RPC
 TTL
 
 # --- File systems and storage ---
@@ -254,23 +244,17 @@ EXT4
 FUSE
 GFS
 HDFS
-NFS
 RAID
 ZFS
 
 # --- General computing ---
-ASCII
 EOF
-FIFO
 GUID
 I18N
 L10N
-LIFO
-NaN
 NULL
 PII
 QPS
-RBAC
 REGEX
 TPS
 UUID
@@ -338,7 +322,6 @@ Ubuntu
 Vault
 Webpack
 Zookeeper
-ZFS
 
 # --- PyArrow / Arrow ecosystem ---
 PyArrow
@@ -346,7 +329,6 @@ Arrow
 ArrowArray
 RecordBatch
 ChunkedArray
-IPC
 DataType
 ArrayLike
 
@@ -355,7 +337,6 @@ Ray
 RayJob
 KubeRay
 Kueue
-GCS
 
 # --- Lance ecosystem ---
 Lance
@@ -426,7 +407,6 @@ VLDB
 # --- Common abbreviations ---
 ANN
 CSI
-GC
 IDC
 NLI
 OOM

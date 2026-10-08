@@ -96,10 +96,6 @@ def check(
 
     if vault is None:
         return findings
-    legacy = vault / "_tools/features"
-    if legacy.exists():
-        add(findings, "ERROR", "component-legacy-root", _rel(root, legacy),
-            "private skills must use the registered private_skills root")
     roots = _private_roots(root, vault, paths, findings)
 
     private_skills = roots.get("skills")
@@ -143,10 +139,6 @@ def check(
                     if row.get("runner") not in {"model", "process"}:
                         add(findings, "ERROR", "component-private-routine-runner", _rel(root, registry_path),
                             "each private routine must declare runner=model|process")
-                    forbidden = sorted(set(row) & {"kind", "command", "local_profile"})
-                    if forbidden:
-                        add(findings, "ERROR", "component-private-routine-legacy", _rel(root, registry_path),
-                            "routine row uses retired fields: " + ", ".join(forbidden))
                 if len(names) != len(set(names)):
                     add(findings, "ERROR", "component-private-routine-duplicate", _rel(root, registry_path),
                         "private routine names must be unique")

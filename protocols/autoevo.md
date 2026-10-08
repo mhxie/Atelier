@@ -48,7 +48,6 @@ limits remain in `harness/routine_profiles.toml` and
 | Session lock | No `<paths.meta>/atelier-session-lock` touch within one hour. |
 | Privacy | No public-bound privacy hits. |
 | Semantic readiness | QMD status reports ready with stored documents/vectors and cached models. This is not live inference or corpus-freshness proof. |
-| Legacy audit state | An old owned-audit marker requires explicit review/migration; never read, delete, or commit its referenced audit automatically. |
 
 Privacy and semantic input checks run before drafting. Each write rechecks
 the session lock and its sources; it does not repeat retrieval or

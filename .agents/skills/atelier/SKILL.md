@@ -70,8 +70,7 @@ points at the canonical sources and adds only what is Codex-native.
   Reader owns the shared reading behavior; Scholar keeps only its role settings
   and the shared-contract pointer.
 - Native observation and routine reports: `sources/runtimes/observability.md`.
-  Direct API calls are unlogged; `scripts/invocation_log_gc.py` ages out legacy
-  payload logs.
+  Direct API calls are unlogged.
 - For runtime capability maintenance, read `sources/runtimes/README.md` and
   the registry's references; CLI discovery does not prove activation.
 

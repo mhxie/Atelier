@@ -307,8 +307,7 @@ filename patterns, or trigger IDs. Private declarations belong in
 
 1. Choose `support` and the active `execution` surface. For local execution,
    select a public local profile and archive a validated local-adapter prompt.
-   For cloud execution, select
-   a cloud profile, then create and first-run-test the task in the account
+   For cloud execution, create and first-run-test the task in the account
    scheduler UI.
 2. Ensure the canonical output is written under the declared `$OV` path.
    Cloud tasks push to the vault's Git remote; local tasks write `$OV` directly.

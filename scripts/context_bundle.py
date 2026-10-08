@@ -11,12 +11,12 @@ import sys
 import tempfile
 import tomllib
 import xml.etree.ElementTree as ET
-from datetime import date, datetime, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any, Sequence
 
 import _node
-from _paths import tier_segments
+from _paths import effective_date, tier_segments
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,14 +61,9 @@ class BundleError(ValueError):
     """A user-facing route, source, or Repomix contract error."""
 
 
-def effective_date_today(now: datetime | None = None) -> date:
-    current = now or datetime.now().astimezone()
-    return current.date() - timedelta(days=1) if current.hour < 3 else current.date()
-
-
 def parse_effective_date(value: str | None) -> date:
     if value is None:
-        return effective_date_today()
+        return effective_date()
     try:
         return date.fromisoformat(value)
     except ValueError as exc:
@@ -116,22 +111,13 @@ def markdown_sections(text: str) -> dict[str, tuple[str, str]]:
     return result
 
 
-def load_intents(path: Path) -> dict[str, dict[str, Any]]:
-    if path.resolve() == DEFAULT_INTENTS_PATH.resolve():
-        try:
-            from intent_coverage import load_intents as load_routed_intents
-
-            return load_routed_intents()
-        except (ImportError, SystemExit) as exc:
-            raise BundleError(f"cannot load intent registry: {exc}") from exc
+def load_intents() -> dict[str, dict[str, Any]]:
     try:
-        with path.open("rb") as handle:
-            value = tomllib.load(handle).get("intents")
-    except (OSError, tomllib.TOMLDecodeError) as exc:
-        raise BundleError(f"cannot load intent registry {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise BundleError(f"intent registry {path} has no [intents] table")
-    return {name: row for name, row in value.items() if isinstance(row, dict)}
+        from intent_coverage import load_intents as load_routed_intents
+
+        return load_routed_intents()
+    except (ImportError, SystemExit) as exc:
+        raise BundleError(f"cannot load intent registry: {exc}") from exc
 
 
 def validate_profile_reads(value: Any, intent: str) -> list[str]:
@@ -158,28 +144,27 @@ def validate_profile_reads(value: Any, intent: str) -> list[str]:
     return result
 
 
-def resolve_route(intent_arg: str, intents_path: Path) -> tuple[str, list[str], int]:
+def resolve_route(intent_arg: str) -> tuple[str, list[str], int]:
     intent = intent_arg.strip()
     if intent.startswith("intents."):
         intent = intent[len("intents.") :]
     if not intent:
         raise BundleError("selected intent name is empty")
-    if intents_path.resolve() == DEFAULT_INTENTS_PATH.resolve():
-        overlay = intents_path.with_name("intents.local.toml")
-        if overlay.is_file():
-            try:
-                with overlay.open("rb") as handle:
-                    local_row = tomllib.load(handle).get("intents", {}).get(intent, {})
-            except (OSError, tomllib.TOMLDecodeError):
-                local_row = {}
-            if isinstance(local_row, dict) and "context_budget_bytes" in local_row:
-                raise BundleError(
-                    f"intents.{intent}.context_budget_bytes is retired; use "
-                    "context_budget_tokens in o200k_base tokens"
-                )
-    row = load_intents(intents_path).get(intent)
+    overlay = DEFAULT_INTENTS_PATH.with_name("intents.local.toml")
+    if overlay.is_file():
+        try:
+            with overlay.open("rb") as handle:
+                local_row = tomllib.load(handle).get("intents", {}).get(intent, {})
+        except (OSError, tomllib.TOMLDecodeError):
+            local_row = {}
+        if isinstance(local_row, dict) and "context_budget_bytes" in local_row:
+            raise BundleError(
+                f"intents.{intent}.context_budget_bytes is retired; use "
+                "context_budget_tokens in o200k_base tokens"
+            )
+    row = load_intents().get(intent)
     if row is None:
-        raise BundleError(f"intent {intent!r} is not declared in {intents_path}")
+        raise BundleError(f"intent {intent!r} is not declared in {DEFAULT_INTENTS_PATH}")
     if "context_budget_bytes" in row:
         raise BundleError(
             f"intents.{intent}.context_budget_bytes is retired; use "
@@ -304,12 +289,11 @@ def add_section(
 def select_context(
     *,
     vault: Path,
-    intents_path: Path,
     intent_arg: str,
     source_specs: Sequence[str],
     effective_date: date,
 ) -> tuple[dict[str, str], str, list[str], int]:
-    intent, profile_reads, budget = resolve_route(intent_arg, intents_path)
+    intent, profile_reads, budget = resolve_route(intent_arg)
     selected: dict[str, str] = {}
     full_sources: set[str] = set()
     section_refs: list[str] = []
@@ -548,7 +532,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--intent", required=True, help="selected intent key")
     parser.add_argument("--vault", help="OV vault root (default: $OV)")
-    parser.add_argument("--intents", default=str(DEFAULT_INTENTS_PATH))
     parser.add_argument(
         "--source", action="append", default=[], metavar="PATH[#SECTION]"
     )
@@ -562,7 +545,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         selected, header, warnings, budget = select_context(
             vault=resolve_vault(args.vault),
-            intents_path=Path(args.intents).expanduser().resolve(),
             intent_arg=args.intent,
             source_specs=args.source,
             effective_date=parse_effective_date(args.effective_date),

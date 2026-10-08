@@ -57,7 +57,6 @@ class ContextSelectionTest(unittest.TestCase):
     ) -> tuple[dict[str, str], str, list[str], int]:
         return cb.select_context(
             vault=self.vault,
-            intents_path=cb.DEFAULT_INTENTS_PATH,
             intent_arg=intent,
             source_specs=list(sources),
             effective_date=date(2099, 1, 3),
@@ -163,7 +162,7 @@ class ContextSelectionTest(unittest.TestCase):
             patch.object(cb, "load_intents", return_value=merged),
             self.assertRaisesRegex(cb.BundleError, "o200k_base tokens"),
         ):
-            cb.resolve_route("gizmo", registry)
+            cb.resolve_route("gizmo")
 
 
 class RepomixBoundaryTest(unittest.TestCase):

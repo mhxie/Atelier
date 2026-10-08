@@ -17,14 +17,14 @@ import re
 import sys
 import tomllib
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import deadlines as dl  # noqa: E402
-from _paths import PathsError, tier, vault_root  # noqa: E402
+from _paths import PathsError, effective_date, tier, vault_root  # noqa: E402
 
 from routine_collect import TODO_REMINDER_LIMIT, load_todo_reminders  # noqa: E402
 
@@ -1045,7 +1045,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"--today must be YYYY-MM-DD, got {args.today!r}", file=sys.stderr)
             return 1
     else:
-        today = effective_today()
+        today = effective_date()
 
     if args.cap < 1:
         print("--cap must be >= 1", file=sys.stderr)
@@ -1059,12 +1059,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(payload)
     return 0
-
-
-def effective_today(now: datetime | None = None) -> date:
-    """Today, or yesterday before 03:00 -- the harness day boundary."""
-    now = now or datetime.now()
-    return now.date() - timedelta(days=1) if now.hour < 3 else now.date()
 
 
 if __name__ == "__main__":

@@ -70,16 +70,6 @@
     ],
     "SessionEnd": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "uv run \"${CLAUDE_PROJECT_DIR:-.}/scripts/invocation_log_gc.py\" 2>/dev/null || true",
-            "timeout": 10
-          }
-        ]
-      },
-      {
         "hooks": [
           {
             "type": "command",

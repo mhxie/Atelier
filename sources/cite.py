@@ -18,7 +18,6 @@ import re
 
 S2_BASE = "https://api.semanticscholar.org/graph/v1/paper"
 S2_FIELDS = "title,authors,year,venue,externalIds,publicationVenue"
-CROSSREF_BASE = "https://api.crossref.org/works"
 
 
 def fetch_json(url):
@@ -142,14 +141,12 @@ def main():
         sys.exit(0)
 
     numbered = False
-    search_mode = False
 
     if "--numbered" in args:
         numbered = True
         args.remove("--numbered")
 
     if "--search" in args:
-        search_mode = True
         args.remove("--search")
         query = " ".join(args)
         results = search_s2(query)

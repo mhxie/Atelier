@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import date_in_text  # noqa: E402
+from _paths import date_in_text, effective_date  # noqa: E402
 from routine_digest_core import (  # noqa: E402
     DEFAULT_EXCERPT_CHARS,
     DEFAULT_MAX_FILES,
@@ -503,11 +503,6 @@ def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any]:
         "delivered": dict(sorted(delivered.items())),
         "todo_reminders": load_todo_reminders(ov),
     }
-
-def effective_date(now: datetime | None = None) -> date:
-    """Today, or yesterday before 03:00 local -- the harness day boundary."""
-    now = now or datetime.now()
-    return now.date() - timedelta(days=1) if now.hour < 3 else now.date()
 
 def resolve_window(
     mode: str,

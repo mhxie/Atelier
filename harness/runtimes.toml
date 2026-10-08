@@ -24,7 +24,6 @@ command_prefix = "$"
 # runtime-aware helpers). Paths are repo-relative.
 instruction_file = "AGENTS.md"
 agent_dir = ".codex/agents"
-agent_format = "codex-toml"
 skills_dir = ".agents/skills"
 hooks_file = ".codex/hooks.json"
 supports = ["hooks", "subagents", "skills"]
@@ -43,7 +42,6 @@ command_prefix = "/"
 # Compatibility import; shared rules live in AGENTS.md.
 instruction_file = "CLAUDE.md"
 agent_dir = ".claude/agents"
-agent_format = "claude-markdown"
 skills_dir = ".claude/skills"
 hooks_file = ".claude/settings.json"
 supports = ["hooks", "subagents", "skills", "choice-ui"]

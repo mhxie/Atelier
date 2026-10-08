@@ -26,7 +26,6 @@ ATELIER_ROOT = Path(__file__).resolve().parents[1]
 SESSION_LOCK_TTL_SECONDS = 60 * 60
 SESSION_LOCK_NAME = "atelier-session-lock"
 GENERIC_RETRY_DELAY_SECONDS = 60 * 60
-LEGACY_OWNED_AUDIT_STATE = "autoevo-preflight-owned-audit.json"
 
 
 class PreflightError(RuntimeError):
@@ -153,7 +152,6 @@ def inspect_preflight(
 ) -> dict[str, object]:
     """Check live write gates; expensive input probes run only before drafting."""
     vault = (vault or vault_root()).resolve()
-    cache = _resolve_segment(tier_segments()["cache"], vault)
     lock_path = lock_path or session_lock_path(vault)
     now = time.time() if now is None else now
     blockers: list[dict[str, object]] = []
@@ -166,28 +164,6 @@ def inspect_preflight(
         "semantic_mode": None,
         "semantic_probe_seconds": None,
     }
-
-    legacy_state = cache / LEGACY_OWNED_AUDIT_STATE
-    try:
-        legacy_state.lstat()
-    except FileNotFoundError:
-        pass
-    except OSError as exc:
-        raise PreflightError(f"cannot inspect legacy audit state: {exc}") from exc
-    else:
-        detail = (
-            f"legacy owned-audit state remains at {legacy_state}; review and "
-            "migrate it and its referenced audit before running autoevo; "
-            "preflight will not read, delete, or commit either file"
-        )
-        return {
-            "ready": False,
-            "gate": "legacy_audit_review_required",
-            "detail": detail,
-            "blockers": [{"gate": "legacy_audit_review_required", "detail": detail}],
-            "health": health,
-            "retry_after_epoch": None,
-        }
 
     # A lock that cannot be recorded or read is no evidence of an idle user.
     if not lock_path.parent.is_dir() or lock_path.is_symlink():

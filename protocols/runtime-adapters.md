@@ -55,8 +55,7 @@ another registered project skill, Codex renders the `$skill` form. Native
 Codex built-ins such as `/hooks` keep their slash form.
 
 Lifecycle hooks live in `.codex/hooks.json` and `.claude/settings.json`.
-Session cues and locks use `scripts/cues.py`; `invocation_log_gc.py` ages out
-existing direct-API payload logs. Opt-in hooks send advisory identifiers only;
+Session cues and locks use `scripts/cues.py`. Opt-in hooks send advisory identifiers only;
 native usage, privacy filtering, and coverage rules live in the
 [observability reference](../sources/runtimes/observability.md).
 

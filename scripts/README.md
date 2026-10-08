@@ -25,9 +25,6 @@ registered command or agent. Domain applications are not universal harness
 requirements; load them only through the selected workflow. Moving one to a
 new directory does not reduce its implementation cost.
 
-`invocation_log_gc.py` is a legacy privacy-retention owner: lifecycle hooks
-use it to age out legacy full-payload API logs while no new logs are written.
-
 ## Portable Harness
 
 Claude commands under `.claude/commands/` and Codex skills under

@@ -23,7 +23,6 @@ from _paths import atomic_write, tier, tier_files, vault_root  # type: ignore[im
 from _reflect import TitleIndex  # type: ignore[import-not-found]  # noqa: E402
 
 GTD_DIR = tier("gtd")
-REFLECTIONS_DIR = tier("reflections")
 DAILY_NOTES_DIR = tier("daily_notes")
 
 CHECKBOX_RE = re.compile(r"^\s*[+\-*]\s*\[([ xX~/])\]\s+(.*)$")

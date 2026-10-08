@@ -255,7 +255,7 @@ class HarnessLintCliContractTest(unittest.TestCase):
 
 
 class ComponentTaxonomyGuardTest(unittest.TestCase):
-    def test_public_and_private_kinds_are_rooted_and_legacy_fields_fail(self) -> None:
+    def test_public_and_private_kinds_are_rooted(self) -> None:
         with _lint_root() as root, tempfile.TemporaryDirectory(prefix="atelier-components-") as tmp:
             vault = Path(tmp)
             _write(root, "skills/sample/SKILL.md", "---\nname: sample\n---\n")
@@ -283,12 +283,6 @@ class ComponentTaxonomyGuardTest(unittest.TestCase):
                 self.assertEqual(h.check_component_taxonomy(*arguments), [])
                 _write(root, "skills/unregistered/SKILL.md", "---\nname: unregistered\n---\n")
                 self.assertIn("component-skill-unregistered", [f.code for f in h.check_component_taxonomy(*arguments)])
-                (root / "skills/unregistered/SKILL.md").unlink()
-                registry.write_text(
-                    'version = 1\n[[routine]]\nname = "sample"\nrunner = "model"\nkind = "model"\n',
-                    encoding="utf-8",
-                )
-                self.assertIn("component-private-routine-legacy", [f.code for f in h.check_component_taxonomy(*arguments)])
 
 
 class FlatTierGlobGuardTest(unittest.TestCase):
@@ -538,8 +532,9 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
             row.update(metadata)
 
         def routes(rows):
-            with patch.object(cb, 'load_intents', return_value=rows):
-                return [cb.resolve_route(intent_arg=name, intents_path=Path('/fixture/intents.toml')) for name in rows]
+            with (patch.object(cb, 'load_intents', return_value=rows),
+                  patch.object(cb, 'DEFAULT_INTENTS_PATH', Path('/fixture/intents.toml'))):
+                return [cb.resolve_route(intent_arg=name) for name in rows]
 
         self.assertTrue(all(not set(row).intersection(metadata) for row in agents['agents'].values()))
         self.assertTrue(all('pattern' not in row for row in intents['intents'].values()))
@@ -571,7 +566,7 @@ class AnnotationRemovalGuardTest(unittest.TestCase):
 
 
 class WorkflowContractOwnerGuardTest(unittest.TestCase):
-    def test_retired_router_and_missing_migrated_boundaries_fail(self) -> None:
+    def test_missing_migrated_boundaries_fail(self) -> None:
         paths = ('protocols/orchestrator.md', 'skills/read/SKILL.md', 'protocols/intent-capture.md')
 
         def assert_broken():
@@ -581,10 +576,6 @@ class WorkflowContractOwnerGuardTest(unittest.TestCase):
             for name in paths:
                 _write(root, name, (REPO_ROOT / name).read_text())
             self.assertEqual(h.check_workflow_contract_owners(), [])
-            retired = _write(root, 'protocols/orchestrator-actions.md',
-                             'Read [[Article]]: Reader (3-5 instances) + Researcher + Scout + Thinker')
-            assert_broken()
-            retired.unlink()
             mutations = (
                 ('protocols/orchestrator.md', '`harness/intents.toml` selects the procedure'),
                 ('skills/read/SKILL.md', 'Start with one **Reader**, or one **Scholar**'),

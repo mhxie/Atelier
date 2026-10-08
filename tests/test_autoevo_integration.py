@@ -301,17 +301,6 @@ def _check_autoevo_readiness() -> None:
             )
             session_lock.parent.mkdir()
 
-            legacy = vault / "cache" / autoevo_preflight.LEGACY_OWNED_AUDIT_STATE
-            legacy.write_text("{unparsed legacy state", encoding="utf-8")
-            legacy_result = inspect_preflight()
-            expect(
-                legacy_result["gate"] == "legacy_audit_review_required"
-                and legacy_result["retry_after_epoch"] is None
-                and legacy.read_text(encoding="utf-8") == "{unparsed legacy state",
-                "legacy owned-audit state was consumed or silently bypassed",
-            )
-            legacy.unlink()
-
             session_lock.touch()
             active = inspect_preflight(
                 now=session_lock.stat().st_mtime,

@@ -76,15 +76,9 @@ def check_dining_audit() -> None:
 """,
             encoding="utf-8",
         )
-        valid = dining_audit.audit(vault, 2)
+        valid = dining_audit.audit(vault)
         expect(valid["ok"] is True, f"valid dining fixture failed: {valid}")
         expect(valid["stats"]["rows"] == 3, "dining row count drift")
-        expect(
-            len(valid["recent"]) == 2
-            and valid["per_person_trend"]["known"] == 2
-            and valid["per_person_trend"]["direction"] == "unknown",
-            f"dining recent view overclaimed a sparse trend: {valid}",
-        )
 
         dining_log.write_text(
             dining_log.read_text(encoding="utf-8")

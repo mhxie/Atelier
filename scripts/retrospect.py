@@ -21,6 +21,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _paths import PathsError, atomic_write, date_in_text, fmt, vault_root  # noqa: E402
+from routine_digest_core import _vault_relative  # noqa: E402
 
 STATE_RELPATH = "_meta/retrospect_state.json"
 VERDICTS_RELPATH = "_meta/retrospect_verdicts.json"
@@ -222,7 +223,7 @@ def draw(
     pool = [
         (path, tier, weight)
         for path, tier, weight in candidates(ov, today)
-        if state.get(_key(ov, path), "") < cutoff
+        if state.get(_vault_relative(ov, path), "") < cutoff
     ]
     if not pool:
         return []
@@ -244,7 +245,7 @@ def draw(
         digest = content_hash(path)
         if not digest:
             continue
-        ruling = verdict_for(verdicts, _key(ov, path), digest)
+        ruling = verdict_for(verdicts, _vault_relative(ov, path), digest)
         if ruling == "reject":
             continue
         try:
@@ -253,7 +254,7 @@ def draw(
             continue
         picks.append(
             {
-                "path": _key(ov, path),
+                "path": _vault_relative(ov, path),
                 "tier": tier,
                 "title": title_of(text, path),
                 "age_days": note_age_days(path, today),
@@ -265,13 +266,6 @@ def draw(
             }
         )
     return picks
-
-
-def _key(ov: Path, path: Path) -> str:
-    try:
-        return str(path.relative_to(ov))
-    except ValueError:
-        return str(path)
 
 
 def record(ov: Path, picks: list[dict[str, Any]], today: date | None = None) -> None:

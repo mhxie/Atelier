@@ -9,6 +9,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -197,8 +198,6 @@ _DATE_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 def parse_iso_date(value: object):
     """Parse YYYY-MM-DD or an ISO timestamp's date prefix; invalid input returns None."""
-    from datetime import date
-
     if value is None:
         return None
     text = str(value).strip()
@@ -216,6 +215,12 @@ def date_in_text(value: object):
         return None
     match = _DATE_IN_TEXT.search(str(value))
     return parse_iso_date(match.group(0)) if match else None
+
+
+def effective_date(now: datetime | None = None) -> date:
+    """Today, or yesterday before 03:00 local -- the harness day boundary."""
+    now = now or datetime.now()
+    return now.date() - timedelta(days=1) if now.hour < 3 else now.date()
 
 
 def fmt(p: Path) -> str:

@@ -172,9 +172,9 @@ class PureFunctionTests(unittest.TestCase):
         self.assertEqual(db._days_phrase(1), "明天")
         self.assertEqual(db._days_phrase(5), "5d")
 
-    def test_effective_today_rolls_back_before_three_am(self):
-        self.assertEqual(db.effective_today(datetime(2099, 1, 31, 1, 12)).isoformat(), "2099-01-30")
-        self.assertEqual(db.effective_today(datetime(2099, 1, 31, 8, 0)).isoformat(), "2099-01-31")
+    def test_effective_date_rolls_back_before_three_am(self):
+        self.assertEqual(db.effective_date(datetime(2099, 1, 31, 1, 12)).isoformat(), "2099-01-30")
+        self.assertEqual(db.effective_date(datetime(2099, 1, 31, 8, 0)).isoformat(), "2099-01-31")
 
     def test_clean_todo_text_strips_metadata_and_links(self):
         cleaned = db.clean_todo_text(

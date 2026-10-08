@@ -431,7 +431,6 @@ def check_hooks(payload: dict[str, Any], runtime: str) -> list[Finding]:
         ("SessionStart", ("scripts/cues.py", "--hook", f"--runtime {runtime}")),
         *((event, ("scripts/autoevo_preflight.py", "--touch-lock"))
           for event in ("UserPromptSubmit", "PostToolUse", "Stop")),
-        ("Stop" if runtime == "codex" else "SessionEnd", ("scripts/invocation_log_gc.py",)),
     )
     for event, needles in required:
         commands = [handler["command"] for group in payload["hooks"].get(event, [])
@@ -1126,10 +1125,6 @@ def check_workflow_contract_owners() -> list[Finding]:
         ),
     }
     findings: list[Finding] = []
-    retired = ROOT / "protocols" / "orchestrator-actions.md"
-    if retired.exists():
-        _add(findings, "ERROR", "workflow-contract-owner", rel(retired),
-                 "dispatch belongs to the selected procedure, not a second action router")
     for path, required in contracts.items():
         try:
             body = " ".join(_read(ROOT / path).split())

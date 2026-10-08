@@ -5,11 +5,11 @@ from __future__ import annotations
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier, fmt  # type: ignore[import-not-found]  # noqa: E402
+from _paths import effective_date, tier, fmt  # type: ignore[import-not-found]  # noqa: E402
 
 SESSIONS_DIR = tier("sessions")
 
@@ -153,20 +153,11 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    # Late-sleep rule: before 03:00, use previous day.
-    now = datetime.now()
-    if now.hour < 3:
-        from datetime import timedelta
-
-        today = (now - timedelta(days=1)).date()
-    else:
-        today = now.date()
-
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
     path = _write_next_log(
         args.type,
-        today,
+        effective_date(),
         duration=args.duration,
         model=args.model,
     )
