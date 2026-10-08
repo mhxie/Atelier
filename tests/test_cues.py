@@ -235,6 +235,26 @@ class IntentMissCueTest(unittest.TestCase):
             self.assertIn("6 unrouted", out["debug"])
 
 
+class WikiAttentionCueTest(unittest.TestCase):
+    def test_flagged_reviews_and_expired_evidence_surface_until_settled(self) -> None:
+        fence = ("```anchors c1\n@anchor: doi:fixture | valid_at: 2020-01-01{expiry}\n"
+                 "@pass: editor | status: pending | at: 2020-02-01\n@pass: reviewer | status: {status} | at: 2020-03-01\n{extra}```\n")
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp, \
+                mock.patch.object(cues, "tier_segments", return_value={}):
+            vault = Path(tmp)
+            note = vault / "wiki/topic/Entry.md"
+            note.parent.mkdir(parents=True)
+            body = "# Entry\n\nIntro <!-- claim:c1 -->a bounded claim.<!-- /claim:c1 -->\n\n## References\n\n"
+            doubt = "@pass: reader | status: flagged | at: 2020-04-01\n"
+            for status, expiry, extra, expected in (("flagged", "", "", ["[[Entry#^c1]] flagged by reviewer"]),
+                                                    ("verified", "", doubt, ["[[Entry#^c1]] flagged by reader"]),
+                                                    ("verified", " | invalid_at: 2020-06-01", "", ["[[Entry#^c1]] evidence expired"]),
+                                                    ("verified", "", "", None)):
+                note.write_text(body + fence.format(status=status, expiry=expiry, extra=extra), encoding="utf-8")
+                cue, _ = cues.check_wiki_attention(vault, date.today())
+                self.assertEqual(cue.items if cue else None, expected)
+
+
 class RoutineCueTest(unittest.TestCase):
     def test_oldest_unreviewed_output_gets_a_visible_slot(self) -> None:
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:

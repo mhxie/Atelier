@@ -1,0 +1,317 @@
+{
+  "description": "Claim trust tiers (Plan 30). Each case is one claim: its anchors-fence lines, the tiers of the claims it cites, and the day it is judged. A `reader` pass may only be `flagged` and an `editor` pass only `pending`; other statuses from those agents are ignored. Implementations of the tier rules (Reflect's packages/core/src/wiki/trust.ts, atelier's trust engine) must agree on every case.",
+  "cases": [
+    {
+      "name": "no evidence",
+      "asOf": "2026-10-07",
+      "ledger": null,
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "one secondary web source",
+      "asOf": "2026-10-07",
+      "ledger": ["@anchor: url:https://blog.example.org/post | valid_at: 2026-01-01"],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "one paper",
+      "asOf": "2026-10-07",
+      "ledger": ["@anchor: arxiv:2409.19256 | valid_at: 2026-01-01"],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "two independent web sources",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://blog.example.org/post | valid_at: 2026-01-01",
+        "@anchor: url:https://other.example.net/notes | valid_at: 2026-01-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "two pages of one documentation site are one origin",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@anchor: url:https://www.docs.example.org/b | valid_at: 2026-01-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "an arXiv id and a link to the same paper are one origin",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://arxiv.org/html/2409.19256v2 | valid_at: 2026-01-01",
+        "@pass: scout | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "links to two different papers on one host are two origins",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://arxiv.org/abs/2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://arxiv.org/pdf/1707.06347v2 | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "solid",
+      "overlays": []
+    },
+    {
+      "name": "strong evidence without adversarial review",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: reviewer | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "strong evidence with a scout verification",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: scout | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "solid",
+      "overlays": []
+    },
+    {
+      "name": "review alone never makes a claim solid",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://blog.example.org/post | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01",
+        "@pass: scout | status: verified | at: 2026-02-02"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "an edit after the adversarial review voids the gate",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01",
+        "@pass: editor | status: pending | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": ["edited"]
+    },
+    {
+      "name": "a reviewer pass after an edit clears the edited mark but not the gate",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01",
+        "@pass: editor | status: pending | at: 2026-03-01",
+        "@pass: reviewer | status: verified | at: 2026-03-02"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "a same-day pending record after a review is newer",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reviewer | status: verified | at: 2026-03-01",
+        "@pass: editor | status: pending | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": ["edited"]
+    },
+    {
+      "name": "a flagged verdict caps the tier",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: scout | status: verified | at: 2026-02-01",
+        "@pass: challenger | status: flagged | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": ["disputed"]
+    },
+    {
+      "name": "an inconclusive scout verdict disputes the claim",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: scout | status: inconclusive | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": ["disputed"]
+    },
+    {
+      "name": "a later verification supersedes a flag",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reviewer | status: flagged | at: 2026-02-01",
+        "@pass: reviewer | status: verified | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "an explicit primary kind on a web source",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://docs.example.org/api | valid_at: 2026-01-01 | kind: primary",
+        "@anchor: url:https://blog.example.org/post | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "solid",
+      "overlays": []
+    },
+    {
+      "name": "an explicit secondary kind on a paper",
+      "asOf": "2026-10-07",
+      "ledger": ["@anchor: arxiv:2409.19256 | valid_at: 2026-01-01 | kind: secondary"],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "invalidated evidence does not count",
+      "asOf": "2026-10-07",
+      "ledger": ["@anchor: arxiv:2409.19256 | valid_at: 2026-01-01 | invalid_at: 2026-06-01"],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "evidence recorded after the day judged does not count yet",
+      "asOf": "2026-10-07",
+      "ledger": ["@anchor: arxiv:2409.19256 | valid_at: 2026-12-01"],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "two authors on a code host are two origins",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://github.com/alpha/project/blob/main/a.py | valid_at: 2026-01-01",
+        "@anchor: url:https://raw.githubusercontent.com/beta/tool/main/b.py | valid_at: 2026-01-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "one author's repositories are one origin",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: url:https://github.com/alpha/project | valid_at: 2026-01-01",
+        "@anchor: url:https://github.com/Alpha/other | valid_at: 2026-01-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "citing a supported claim lends Supported",
+      "asOf": "2026-10-07",
+      "ledger": null,
+      "citedTiers": ["supported"],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "citing a solid claim lends at most Supported",
+      "asOf": "2026-10-07",
+      "ledger": ["@pass: challenger | status: verified | at: 2026-02-01"],
+      "citedTiers": ["solid"],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "citing only weak claims lends nothing",
+      "asOf": "2026-10-07",
+      "ledger": null,
+      "citedTiers": ["needs-work", "needs-work"],
+      "tier": "needs-work",
+      "overlays": []
+    },
+    {
+      "name": "a reader's doubt disputes a solid claim",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: challenger | status: verified | at: 2026-02-01",
+        "@pass: reader | status: flagged | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": ["disputed"]
+    },
+    {
+      "name": "a later review resolves a reader's doubt",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reader | status: flagged | at: 2026-03-01",
+        "@pass: reviewer | status: verified | at: 2026-03-02"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "a reader cannot verify",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reviewer | status: flagged | at: 2026-02-01",
+        "@pass: reader | status: verified | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": ["disputed"]
+    },
+    {
+      "name": "an editor record other than pending is ignored",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reviewer | status: flagged | at: 2026-02-01",
+        "@pass: editor | status: verified | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "needs-work",
+      "overlays": ["disputed"]
+    }
+  ]
+}

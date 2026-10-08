@@ -28,7 +28,7 @@ MAX_ITER = 200
 TOL = 1e-9
 
 ANCHOR_TYPES = {"s2", "arxiv", "doi", "isbn", "url", "gist"}
-PASS_AGENTS = {"reviewer", "challenger", "thinker", "scout", "curator", "editor"}
+PASS_AGENTS = {"reviewer", "challenger", "thinker", "scout", "curator", "editor", "reader"}
 PASS_STATUSES = {"verified", "flagged", "inconclusive", "pending"}
 
 FENCE_OPEN_RE = re.compile(r"^```anchors\s*$")
@@ -85,6 +85,24 @@ class Claim:
     @property
     def key(self) -> str:
         return f"{self.note_path.as_posix()}#C{self.number}"
+
+    def latest(self, as_of: date, agents) -> Marker | None:
+        """Reflect's ordering: the latest active pass by `at` among `agents`; a later line wins a date tie."""
+        last = None
+        for p in self.passes:
+            if p.fields["_agent"] in agents and p.active_on(as_of) and (last is None or p.valid_at >= last.valid_at):
+                last = p
+        return last
+
+    def review(self, as_of: date) -> str | None:
+        """Edit state: `pending` until a reviewer record follows the editor's."""
+        last = self.latest(as_of, {"editor", "reviewer"})
+        return last.fields["status"] if last else None
+
+    def dispute(self, as_of: date) -> Marker | None:
+        """The latest non-editor verdict when it is flagged or inconclusive."""
+        last = self.latest(as_of, PASS_AGENTS - {"editor"})
+        return last if last and last.fields["status"] in {"flagged", "inconclusive"} else None
 
     def has_body(self) -> bool:
         body = REFERENCE_RE.sub("", "\n".join(self.body_lines))
@@ -194,8 +212,8 @@ def _parse_marker(kind: str, first: str, extras: list[str], line_no: int, raw: s
         status = fields.get("status", "")
         if status not in PASS_STATUSES:
             return None, f"line {line_no}: unrecognized @pass status `{status}`"
-        if (fields["_agent"] == "editor") != (status == "pending"):
-            return None, f"line {line_no}: editor and pending are reserved for the editor/pending pair"
+        if (fields["_agent"] == "editor") != (status == "pending") or fields["_agent"] == "reader" and status != "flagged":
+            return None, f"line {line_no}: editor may only record pending, and reader only flagged"
         if fields["_agent"] == "editor" and fields.get("at") != fields["valid_at"]:
             return None, f"line {line_no}: editor/pending requires an ISO at date matching valid_at"
 
@@ -666,6 +684,7 @@ def format_json(
                         "anchors": sum(1 for a in c.anchors if a.active_on(as_of)),
                         "cites": sum(1 for ct in c.cites if ct.active_on(as_of)),
                         "passes": sum(1 for p in c.passes if p.active_on(as_of)),
+                        "review": c.review(as_of),
                         **({"range_utf8": c.range_utf8} if c.range_utf8 is not None else {}),
                     }
                     for c in note.claims

@@ -16,7 +16,7 @@ from _paths import atomic_write, retry_transient, tier_segments, vault_root
 VERSION = 1
 CATEGORIES = ("redundant", "time-stale-A", "time-stale-B", "contradicted", "low-signal")
 BLOCKING_STATES = ("half-applied", "malformed")
-NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner")
+NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner", "wiki-review")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -113,6 +113,11 @@ def proposal_schema(plan: dict) -> dict:
                                "judgment": {"type": "object"}},
             }},
             "notes": strings, "errors": strings,
+            "wiki_reviews": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False, "required": ["path", "claim", "verdict", "reason"],
+                "properties": {"path": {"type": "string"}, "claim": {"type": "integer"},
+                               "verdict": {"enum": ["verified", "flagged", "inconclusive"]}, "reason": {"type": "string"}},
+            }},
         },
     }
 
@@ -127,6 +132,10 @@ def validate_proposal(value: object, plan: dict) -> dict:
     actual = [row["scope"] for row in value["sweeps"]]
     if sorted(actual) != sorted(expected):
         raise VerificationError("proposal omitted or repeated a planned sweep")
+    staged = [(row["path"], row["claim"]) for row in plan.get("wiki_review", {}).get("claims", [])]
+    reviewed = [(row["path"], row["claim"]) for row in value.get("wiki_reviews", [])]
+    if len(set(reviewed)) != len(reviewed) or not set(reviewed) <= set(staged):
+        raise VerificationError("wiki review repeated or invented a claim")
     for sweep in value["sweeps"]:
         if sweep["outcome"] == "envelope_returned":
             if (sweep["mode"], sweep["completion_status"]) not in {("full", "complete"), ("partial", "partial")}:
@@ -177,6 +186,12 @@ def render_report(record: dict) -> str:
         ("Errors", record["errors"]),
     ):
         lines += ["", f"### {heading}", *[f"- {item}" for item in values]] if values else ["", f"### {heading}", "- (none)"]
+    staged = {(row["path"], row["claim"]): row for row in record["plan"].get("wiki_review", {}).get("claims", [])}
+    for row in record.get("wiki_reviews", []):
+        claim, reason = staged[(row["path"], row["claim"])], next(
+            r["reason"] for r in proposal["wiki_reviews"] if (r["path"], r["claim"]) == (row["path"], row["claim"]))
+        lines += ["", f"### Wiki review {row['verdict']}: [[{claim['title']}#^c{row['claim']}]]", f"- Reason: {reason}",
+                  *(f"- {label}: {' '.join((claim[key] or '(unavailable)').split())[:300]}" for label, key in (("Before", "previous"), ("After", "current")))]
     for entry in record.get("triage", []):
         lines += ["", f"### Review {entry['category']}: {entry['id']}",
                   f"- Sources: {', '.join(entry['peers'])}",

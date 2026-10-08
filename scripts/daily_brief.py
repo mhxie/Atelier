@@ -64,6 +64,7 @@ REVIEW_CUES = (
     "weekly",
     "meta_reflection",
     "autoevo_pending",
+    "wiki_attention",
     "aggregate_freshness",
     "routine_outputs",
     "career_growth",

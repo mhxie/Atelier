@@ -129,10 +129,18 @@ do not carry stale responses forward.
 Do not run `precedent.py` setters or queue/ledger commands yourself. Missing,
 incomplete or unsupported judgments leave entries human-only.
 
-## 5. Return the proposal
+## 5. Review staged wiki edits
+
+When `plan.json` `wiki_review.claims` is non-empty, dispatch Reviewer in Claim
+Review mode once per note with each claim's `previous` and `current` text and
+the snapshot's evidence fence. Add one `wiki_reviews` row per judged claim:
+`path`, `claim`, `verdict` and a one-sentence `reason`. Never invent a claim
+or verdict; an unreturned claim stays pending.
+
+## 6. Return the proposal
 
 The top-level object has `schema_version`, `cycle_id`, `sweeps`,
-`judgments`, `notes`, `errors`. Each sweep has `scope`, `outcome`,
+`judgments`, `notes`, `errors`, and optional `wiki_reviews`. Each sweep has `scope`, `outcome`,
 `mode`, `completion_status`, `remaining_work`, `gaps`, `findings`,
 `notes`. Follow the generated schema; do not add ad-hoc fields or old
 sidecars. Preserve honest partial/failure evidence if interrupted.

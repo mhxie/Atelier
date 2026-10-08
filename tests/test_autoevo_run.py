@@ -133,6 +133,40 @@ class AutoevoTest(unittest.TestCase):
         pending.atomic_write(path, pending.render({"schema_version": 1, "pending": [entry]}))
         return entry
 
+    def test_pending_wiki_claim_gets_one_reviewer_record_and_a_spot_check_report(self):
+        cycle, rel = date.today().isoformat(), "wiki/topic/Entry.md"
+        note = self.vault / rel
+        note.parent.mkdir(parents=True)
+        note.write_text("# Entry\n\n## Claims\n### [C1] Water boils at 100 C at sea level\nMeasured at 1 atm.\n"
+                        "```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n@pass: reviewer | status: verified | at: 2020-01-02\n```\n")
+        self.reflect()
+        article = ("# Entry\n\nIntro <!-- claim:c1 -->water boils at 100 C at sea level (1 atm).<!-- /claim:c1 -->\n\n## References\n\n"
+                   "```anchors c1\n@anchor: doi:fixture | valid_at: 2020-01-01\n@pass: reviewer | status: verified | at: 2020-01-02\n"
+                   "@pass: editor | status: pending | at: 2020-02-01\n```\n")
+        note.write_text(article)
+        fresh = self.vault / "wiki/topic/Fresh.md"  # pending since its first commit: nothing to compare
+        fresh.write_text(article.replace("# Entry", "# Fresh"))
+        for path in (rel, "wiki/topic/Fresh.md"):
+            self.old(path)
+        self.reflect()
+        plan, proposal = self.prepare(cycle)
+        claim, unseen = plan["wiki_review"]["claims"]
+        self.assertEqual((claim["claim"], claim["previous"], unseen["previous"]),
+                         (1, "Water boils at 100 C at sea level\nMeasured at 1 atm.", None))
+        self.assertEqual(claim["current"], "water boils at 100 C at sea level (1 atm).")
+        proposal["wiki_reviews"] = [{"path": row["path"], "claim": 1, "verdict": "verified", "reason": "Same assertion."}
+                                    for row in (claim, unseen)]
+        invented = deepcopy(proposal)
+        invented["wiki_reviews"][0]["claim"] = 2
+        with self.assertRaises(evidence.VerificationError):
+            evidence.validate_proposal(invented, plan)
+        self.assertEqual(self.accept(plan, proposal)["status"], "complete")
+        record = f"@pass: reviewer | status: verified | at: {cycle} | ref: autoevo-applied-{cycle}\n"
+        self.assertEqual(note.read_text(), article.replace("at: 2020-02-01\n", "at: 2020-02-01\n" + record))
+        report = (self.vault / f"agent-findings/autoevo-applied-{cycle}.md").read_text()
+        self.assertIn("### Wiki review verified: [[Entry#^c1]]", report)
+        self.assertIn(f"@pass: reviewer | status: inconclusive | at: {cycle}", fresh.read_text())
+
     def test_empty_cycle_keeps_a_verified_receipt_without_visible_notes(self):
         plan, proposal = self.prepare()
         head = self.git("rev-parse", "HEAD")

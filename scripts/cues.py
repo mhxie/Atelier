@@ -1101,6 +1101,58 @@ def check_vault_layout(ov: Path, today: date) -> tuple[Cue | None, str]:
     )
 
 
+def check_wiki_attention(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Wiki claims the nightly review cannot settle: flagged reviews and expired evidence."""
+    import trust  # type: ignore[import-not-found]
+    import wiki_review  # type: ignore[import-not-found]
+
+    items = []
+    for path in wiki_review.notes(ov / tier_segments().get("wiki", "wiki")):
+        note = trust.parse_wiki_note(path, today)
+        items += [f"[[{note.title}#^c{number}]] {reason}" for number, reason in wiki_review.attention(note, today)]
+    if not items:
+        return None, "no wiki claim needs attention"
+    return (
+        Cue(
+            key="wiki_attention",
+            severity="soft",
+            command_path="skills/lint/SKILL.md",
+            message=(
+                f"Wiki 有 {len(items)} 个 claim 需要你决定 (例: {items[0]}). "
+                "flagged 的理由在夜间 `autoevo-applied-*` 回执里; 跑 `/lint` 看全部."
+            ),
+            count=len(items),
+            items=items,
+        ),
+        f"{len(items)} wiki claim(s) need attention",
+    )
+
+
+def check_promote_candidates(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Working notes your own thinking keeps linking to that no wiki entry cites yet."""
+    from _reflect import read_head  # type: ignore[import-not-found]
+    from staleness import promotion_candidates  # type: ignore[import-not-found]
+
+    ranked = sorted(promotion_candidates(today).items(), key=lambda item: (-item[1], item[0].as_posix()))
+    if not ranked:
+        return None, "no promotion candidates"
+    items = [f"[[{read_head(path)[0] or path.stem}]] ({count})" for path, count in ranked[:5]]
+    return (
+        Cue(
+            key="promote_candidates",
+            severity="soft",
+            command_path="skills/promote/SKILL.md",
+            message=(
+                f"{len(ranked)} 条笔记你反复链接、但还没有 wiki 引用 (例: {items[0]}). "
+                "想沉淀成 wiki 的话跑 `/promote`."
+            ),
+            count=len(ranked),
+            items=items,
+        ),
+        f"{len(ranked)} promotion candidate(s)",
+    )
+
+
 def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Surface the latest failed Prefect run per local model or process routine."""
     zone = datetime.now().astimezone().tzinfo
@@ -1156,6 +1208,8 @@ CHECKS = [
     ("routine_hitrate", check_routine_hitrate),
     ("routine_policy", check_routine_policy),
     ("autoevo_pending", check_autoevo_pending),
+    ("wiki_attention", check_wiki_attention),
+    ("promote_candidates", check_promote_candidates),
     ("autoevo_ran", check_autoevo_ran),
     ("local_routine_missed", check_local_routine_missed),
     ("routine_failures", check_routine_failures),

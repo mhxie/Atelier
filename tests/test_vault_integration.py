@@ -345,6 +345,31 @@ class KnowledgeCLITests(unittest.TestCase):
                 self.cli("lint.py", "--json", expected=1)
                 self.cli("trust.py", "--as-of", invalid, "--json", expected=2)
 
+    def test_promotion_candidates_follow_your_links_not_mtime(self):
+        self.put("research/Topic.md", "# Topic\n\nAn idea worth keeping.\n")
+        self.put("research/Board.md", "# Board\n\nLast built: 2099-01-01\n")
+        self.put("research/Cited.md", "# Cited\n\nAlready a wiki source.\n")
+        self.put("research/2099-01-07-weekly.md", "# 2099-01-07-weekly\n")
+        for name in ("a", "b"):
+            self.put(f"reflections/{name}.md", f"# {name}\n\n[[Topic]] [[Board]] [[Cited]] [[2099-01-07-weekly]]\n")
+        self.put("wiki/Entry.md", "# Entry\n\nSee [[Cited]].\n")
+        notes = json.loads(self.cli("staleness.py", "--json").stdout)["notes"]
+        self.assertEqual([Path(n["path"]).name for n in notes if n["category"] == "promote"], ["Topic.md"])
+
+    def test_review_overlays_match_reflects_shared_claim_trust_cases(self):
+        """Pinned to Reflect's fixtures/wiki-claim-trust.json: tiers are Reflect's, the edited/disputed overlays are shared."""
+        import trust
+
+        source = self.put("wiki/Case.md", "")
+        for case in json.loads((ROOT / "tests/fixtures/wiki-claim-trust.json").read_text())["cases"]:
+            with self.subTest(case=case["name"]):
+                fence = "" if case["ledger"] is None else "```anchors c1\n" + "\n".join(case["ledger"]) + "\n```\n"
+                source.write_text("# Case\n\nIntro <!-- claim:c1 -->a claim.<!-- /claim:c1 -->\n\n## References\n\n" + fence)
+                [claim] = trust.parse_wiki_note(source, date.today()).claims
+                as_of = date.fromisoformat(case["asOf"])
+                overlays = {"disputed": claim.dispute(as_of) is not None, "edited": claim.review(as_of) == "pending"}
+                self.assertEqual(sorted(name for name, on in overlays.items() if on), sorted(case["overlays"]))
+
     def test_shadow_drift_matches_nested_domain_paths(self):
         note = "# Entry\n\n## Claims\n### [C1] Claim\nProse.\n```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n"
         self.put("wiki/topic/Entry.md", note)

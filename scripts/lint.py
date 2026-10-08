@@ -24,6 +24,7 @@ from trust import (  # noqa: E402
     _resolve_cites,
     load_wiki,
 )
+import wiki_review  # noqa: E402
 
 VOCABULARY_PATH = Path(__file__).resolve().parent / "wiki_vocabulary.txt"
 
@@ -62,6 +63,12 @@ def check_parse_errors(notes: list[WikiNote]) -> list[Finding]:
                 )
             )
     return findings
+
+
+def check_claim_attention(notes: list[WikiNote]) -> list[Finding]:
+    """Flagged reviews and fully expired evidence need a human decision."""
+    return [Finding("WARN", "claim-attention", note.path.as_posix(), f"[C{number}] {reason}")
+            for note in notes for number, reason in wiki_review.attention(note, date.today())]
 
 
 def check_duplicate_titles(notes: list[WikiNote]) -> list[Finding]:
@@ -418,6 +425,7 @@ def run_lints(notes: list[WikiNote]) -> list[Finding]:
     # lint.py calls it explicitly because we don't score here.
     _resolve_cites(notes)
     findings.extend(check_parse_errors(notes))
+    findings.extend(check_claim_attention(notes))
     findings.extend(check_duplicate_titles(notes))
     findings.extend(check_slug_alignment(notes))
     findings.extend(check_graph_topology(notes))

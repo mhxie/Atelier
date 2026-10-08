@@ -17,6 +17,7 @@ Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint
 | Check | Severity | Source |
 |---|---|---|
 | Per-note parse errors: schema items 1-10, malformed citation metadata, or dangling targets (`parse-error`) | ERROR | `scripts/trust.py` parser + resolver |
+| Disputed claim or fully expired evidence (`claim-attention`) | WARN | `scripts/wiki_review.py`; reasons are in `autoevo-applied-*` receipts. Route to the user. |
 | Duplicate titles across wiki entries (breaks citation resolution) | ERROR | `scripts/lint.py` |
 | Slug ↔ title alignment (filename stem matches H1 title) | WARN | `scripts/lint.py` |
 | Orphan entry: no inbound citation from another wiki entry | WARN | `scripts/lint.py` graph topology |
@@ -24,7 +25,7 @@ Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint
 | Shared anchor without a citation edge between entries | INFO | `scripts/lint.py` graph topology |
 | `url:` or `gist:` anchor missing `readwise:` field (`readwise-missing`) | WARN | `scripts/lint.py` — save to Readwise with `anchor-evidence` tag and backfill the document ID; fix via `uv run scripts/snapshot_anchors.py --apply --note "<paths.wiki>/<Title>.md"` |
 | Technical term in claim body not in vocabulary allowlist and not matching any wiki entry title (`unfounded-term`) | INFO | `scripts/lint.py` — add term to `scripts/wiki_vocabulary.txt` if common knowledge, or add a wiki entry, or add a parenthetical definition inline |
-| Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — run /promote Phase 4 or regenerate the shadow manually. Configured shadow paths live under `[paths.wiki_localized]` in `harness/paths.local.toml`. |
+| Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — run /promote Phase 4 or regenerate the shadow manually. |
 | Localized shadow older than English source (`shadow-stale`) | WARN | `scripts/lint.py` — re-translate the localized shadow to match the updated English source |
 | Public configuration schema and Claude/Codex harness alignment (`registry-schema`, `registry-read`, `registry-validator`, source/reference/edge findings) | ERROR/WARN/INFO | `harness/registry.schema.json` + `scripts/harness_lint.py` |
 | `$OV` ingestion hygiene (missing READMEs, raw-without-digest, archive↔working-tier overlap, root-level orphans, empty .md files, suspicious top-level dirs, vault layout, duplicate Reflect titles) | INFO (advisory) | `scripts/zk_audit.py` — see `protocols/drive-zk-ingestion.md` § Post-ingestion verification |
@@ -119,9 +120,8 @@ For each fixable category, ask the user before acting:
 | Finding code | Fix | How |
 |---|---|---|
 | `slug-mismatch` | Rename file or edit H1 | Ask the user which side to change. Never rename without confirmation — downstream `@cite` targets key off the title. |
-| `parse-error` (e.g., missing `valid_at`, duplicate claim IDs or invalid ranges) | Edit the wiki entry | Route to the user; do not auto-edit wiki entries. |
+| `parse-error` (e.g., missing `valid_at`, duplicate claim IDs, invalid ranges or dangling citations) | Edit the wiki entry | Route to the user; do not auto-edit wiki entries. |
 | `duplicate-title` | Edit one of the H1 titles | Ask the user which note keeps the title. |
-| `dangling-cite` | Correct the citation target | Surfaced under `parse-error` code (trust.py's resolver appends to `parse_errors`). Route to the user. |
 | `orphan-entry` | Add inline citation references inside related claims | Suggest supported claim links using `protocols/wiki-schema.md`; shared-anchor findings can identify candidates. |
 | `shared-anchor-no-cite` | Add a supported citation reference | Show the shared anchor and propose the citing claim and target. A shared source alone does not establish dependence. |
 

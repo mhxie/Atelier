@@ -137,11 +137,14 @@ A record of an agent pass or an editor's review-needed event. **`@pass` markers 
 ```
 @pass: <agent> | status: <verified|flagged|inconclusive> | at: <YYYY-MM-DD> [| ref: <session-id-or-note>]
 @pass: editor | status: pending | at: <YYYY-MM-DD>
+@pass: reader | status: flagged | at: <YYYY-MM-DD> [| ref: <note>]
 ```
 
 `<agent>` is one of: `reviewer`, `challenger`, `thinker`, `scout`, `curator`. The optional `ref` field points at the session reflection or another note where the pass was recorded, for audit.
 
-The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass, renewing evidence, or revoking the existing note-level verified floor. Preserve earlier records.
+A `reader` records the user's doubt from Reflect and may record only `flagged`, as editor may record only `pending`. A claim is disputed while its latest active non-editor record, ordered as below, is `flagged` or `inconclusive`; a later record by another agent resolves it. `/lint` reports disputed claims and claims whose evidence has all expired as `claim-attention`. Reflect and `scripts/trust.py` share these rules through `tests/fixtures/wiki-claim-trust.json`.
+
+The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass, renewing evidence, or revoking the existing note-level verified floor. Preserve earlier records. A claim is pending while its latest active editor or reviewer record, ordered by `at` with a later line winning a tie, is `editor/pending`; Reflect and `scripts/trust.py` share this rule. Nightly Autoevo appends only reviewer records.
 
 ## Bi-temporal Anchors
 

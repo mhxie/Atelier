@@ -1,6 +1,6 @@
 ---
 name: reviewer
-description: Quality-checks reflection, reading, and synthesis outputs against their source evidence in Session Review mode. Reports actual defects with severity and coverage; zero findings is a valid result.
+description: Quality-checks reflection, reading, and synthesis outputs against their source evidence in Session Review mode, and wiki claim edits in Claim Review mode. Reports actual defects with severity and coverage; zero findings is a valid result.
 tools: Read, Grep, Glob, Bash
 model: sonnet
 maxTurns: 100

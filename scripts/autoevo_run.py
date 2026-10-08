@@ -29,6 +29,7 @@ import autoevo_verify as evidence
 import decay_scan
 import decisions
 import precedent
+import wiki_review
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKING_TIERS = ("wip", "research", "reflections")
@@ -354,10 +355,11 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
                 and pending._parse_date(row["default_at"]) <= today]
     peers = [peer for row in defaults for peer in row.get("peers", [])
              if isinstance(peer, str) and _norm_rel(peer) == peer and peer.startswith(_prefixes(WORKING_TIERS))]
-    head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers)
+    wiki = wiki_review.candidates(vault, vault / _segment("wiki"), today)
+    head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers, *wiki)
     in_scope = {rel for rel in head if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
     files, protected, stamps, sources = {}, [], [], {}
-    for rel in sorted(in_scope.union(peer for peer in peers if peer in head)):
+    for rel in sorted(in_scope.union(peer for peer in [*peers, *wiki] if peer in head)):
         try:
             source = _file(vault, rel)
         except evidence.VerificationError:
@@ -378,6 +380,7 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
         shutil.copystat(source, destination)
         sources[rel] = {"before_sha256": hashlib.sha256(content).hexdigest(), "before_blob": blob,
                         "mtime_ns": before.st_mtime_ns, "snapshot": str(destination)}
+    review = {rel: sources.pop(rel) for rel in wiki if rel in sources}
     _assert_hashes(vault, state_hashes)
     age_guard = _mtime_reset(stamps)
     notes = [] if selected else ["research_rotation_empty: no eligible research subdirectory"]
@@ -385,7 +388,8 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
             "base_head": _text(vault, "rev-parse", "HEAD"), "dispatches": dispatches, "quarantine_skipped": skipped,
             "retrieval_mode": readiness.get("health", {}).get("semantic_mode", "unavailable"),
             "protected_paths": sorted(protected), "source_files": sources, "state_files": state_hashes, "defaults": defaults,
-            "age_guard": age_guard, "notes": notes + [age_guard] if age_guard else notes}
+            "age_guard": age_guard, "notes": notes + [age_guard] if age_guard else notes, "wiki_review": {
+                "files": review, "claims": wiki_review.stage(vault, {rel: Path(row["snapshot"]) for rel, row in review.items()}, today)}}
 
 
 def _curator_problem(row: dict, plan: dict, vault: Path, band: str) -> str | None:
@@ -531,7 +535,8 @@ def _apply(vault: Path, record: dict, path: Path, kind: str, after: dict[str, st
            expected: dict[str, str | None], **fields: str) -> bool:
     """Receipt atomic file writes; skip changed sources before their first write."""
     note, plan = kind in NOTE_KINDS, record["plan"]
-    scope = {"queue": [*plan["state_files"]], "audit": [f"{_segment('agent_findings')}/"]}.get(
+    scope = {"queue": [*plan["state_files"]], "audit": [f"{_segment('agent_findings')}/"],
+             "wiki-review": [*plan.get("wiki_review", {}).get("files", {})]}.get(
         kind, [*plan["source_files"], f"{_segment('archive')}/decayed/"])
     if stray := [rel for rel in after if not _protected(_norm_rel(rel), scope)]:
         raise evidence.VerificationError(f"{kind} may not write {stray}")
@@ -619,6 +624,14 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                         after = {sources[0]: None, target: _file(vault, sources[0]).read_bytes().decode("utf-8")}
                     _apply(vault, record, path, band, after,
                            {rel: plan["source_files"][rel]["before_sha256"] if rel in sources else None for rel in after})
+                for rel, results in wiki_review.verdicts(proposal, plan).items():
+                    current = _file(vault, rel).read_text(encoding="utf-8")
+                    after = wiki_review.append(current, results, cycle, f"autoevo-applied-{cycle}")
+                    if not wiki_review.safe(current, after, results, cycle):
+                        record["notes"].append(f"skipped wiki-review: {rel} would not parse to the returned verdicts")
+                    elif _apply(vault, record, path, "wiki-review", {rel: after}, {rel: plan["wiki_review"]["files"][rel]["before_sha256"]},
+                              claims=", ".join(f"c{n} {v}" for n, v in sorted(results.items()))):
+                        record.setdefault("wiki_reviews", []).extend({"path": rel, "claim": n, "verdict": v} for n, v in sorted(results.items()))
                 for entry in plan["defaults"]:
                     if entry.get("default_action") != "stale-banner":
                         continue

@@ -7,7 +7,7 @@ files. It produces derived decay/audit reports, not synthesis or reflection.
 
 Autoevo writes files; Reflect commits and pushes them. Autoevo never runs a
 Git write. Wiki, localized wiki shadows, daily notes, and user edits remain
-protected. The model proposes; only the trusted parent writes the live vault.
+protected, except the append-only wiki edit review below. The model proposes; only the trusted parent writes the live vault.
 
 ## Execution boundary
 
@@ -144,12 +144,31 @@ bundle and rejects stale or unknown judgments before setting a default.
 
 Only `<paths.wip>/`, `<paths.research>/`, and `<paths.reflections>/` are
 sweep/source tiers. `<paths.agent_findings>/` is report output, never a sweep
-target. Wiki, localized wiki shadows and daily notes never auto-apply.
+target. Wiki, localized wiki shadows and daily notes never auto-apply
+beyond the wiki edit review.
 A source is eligible only when it is tracked at HEAD, its bytes are that
 blob, it has no conflict-marker lines, and its mtime is over two hours old;
 the plan lists the rest as `protected_paths`. Right before each write the
 parent rechecks bytes, blob and markers, and skips an operation whose source
 changed. Retrieval context is not source authorization.
+
+## Wiki edit review
+
+Preparation stages whole primary-wiki notes with pending claims
+(`protocols/wiki-schema.md`) up to `wiki_review.CAP` claims, under the same
+settled-source checks. Each staged claim carries its current text and its
+newest committed non-pending text from Git. Reviewer in Claim Review mode
+returns `verified`, `flagged` or `inconclusive`; a claim without previous text
+is never verified.
+
+When the cycle has no coverage errors, the parent rechecks the note bytes and
+appends only `@pass: reviewer | status: <verdict> | at: <cycle> | ref:
+autoevo-applied-<cycle>` after the claim's last pass line. It never edits
+prose or removes records. Flagged claims wait for the user, and rewrites keep
+their approval gate. The report lists each written verdict, reason and
+before/after excerpt for spot checks in Reflect; a later Reflect edit marks the
+claim pending again. Checking prose against external sources needs network
+and is out of scope.
 
 ## Pending queue and decision history
 
