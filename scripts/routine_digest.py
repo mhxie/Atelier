@@ -46,7 +46,6 @@ from routine_collect import (  # noqa: E402
     effective_date,
     load_overview,
     load_context,
-    load_retrospect,
     load_brief,
 )
 from routine_digest_core import (  # noqa: E402
@@ -248,7 +247,7 @@ def morning(ov: Path, *, refresh_quota: bool = False, no_weather: bool = False, 
                 stage = "render"
                 titles = _titles(ov)
                 manifest["context_warnings"] += [line for line in log.getvalue().splitlines() if line.strip()]
-                text = render(manifest, None, brief, None, context, titles=titles)
+                text = render(manifest, None, brief, context, titles=titles)
                 stage = "write"
                 write(ov, text, manifest, brief=brief, context=context, create_only=True)
                 written = target.read_bytes() == text.encode("utf-8")
@@ -341,13 +340,6 @@ def main(argv: list[str] | None = None) -> int:
     p_write.add_argument("--overview", help="Overview JSON written by the /digest command.")
     p_write.add_argument("--brief", help="Action-surface JSON from daily_brief.py --json.")
     p_write.add_argument("--context", help="Masthead JSON from daily_context.py --json.")
-    p_write.add_argument(
-        "--retrospect",
-        help=(
-            "Picks from retrospect.py --json. Only entries a reviewer marked "
-            "reviewed are rendered; the rest are dropped here as well as at draw time."
-        ),
-    )
     p_write.add_argument("--out", help="Preview outside $OV; records nothing.")
     p_write.add_argument("--dry-run", action="store_true", help="Report the path and hash, write nothing.")
     p_write.add_argument("--expect", default="", help="sha256 of the approved preview; refuse a different render.")
@@ -401,12 +393,11 @@ def main(argv: list[str] | None = None) -> int:
             print("empty window; nothing written")
             return 0
         overview = load_overview(Path(args.overview)) if args.overview else None
-        picks = load_retrospect(Path(args.retrospect) if args.retrospect else None)
         context = load_context(Path(args.context) if args.context else None)
         gap = deep_read_lane_gap((overview or {}).get("deep_read"), manifest)
         if gap:
             print(f"warning: {gap}", file=sys.stderr)
-        text = render(manifest, overview, brief, picks, context, titles=_titles(ov))
+        text = render(manifest, overview, brief, context=context, titles=_titles(ov))
         return write(
             ov,
             text,

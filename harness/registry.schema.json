@@ -122,8 +122,7 @@
           "properties": {
             "default": {"const": "codex"},
             "local_override": {"const": "harness/runtime.local.toml"},
-            "environment_override": {"const": "ATELIER_RUNTIME"},
-            "observability_reference": {"const": "sources/runtimes/observability.md"}
+            "environment_override": {"const": "ATELIER_RUNTIME"}
           }
         },
         "runtimes": {

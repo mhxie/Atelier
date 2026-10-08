@@ -15,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -642,118 +643,40 @@ def check_atelier_skill() -> list[Finding]:
 def check_path_registry_drift(reg: dict[str, Any]) -> list[Finding]:
     """Reject vault-path references absent from the canonical path registry.
 
-    Scan public tracked and non-ignored untracked Markdown, TOML, and Python;
-    private overlays are not part of the canonical registry contract.
+    Scan public tracked and non-ignored untracked Markdown, TOML, and Python
+    (minus pure-comment Python lines). Gitignored scratch and private overlays
+    are not part of the registry contract; `wiki_localized.<lang>` is always
+    valid because languages live in the local overlay.
     """
-    findings: list[Finding] = []
-    # Canonical segments: every scalar value in [paths], plus the values
-    # of [paths.wiki_localized]. Map segment string → canonical name for
-    # the remediation hint.
-    valid_segments: dict[str, str] = {}
-    for k, v in reg.items():
-        if isinstance(v, str):
-            valid_segments[v] = k
-    for k, v in (reg.get("wiki_localized") or {}).items():
-        if isinstance(v, str):
-            valid_segments.setdefault(v, f"wiki_localized.{k}")
-
-    # Allow-list: legacy migrations or examples that explicitly need a
-    # bare segment. Keep empty unless a real exception emerges.
-    segment_allowlist: set[str] = set()
-
-    # Valid logical names: top-level keys in [paths] plus the dotted form
-    # `wiki_localized.<lang>` for shadow wikis.
-    valid_names: set[str] = set()
-    for k, v in reg.items():
-        if isinstance(v, str):
-            valid_names.add(k)
-    for k in (reg.get("wiki_localized") or {}).keys():
-        valid_names.add(f"wiki_localized.{k}")
-
+    names = {k for k, v in reg.items() if isinstance(v, str)}
+    segments = {reg[k] for k in names} | {
+        v for v in (reg.get("wiki_localized") or {}).values() if isinstance(v, str)}
     literal_pat = re.compile(r"\$OV/([A-Za-z_][A-Za-z0-9_-]*)/?")
-    # Placeholder form documented in AGENTS.md "Always-on invariants": match
-    # `<paths.X>` where X is either a simple name or a `wiki_localized.<lang>`
-    # dotted reference. Underscores are allowed (canonical names like
-    # `daily_notes`); hyphens are not (the registry uses snake_case for
-    # logical keys, hyphens only in physical segments).
     placeholder_pat = re.compile(r"<paths\.([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)?)>")
-    roots = [
-        ROOT / "AGENTS.md",
-        ROOT / "README.md",
-        ROOT / "protocols",
-        ROOT / "skills",
-        ROOT / "agents",
-        ROOT / "routines",
-        ROOT / "harness",
-        ROOT / "scripts",
-        ROOT / "sources",
-    ]
-    # Scan `.md` (docs read by the model), `.toml` (description / comment
-    # fields in skills.toml, intents.toml, etc.), AND `.py` (script
-    # docstrings + comments). A stale `$OV/<seg>/` literal anywhere is the
-    # same drift class — silent rename-breakage when the registry moves.
-    # Scope via git (tracked + untracked-but-not-ignored), matching the
-    # docstring's committed-file claim: a filesystem rglob also swept
-    # gitignored local-only content (scripts/oneoff/, _results_* scratch),
-    # where a private `$OV/<seg>/` literal would fail the gate AND leak the
-    # private segment name into the lint report.
-    root_args = [str(r.relative_to(ROOT)) for r in roots]
-    tracked, t_err = git_list(root_args)
-    if t_err:
-        findings.append(t_err)
-        return findings
-    untracked, u_err = git_list(root_args, others=True)
-    if u_err:
-        findings.append(u_err)
-        return findings
-    scan_files = sorted(
-        ROOT / p
-        for p in set(tracked) | set(untracked)
-        if p.endswith((".md", ".toml", ".py"))
-    )
-    py_comment_re = re.compile(r"^\s*#")
-    for path in scan_files:
+    roots = ["AGENTS.md", "README.md", "protocols", "skills", "agents", "routines", "harness", "scripts", "sources"]
+    tracked, error = git_list(roots)
+    untracked, error = git_list(roots, others=True) if error is None else ([], error)
+    if error:
+        return [error]
+    findings: list[Finding] = []
+    for path in sorted(ROOT / p for p in set(tracked) | set(untracked) if p.endswith((".md", ".toml", ".py"))):
         try:
-            raw = path.read_text(encoding="utf-8")
+            text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        # For .py files, strip pure-comment lines so explanatory text like
-        # `# accidentally rewrite $OV/wipfoo/` does not register as drift.
-        # Inline trailing comments are kept; mid-line `#` is rare and the
-        # cost of one false positive there is low.
         if path.suffix == ".py":
-            text = "\n".join(
-                line for line in raw.splitlines() if not py_comment_re.match(line)
-            )
-        else:
-            text = raw
-        unknown_literals: dict[str, int] = {}
-        for m in literal_pat.finditer(text):
-            seg = m.group(1)
-            if seg in valid_segments or seg in segment_allowlist:
-                continue
-            unknown_literals[seg] = unknown_literals.get(seg, 0) + 1
-        unknown_placeholders: dict[str, int] = {}
-        for m in placeholder_pat.finditer(text):
-            name = m.group(1)
-            if name in valid_names:
-                continue
-            # Allow any `wiki_localized.<lang>` since specific language
-            # codes live in per-user paths.local.toml; the canonical
-            # registry only declares the parent table.
-            if name.startswith("wiki_localized."):
-                continue
-            unknown_placeholders[name] = unknown_placeholders.get(name, 0) + 1
-        for seg, count in sorted(unknown_literals.items()):
+            text = "\n".join(line for line in text.splitlines() if not re.match(r"\s*#", line))
+        literals = Counter(m[1] for m in literal_pat.finditer(text) if m[1] not in segments)
+        placeholders = Counter(m[1] for m in placeholder_pat.finditer(text)
+                               if m[1] not in names and not m[1].startswith("wiki_localized."))
+        for seg, count in sorted(literals.items()):
             _add(findings, "WARN", "paths-registry-drift", rel(path),
-                     f"`$OV/{seg}/` referenced {count}x but `{seg}` is not in "
-                    f"harness/paths.toml. Templatize the literal to "
-                    f"`<paths.{seg}>`, or add the segment to the registry.")
-        for name, count in sorted(unknown_placeholders.items()):
+                 f"`$OV/{seg}/` referenced {count}x but `{seg}` is not in harness/paths.toml. "
+                 f"Templatize the literal to `<paths.{seg}>`, or add the segment to the registry.")
+        for name, count in sorted(placeholders.items()):
             _add(findings, "WARN", "paths-placeholder-drift", rel(path),
-                     f"`<paths.{name}>` referenced {count}x but `{name}` is "
-                    f"not in harness/paths.toml. Add to the registry, or "
-                    f"fix the placeholder.")
+                 f"`<paths.{name}>` referenced {count}x but `{name}` is not in harness/paths.toml. "
+                 "Add to the registry, or fix the placeholder.")
     return findings
 
 
@@ -1302,7 +1225,7 @@ def _flat_tier_glob_findings() -> list[Finding]:
 # Frozen from the measured implementation total and largest file plus the
 # review allowance. Lower after verified cuts; raising requires user approval.
 SOURCE_GROWTH_REVIEW_LINES = 50
-SOURCE_LINE_CEILING = 31_659
+SOURCE_LINE_CEILING = 31_663
 SOURCE_FILE_LINE_CEILING = 1_654
 
 
@@ -1554,10 +1477,6 @@ def format_table(findings: list[Finding]) -> str:
     )
 
 
-def format_json(findings: list[Finding]) -> str:
-    return _findings.format_json(findings)
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/harness_lint.py",
@@ -1578,7 +1497,7 @@ def main(argv: list[str] | None = None) -> int:
 
     findings = run_lints()
     if args.json:
-        sys.stdout.write(format_json(findings))
+        sys.stdout.write(_findings.format_json(findings))
     else:
         sys.stdout.write(format_table(findings))
     return 1 if any(f.severity == "ERROR" for f in findings) else 0

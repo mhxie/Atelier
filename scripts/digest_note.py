@@ -466,19 +466,6 @@ def _deep_read(deep_read: Any, manifest: dict[str, Any]) -> list[str]:
     return [body[0], *([f"! {plain(gap)}"] if gap else []), *body[1:]] if body else []
 
 
-def _retrospect(picks: list[Any], titles: Any) -> list[str]:
-    """Reviewed picks only; an unreviewed pick never renders."""
-    rows = []
-    for pick in picks:
-        if not isinstance(pick, dict) or not pick.get("reviewed") or not (excerpt := plain(pick.get("excerpt"))):
-            continue
-        days = _int(pick.get("age_days"))
-        head = [f"**{plain(pick.get('title')) or '…'}**", f"{days / 365:.1f} 年前" if days >= 365 else f"{days} 天前",
-                plain(pick.get("tier")), cite(pick.get("path"), titles) if pick.get("path") else ""]
-        rows += ["- " + " · ".join(bit for bit in head if bit), f"  - {excerpt}"]
-    return [_h2("随机回顾", _cost(rows)), _items(rows)] if rows else []
-
-
 def _source(source: dict[str, Any], titles: Any, day: str = "") -> str:
     linked = cite(source.get("path"), titles)
     head = [f"**{plain(source.get('label')) or '…'}**", "补录" if source.get("carried") else "", linked]
@@ -557,7 +544,6 @@ def render(
     manifest: dict[str, Any],
     overview: dict[str, Any] | None = None,
     brief: dict[str, Any] | None = None,
-    retrospect: list[dict[str, Any]] | None = None,
     context: dict[str, Any] | None = None,
     *,
     titles: Any = None,
@@ -581,7 +567,7 @@ def render(
     scan += _frontier(overview.get("frontier_labs"), until)
     scan += _routine_briefs(overview.get("routines") or [], manifest, titles)
     scan += _articles(overview.get("articles") or [])
-    depth = [*_deep_read(overview.get("deep_read"), manifest), *_retrospect(retrospect or [], titles),
+    depth = [*_deep_read(overview.get("deep_read"), manifest),
              *_index(manifest, titles), *_gaps(manifest, overview, notes),
              *([] if curated else [NO_OVERVIEW]), *_colophon(manifest, context)]
     fold = ["---", f"以上 {reading_minutes(chr(10).join(scan))} 分钟读完 · 以下 {reading_minutes(chr(10).join(depth))} 分钟，按需"]

@@ -21,11 +21,11 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
 
+from _paths import atomic_write
 
 ROOT = Path(__file__).resolve().parents[1]
 REGISTRY_PATH = ROOT / "harness" / "runtimes.toml"
@@ -282,22 +282,7 @@ def cmd_use(args: argparse.Namespace) -> int:
         "[runtime]\n"
         f'default = "{args.runtime}"\n'
     )
-    temporary: Path | None = None
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=".runtime.local.",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            handle.write(content)
-            temporary = Path(handle.name)
-        temporary.replace(path)
-    finally:
-        if temporary is not None and temporary.exists():
-            temporary.unlink()
+    atomic_write(path, content)
     print(f"default runtime set to {args.runtime} in {path.relative_to(ROOT)}")
     env_name = registry["runtime"]["environment_override"]
     if os.environ.get(env_name):

@@ -192,18 +192,6 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     ap.add_argument(
-        "--check-context",
-        type=int,
-        default=0,
-        metavar="MAX_INPUT_TOKENS",
-        help=(
-            "Pre-flight: estimate token count of the request (chars/4) and "
-            "exit 4 before any API call if it exceeds MAX_INPUT_TOKENS. "
-            "Pass the model's context window minus your --max-tokens budget. "
-            "Default 0 = disabled."
-        ),
-    )
-    ap.add_argument(
         "--timeout",
         type=float,
         default=None,
@@ -285,23 +273,6 @@ def main(argv: list[str] | None = None) -> int:
     except json.JSONDecodeError as e:
         sys.stderr.write(f"chat_completion: --extras-json is not valid JSON: {e}\n")
         return 4
-
-    # Optional pre-flight: refuse to send if the request would clearly bust
-    # the model's context window. Estimate is rough (chars/4); the real
-    # token count is provider-dependent but this catches the obvious cases
-    # (a 50MB log file accidentally included via stdin).
-    if args.check_context > 0:
-        total_chars = sum(len(m.get("content", "")) for m in messages)
-        if args.system:
-            total_chars += len(args.system)
-        estimated_tokens = total_chars // 4
-        if estimated_tokens > args.check_context:
-            sys.stderr.write(
-                f"chat_completion: estimated input ≈ {estimated_tokens} tokens "
-                f"(chars/4) exceeds --check-context cap {args.check_context}; "
-                f"aborting before API call. Reduce input or raise the cap.\n"
-            )
-            return 4
 
     def _fail(code: int, message: str) -> int:
         sys.stderr.write(f"chat_completion: {message}\n")

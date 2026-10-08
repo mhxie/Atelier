@@ -13,7 +13,6 @@
 default = "codex"
 local_override = "harness/runtime.local.toml"
 environment_override = "ATELIER_RUNTIME"
-observability_reference = "sources/runtimes/observability.md"
 
 [runtimes.codex]
 label = "Codex"

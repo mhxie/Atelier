@@ -219,14 +219,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Process a single wiki entry instead of all entries.",
     )
     parser.add_argument(
-        "--skip-categories",
-        type=str,
-        default=None,
-        help="Comma-separated list of URL categories to skip. "
-             "Valid: github_code, github_issue, github_repo, docs, deepwiki, "
-             "wikipedia, pdf, article",
-    )
-    parser.add_argument(
         "--report",
         action="store_true",
         help="Show URLs grouped by category, then exit.",
@@ -257,14 +249,8 @@ def main(argv: list[str] | None = None) -> int:
         print(report_categories(anchors))
         return 0
 
-    skip_cats = set()
-    if args.skip_categories:
-        skip_cats = {c.strip() for c in args.skip_categories.split(",")}
-
     url_to_anchors: dict[str, list[dict]] = {}
     for a in anchors:
-        if a["category"] in skip_cats:
-            continue
         url_to_anchors.setdefault(a["url"], []).append(a)
 
     if not url_to_anchors:

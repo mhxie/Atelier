@@ -244,24 +244,6 @@
       "synthetic deadline index is stale"
     ]
   },
-  "retrospect": [
-    {
-      "reviewed": true,
-      "title": "An earlier example",
-      "excerpt": "A reviewed prior note remains useful.",
-      "age_days": 90,
-      "tier": "wiki",
-      "path": "wiki/example.md"
-    },
-    {
-      "reviewed": false,
-      "title": "An unreviewed item that must stay hidden",
-      "excerpt": "Do not render this.",
-      "age_days": 30,
-      "tier": "wip",
-      "path": "wip/hidden.md"
-    }
-  ],
   "context": {
     "schema": 1,
     "date": "2099-01-30",

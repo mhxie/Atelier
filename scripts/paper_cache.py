@@ -18,7 +18,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from _paths import fmt, tier
+from _paths import atomic_write, fmt, tier
 
 
 METADATA_VERSION = 1
@@ -59,20 +59,6 @@ def load_metadata(path: Path) -> dict[str, object] | None:
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return None
     return payload if isinstance(payload, dict) else None
-
-
-def atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temp_path = Path(raw_temp)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(content)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temp_path.replace(path)
-    finally:
-        temp_path.unlink(missing_ok=True)
 
 
 def require_paper_source(pdf: Path) -> None:
@@ -162,8 +148,8 @@ def build_cache(pdf: Path, *, slug: str | None, force: bool) -> dict[str, object
             "- `source.json`: source signature used to detect a stale extraction.\n"
             "- `pages/`: optional page renders explicitly retained for later reading.\n"
         )
-        atomic_write_text(index_path, index)
-        atomic_write_text(
+        atomic_write(index_path, index)
+        atomic_write(
             metadata_path,
             json.dumps(expected, ensure_ascii=False, indent=2) + "\n",
         )

@@ -31,10 +31,6 @@ _DISCOVER_SKIP_DIRS = {
 }
 
 
-def _parse_iso(s: str) -> date | None:
-    return parse_iso_date(s)
-
-
 def _read_last_updated(path: Path) -> tuple[date, str] | None:
     """Resolve a file's last-updated date.
 
@@ -50,12 +46,12 @@ def _read_last_updated(path: Path) -> tuple[date, str] | None:
                 stripped = line.rstrip()
                 m = _LAST_UPDATED_RE.match(stripped)
                 if m:
-                    d = _parse_iso(m.group(1))
+                    d = parse_iso_date(m.group(1))
                     if d:
                         return d, "marker"
                 m = _YAML_UPDATED_RE.match(stripped)
                 if m:
-                    d = _parse_iso(m.group(1))
+                    d = parse_iso_date(m.group(1))
                     if d:
                         return d, "yaml"
     except OSError:

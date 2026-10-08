@@ -61,7 +61,7 @@ def representative_digest_inputs(mode: str = "daily") -> tuple[dict, dict, dict 
         ]
         overview.pop("articles", None)
         brief = None
-    return manifest, overview, brief, payload["retrospect"], payload["context"]
+    return manifest, overview, brief, payload["context"]
 
 
 _WIKILINK = re.compile(r"\[\[([^\[\]\n|]+)(?:\|[^\[\]\n]*)?\]\]")
@@ -1285,7 +1285,6 @@ class RepresentativeDigestTests(unittest.TestCase):
             "## 新文章",
             "以上 ",
             "## 信号精选",
-            "## 随机回顾",
             "## 来源索引",
             "**输入缺口**",
             "KB 源文本",
@@ -1303,7 +1302,6 @@ class RepresentativeDigestTests(unittest.TestCase):
             "第一条可复核事实。",
             "第二条可复核事实。",
             "示例模型发布了可复核的更新。",
-            "An earlier example",
             "补录",
             "Synthetic optional source was unavailable.",
             "[来源 ↗](https://example.com/research)",
@@ -1313,7 +1311,6 @@ class RepresentativeDigestTests(unittest.TestCase):
             "A bare title that must be dropped",
             "第三条应被深度上限裁掉。",
             "第五行不应出现",
-            "An unreviewed item that must stay hidden",
             "## 输入缺口",
         ):
             self.assertNotIn(hidden, document)
@@ -1342,7 +1339,6 @@ class RepresentativeDigestTests(unittest.TestCase):
             "## routine 摘要",
             "以上 ",
             "## 信号精选",
-            "## 随机回顾",
             "## 来源索引",
         )
 
@@ -1620,34 +1616,23 @@ class FoldTests(VaultCase):
         super().setUp()
         self.overview = {"schema": 1, "headline": "一句话", "sections": [
             {"title": "信号", "bullets": [{"text": "cross-source movement"}]}]}
-        self.picks = [
-            {"path": "wiki/Old.md", "tier": "wiki", "title": "An Old Idea",
-             "age_days": 400, "excerpt": "旧笔记的正文摘录。", "reviewed": True},
-            {"path": "reflections/Private.md", "tier": "reflections", "title": "Sensitive",
-             "age_days": 200, "excerpt": "must never appear", "reviewed": False},
-        ]
 
-    def test_scan_depth_and_reviewed_recall_share_one_priced_note(self):
-        document = dn.render(self.manifest, self.overview, None, self.picks)
+    def test_scan_and_depth_share_one_priced_note(self):
+        document = dn.render(self.manifest, self.overview)
         fold = document.index("以上 ")
         self.assertRegex(document, r"\n---\n\n以上 \d+ 分钟读完 · 以下 \d+ 分钟，按需\n")
         self.assertLess(document.index("## 信号"), fold)
-        for heading in ("## 科技动态", "## 随机回顾", "## 来源索引"):
+        for heading in ("## 科技动态", "## 来源索引"):
             with self.subTest(heading=heading):
                 self.assertGreater(document.index(heading), fold)
-        for heading in ("## 科技动态", "## 随机回顾"):
-            self.assertRegex(document[document.index(heading):].split("\n", 1)[0], r" · \d+ 分钟$")
-        self.assertIn("- **An Old Idea** · 1.1 年前 · wiki · `wiki/Old.md`\n  - 旧笔记的正文摘录。", document)
-        self.assertNotIn("must never appear", document)
-        self.assertNotIn("Sensitive", document)
+        self.assertRegex(document[document.index("## 科技动态"):].split("\n", 1)[0], r" · \d+ 分钟$")
         # Depth is curated picks and the feed's own items; a routine body never renders.
         self.assertNotIn("a tighter path raises discount rates", document)
 
     def test_the_fold_prices_the_scan_above_it_and_the_depth_below_it(self):
-        manifest, overview, brief, picks, context = representative_digest_inputs("daily")
+        manifest, overview, brief, context = representative_digest_inputs("daily")
         overview["headline"] = "字" * 1980
-        picks[0]["excerpt"] = "字" * 990
-        document = dn.render(manifest, overview, brief, picks, context)
+        document = dn.render(manifest, overview, brief, context)
         fold = re.search(r"\n\n---\n\n以上 (\d+) 分钟读完 · 以下 (\d+) 分钟，按需\n\n", document)
         scan = document[document.index("\n# ") + 1:fold.start()].split("\n", 1)[1]
         prices = (dn.reading_minutes(scan), dn.reading_minutes(document[fold.end():]))
@@ -1898,7 +1883,7 @@ class AttentionBudgetTests(VaultCase):
 
     def test_briefs_sit_above_the_fold_and_bodies_below(self):
         overview = {"schema": 1, "routines": [{"path": self.path, "summary": "一行摘要"}]}
-        document = dn.render(self.manifest, overview, None, [])
+        document = dn.render(self.manifest, overview, None)
         self.assertLess(document.index("## routine 摘要"), document.index("以上 "))
         self.assertGreater(document.index("## 科技动态"), document.index("以上 "))
 
@@ -1958,7 +1943,7 @@ class MastheadAndContextTests(unittest.TestCase):
     """Weather and harness quota in the masthead; provenance in the colophon."""
 
     def setUp(self):
-        self.manifest, _overview, _brief, _retrospect, self.context = representative_digest_inputs()
+        self.manifest, _overview, _brief, self.context = representative_digest_inputs()
         self.context["warnings"] = []
 
     @staticmethod
@@ -1969,7 +1954,7 @@ class MastheadAndContextTests(unittest.TestCase):
                      if re.match(r"(?:==|\*\*)?(?:关窗|主线|体重|决策|失败尝试|Prefect) ", block)), "")
 
     def test_weather_sits_in_the_masthead_and_provenance_in_the_colophon(self):
-        document = dn.render(self.manifest, None, None, None, self.context)
+        document = dn.render(self.manifest, None, None, self.context)
         self.assertIn("\n\n**Lisbon** 13–25°C · 少云 · 降水 2% · 9:00 18° · 18:00 21°\n\n", document)
         self.assertLess(document.index("Lisbon"), document.index("## 来源索引"))
         self.assertLess(document.index("## 来源索引"), document.index("KB 源文本"))
@@ -1978,7 +1963,7 @@ class MastheadAndContextTests(unittest.TestCase):
 
     def test_quota_table_marks_the_remaining_share_by_level(self):
         def rows(context: dict) -> list[str]:
-            document = dn.render(self.manifest, None, None, None, context)
+            document = dn.render(self.manifest, None, None, context)
             assert_native(document)
             return [line for line in document.splitlines() if line.startswith("| ")][2:]
 
@@ -2006,7 +1991,7 @@ class MastheadAndContextTests(unittest.TestCase):
             {"name": "Claude | Code", "window": "7d", "left_percent": 0, "level": "critical",
              "reset_relative": "1d | delayed\nnext", "snapshot_age_hours": 0.5},
         ]
-        document = dn.render(self.manifest, None, None, None, self.context)
+        document = dn.render(self.manifest, None, None, self.context)
         assert_native(document)
         block = next(block for block in document.split("\n\n") if block.startswith("| 额度 |"))
         headers, rows, rejected = rc._markdown_table("## Quota\n" + block, "Quota")
@@ -2020,7 +2005,7 @@ class MastheadAndContextTests(unittest.TestCase):
     def test_context_is_optional_and_warnings_are_visible(self):
         plain = dn.render(self.manifest)
         self.assertNotIn("| 额度 |", plain)
-        warned = dn.render(self.manifest, None, None, None, {"quota": [], "warnings": ["claude quota: no snapshot"]})
+        warned = dn.render(self.manifest, None, None, {"quota": [], "warnings": ["claude quota: no snapshot"]})
         self.assertIn("\n\n! claude quota: no snapshot\n\n", warned)
 
     def test_signal_counts_are_not_duplicated_in_the_masthead(self):
@@ -2154,7 +2139,7 @@ class MastheadAndContextTests(unittest.TestCase):
         brief = {"schema": 1, "date": "2099-01-30", "warnings": [], "groups": [review]}
         fleet = "4 KB 源文本 · 1 条状态更新 · 生成于 06:22 · routine 4/19 有产出 · 2 完成 · Prefect 状态不可用 · 149 待 review"
         tag = dn.note_tag(self.manifest)
-        self.assertEqual(colophon(dn.render(self.manifest, None, brief, None, {"weather": {"place": ""}})),
+        self.assertEqual(colophon(dn.render(self.manifest, None, brief, {"weather": {"place": ""}})),
                          fleet + " · " + tag)
         brief["groups"] = [{**review, "items": []}]
         self.assertEqual(colophon(dn.render(self.manifest, None, brief)), fleet + " · " + tag)
@@ -2165,9 +2150,9 @@ class MastheadAndContextTests(unittest.TestCase):
         """Daily and backlog notes end with #日报, weekly roll-ups with #周报; field text never adds one."""
         live = re.compile(r"(?<!\S)#[\w-]*[^\W\d_][\w-]*")
         for mode in ("daily", "weekly"):
-            manifest, overview, brief, picks, context = representative_digest_inputs(mode)
+            manifest, overview, brief, context = representative_digest_inputs(mode)
             overview = {**overview, "headline": "#日报 #other tag text"}
-            note = dn.render(manifest, overview, brief, picks, context)
+            note = dn.render(manifest, overview, brief, context)
             expected = "#日报" if mode == "daily" else "#周报"
             with self.subTest(mode=mode):
                 self.assertEqual(dn.note_tag(manifest), expected)
@@ -2180,14 +2165,14 @@ class MastheadAndContextTests(unittest.TestCase):
         context = {"weather": {"place": "P", "tmin": 1, "tmax": 2, "summary": "s", "precip_probability": None,
                                "hours": [{"hour": "x", "temp": 1}, {"hour": 9, "temp": 18}], "date": "2099-01-29"}}
         # No precipitation figure, no hour that is not a number, and the forecast's own date when it differs.
-        self.assertIn("\n\n**P** 1–2°C · s · 9:00 18° · 2099-01-29\n\n", dn.render(self.manifest, None, None, None, context))
-        placeless = dn.render(self.manifest, None, None, None, {"weather": {"place": "", "tmin": 1, "tmax": 2}})
+        self.assertIn("\n\n**P** 1–2°C · s · 9:00 18° · 2099-01-29\n\n", dn.render(self.manifest, None, None, context))
+        placeless = dn.render(self.manifest, None, None, {"weather": {"place": "", "tmin": 1, "tmax": 2}})
         self.assertNotIn("°C", placeless)
         self.assertNotIn("天气 Open-Meteo", placeless)
 
     def test_masthead_order_runs_weather_strip_quota_then_warnings_before_the_ledger(self):
-        manifest, _overview, brief, _picks, context = representative_digest_inputs()
-        document = dn.render(manifest, None, brief, None, context)
+        manifest, _overview, brief, context = representative_digest_inputs()
+        document = dn.render(manifest, None, brief, context)
         self.assertEqual(self._strip(document), "")
         offsets = [document.index(needle) for needle in (
             "\n**Lisbon** ", "\n## 模型额度", "\n| 额度 |", "\n! synthetic context warning\n",
@@ -2348,13 +2333,6 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
         document = dn.render(self.manifest, self._finance_only_pick())
         below = document.split("\n## 信号精选 · ", 1)[1].split("\n\n", 2)[1]
         self.assertTrue(below.startswith("! 情报精选没有 Research 条目"), below)
-
-    def test_recall_needs_an_excerpt_and_counts_days_under_a_year(self):
-        picks = [{"reviewed": True, "title": "blank", "excerpt": "  "},
-                 {"reviewed": True, "title": "t", "age_days": 90, "tier": "wiki", "excerpt": "e", "path": "wiki/x.md"}]
-        document = dn.render(self.manifest, None, None, picks)
-        self.assertIn("## 随机回顾 · 1 分钟\n\n- **t** · 90 天前 · wiki · `wiki/x.md`\n  - e\n\n", document)
-        self.assertNotIn("**blank**", document)
 
     def test_source_index_details(self):
         excerpt = "abcdefghij " * 20
@@ -2859,9 +2837,7 @@ def _hostile_note(hostile: str, titles: TitleIndex) -> str:
                            "precip_probability": hostile, "hours": [{"hour": 9, "temp": hostile}], "date": hostile},
                "quota": [{"name": f"n {hostile}", "window": hostile, "left_percent": hostile, "level": "low",
                           "reset_relative": hostile, "snapshot_age_hours": hostile}]}
-    retro = [{"reviewed": True, "title": hostile, "excerpt": f"e {hostile}", "age_days": hostile, "tier": hostile,
-              "path": "wiki/example.md"}]
-    return dn.render(manifest, overview, brief, retro, context, titles=titles)
+    return dn.render(manifest, overview, brief, context, titles=titles)
 
 
 def _visible_words(hostile: str) -> list[str]:
@@ -2877,9 +2853,9 @@ class NoteFormatTests(unittest.TestCase):
     """Every note is Reflect-native, and untrusted text is inert wherever it lands."""
 
     def test_fixture_notes_are_reflect_native(self):
-        manifest, overview, brief, retrospect, context = representative_digest_inputs("daily")
+        manifest, overview, brief, context = representative_digest_inputs("daily")
         for name, document in (
-            ("curated daily", dn.render(manifest, overview, brief, retrospect, context)),
+            ("curated daily", dn.render(manifest, overview, brief, context)),
             ("scheduled daily", dn.render(manifest, None, brief)),
             ("weekly", dn.render(*representative_digest_inputs("weekly"))),
         ):
@@ -2902,7 +2878,7 @@ class NoteFormatTests(unittest.TestCase):
                     document = _hostile_note(hostile, titles)
                     assert_native(document, titles)
                     self.assertEqual(nonnative(document, where, titles), Counter())
-                    self.assertEqual(len(h2s(document)), 13)
+                    self.assertEqual(len(h2s(document)), 12)
                     bare = "\n".join(_CODE_SPAN_RE.sub("", line) for line in document.split("\n"))
                     self.assertEqual(re.findall(r"(?<!\S)#[\w-]*[^\W\d_][\w-]*", bare), ["#日报"],
                                      "only the note's own tag is live")

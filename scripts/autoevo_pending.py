@@ -24,7 +24,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write as _atomic_write, parse_iso_date, tier_segments, vault_root  # noqa: E402
+from _paths import atomic_write, parse_iso_date, tier_segments, vault_root  # noqa: E402
 import decisions  # noqa: E402  (the human-decision ledger; resolve/defer write one line each)
 
 REQUIRED = ("id", "category", "proposed_action", "evidence_summary", "proposed_at", "status")
@@ -102,10 +102,6 @@ def render(data: dict) -> str:
     text = tomli_w.dumps(document)
     tomllib.loads(text)
     return text
-
-
-def atomic_write(path: Path, text: str) -> None:
-    _atomic_write(path, text)
 
 
 def _norm_peers(peers: object) -> tuple[str, ...]:

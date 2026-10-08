@@ -1165,69 +1165,32 @@ def _source_dict(source: Source) -> dict[str, Any]:
     }
     if source.date_source != "filename":
         data["date_source"] = source.date_source
-    if source.meta:
-        data["meta"] = source.meta
-    if source.excerpt:
-        data["excerpt"] = source.excerpt
-    if source.units:
-        data["units"] = source.units
-    if source.items:
-        data["items"] = source.items
-    if source.primary_urls:
-        data["primary_urls"] = source.primary_urls
+    for key in ("meta", "excerpt", "units", "items", "primary_urls"):
+        if value := getattr(source, key):
+            data[key] = value
     if source.carried:
         data["carried"] = True
     return data
 
-def load_overview(path: Path | None) -> dict[str, Any]:
+def _load_object(path: Path | None, label: str, expected: int) -> dict[str, Any]:
     if path is None:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
-        raise SystemExit(f"overview unreadable: {exc!r}") from exc
+        raise SystemExit(f"{label} unreadable: {exc!r}") from exc
     if not isinstance(data, dict):
-        raise SystemExit("overview must be a JSON object")
-    schema = data.get("schema", OVERVIEW_SCHEMA)
-    if schema != OVERVIEW_SCHEMA:
-        raise SystemExit(f"overview schema {schema} unsupported (expected {OVERVIEW_SCHEMA})")
+        raise SystemExit(f"{label} must be a JSON object")
+    if (schema := data.get("schema", expected)) != expected:
+        raise SystemExit(f"{label} schema {schema} unsupported (expected {expected})")
     return data
+
+def load_overview(path: Path | None) -> dict[str, Any]:
+    return _load_object(path, "overview", OVERVIEW_SCHEMA)
 
 def load_context(path: Path | None) -> dict[str, Any]:
     """Masthead context from daily_context.py: weather and harness quota."""
-    if path is None:
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise SystemExit(f"context unreadable: {exc!r}") from exc
-    if not isinstance(data, dict):
-        raise SystemExit("context must be a JSON object")
-    schema = data.get("schema", CONTEXT_SCHEMA)
-    if schema != CONTEXT_SCHEMA:
-        raise SystemExit(f"context schema {schema} unsupported (expected {CONTEXT_SCHEMA})")
-    return data
-
-def load_retrospect(path: Path | None) -> list[dict[str, Any]]:
-    if path is None:
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise SystemExit(f"retrospect picks unreadable: {exc!r}") from exc
-    picks = data.get("picks") if isinstance(data, dict) else data
-    return [p for p in picks or [] if isinstance(p, dict)]
+    return _load_object(path, "context", CONTEXT_SCHEMA)
 
 def load_brief(path: Path | None) -> dict[str, Any]:
-    if path is None:
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise SystemExit(f"brief unreadable: {exc!r}") from exc
-    if not isinstance(data, dict):
-        raise SystemExit("brief must be a JSON object")
-    schema = data.get("schema", BRIEF_SCHEMA)
-    if schema != BRIEF_SCHEMA:
-        raise SystemExit(f"brief schema {schema} unsupported (expected {BRIEF_SCHEMA})")
-    return data
+    return _load_object(path, "brief", BRIEF_SCHEMA)
