@@ -145,6 +145,42 @@ _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "scripts"))
 import _paths  # noqa: E402
 
 
+class KnowledgeLevelsTest(unittest.TestCase):
+    def test_export_uses_remapped_paths_and_localized_shadows_without_reading_notes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = {**_paths._registry(), "wiki": "knowledge/wiki", "papers": str(root / "reading"),
+                        "wiki_localized": {"zh": "knowledge/zh"}, "archive": str(root.parent / "offline")}
+            with mock.patch.object(_paths, "_registry", return_value=registry):
+                payload = _paths.knowledge_levels(root)
+            self.assertEqual(payload["version"], 1)
+            self.assertEqual([level["level"] for level in payload["levels"]], [1, 2, 3, 4])
+            rules = {rule["path"]: rule for rule in payload["rules"]}
+            self.assertEqual(rules["knowledge/wiki"], {"path": "knowledge/wiki", "match": "tree", "level": 4})
+            self.assertEqual(rules["knowledge/zh"]["role"], "shadow")
+            self.assertEqual(rules["reading"]["level"], 3)
+            self.assertEqual(rules["preprints"]["level"], 3)
+            self.assertEqual(rules["raw"], {"path": "raw", "match": "segment", "level": 1})
+            self.assertNotIn("wiki", rules)
+            self.assertNotIn("archive", rules)
+            self.assertNotIn("_meta", rules)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_export_rejects_ambiguous_or_escaping_paths(self):
+        for segment in (".", "", "../outside", "a/../wiki", "a\\wiki", "C:/wiki"):
+            with self.subTest(segment=segment), mock.patch.object(_paths, "_registry", return_value={
+                **_paths._registry(), "wiki": segment,
+            }), self.assertRaises(_paths.PathsError):
+                _paths.knowledge_levels(Path("/vault"))
+
+    def test_export_rejects_conflicting_remaps(self):
+        for overlay in ({"wiki": "research"}, {"wiki_localized": {"zh": "wiki"}}):
+            with self.subTest(overlay=overlay), mock.patch.object(_paths, "_registry", return_value={
+                **_paths._registry(), **overlay,
+            }), self.assertRaisesRegex(_paths.PathsError, "conflicting knowledge levels"):
+                _paths.knowledge_levels(Path("/vault"))
+
+
 class TransientMountRetryTests(unittest.TestCase):
     def test_transient_mount_error_is_retried_then_succeeds(self):
         calls = []

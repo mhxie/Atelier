@@ -11,6 +11,7 @@ import tempfile
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
@@ -349,6 +350,321 @@ class KnowledgeCLITests(unittest.TestCase):
                 self.assertEqual(payload["notes"][0]["note_score"], 0)
                 self.cli("lint.py", "--json", expected=1)
                 self.cli("trust.py", "--as-of", invalid, "--json", expected=2)
+
+    def test_shadow_drift_matches_nested_domain_paths(self):
+        note = "# Entry\n\n## Claims\n### [C1] Claim\nProse.\n```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n"
+        self.put("wiki/topic/Entry.md", note)
+        shadow = self.put("wiki-zh/topic/Entry.md", note)
+        paths = {"wiki_localized": {"zh": "wiki-zh"}}
+
+        def codes():
+            return {f["code"] for f in json.loads(self.cli("lint.py", "--json", paths=paths).stdout)["findings"]}
+        self.assertNotIn("shadow-missing", codes())
+        shadow.unlink()
+        self.assertIn("shadow-missing", codes())
+
+    def test_numbered_references_preserve_legacy_trust_and_time_windows(self):
+        self.put("wiki/Source.md", "# Source\n\n## Claims\n### [C1] Source claim\nEvidence.\n"
+                 "```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n")
+        source = self.put("wiki/Reader.md", "")
+        prefix = "# Reader\n\n## Claims\n### [C1] Derived claim\nSupported prose.\n\n"
+        fields = {"valid_at": "2020-01-01", "invalid_at": "2020-02-01"}
+        reference = '[[Source#^c1|ref]]<!-- ' + json.dumps({"metadata": {"citation": fields}}) + ' -->'
+        for day in ("2019-12-31", "2020-01-15", "2020-02-01"):
+            with self.subTest(day=day):
+                source.write_text(prefix + "@cite: [[Source#^c1]] | valid_at: 2020-01-01 | invalid_at: 2020-02-01\n")
+                legacy = json.loads(self.cli("trust.py", "--as-of", day, "--json").stdout)
+                source.write_text(prefix + reference + "\n")
+                current = json.loads(self.cli("trust.py", "--as-of", day, "--json").stdout)
+                self.assertEqual(current, legacy)
+        source.write_text(prefix + "Additional context " + reference + ".\n")
+        self.cli("lint.py", "--json")
+
+    def test_numbered_references_ignore_code_comments_escapes_and_topic_links(self):
+        metadata = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        ref = "[[Missing#^c1|ref]]" + metadata
+        source = self.put("wiki/Examples.md", "# Examples\n\n## Claims\n### [C1] Examples\n"
+                          "Ordinary [[Missing#^c1|topic]] and [[Missing|1]] links.\n\n"
+                          f"`{ref}`\n\n~~~markdown\n{ref}\n~~~\n\n"
+                          "<!-- [[Missing#^c1|ref]] -->\n\n"
+                          f"\\{ref}\n\n[{ref}](https://example.com)\n\n!{ref}\n")
+        payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+        note = payload["notes"][0]
+        self.assertTrue(note["integrity_ok"], note["parse_errors"])
+        self.assertEqual(note["claims"][0]["cites"], 0)
+
+    def test_numbered_references_reject_missing_malformed_or_unknown_metadata(self):
+        source = self.put("wiki/Reader.md", "")
+        for fields in (None, {}, [], {"valid_at": 1}, {"valid_at": "2020-02-30"},
+                       {"valid_at": "2999-01-01"}, {"valid_at": "2020-01-02", "invalid_at": "2020-01-01"},
+                       {"valid_at": "2020-01-01", "confidence": "high"}):
+            with self.subTest(fields=fields):
+                comment = "" if fields is None else '<!-- ' + json.dumps({"metadata": {"citation": fields}}) + ' -->'
+                source.write_text("# Reader\n\n## Claims\n### [C1] A claim\nBody [[Source|ref]]" + comment + "\n")
+                payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+                self.assertFalse(payload["notes"][0]["integrity_ok"])
+                self.cli("lint.py", "--json", expected=1)
+        for reference in ('[[|ref]]' + '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->',
+                          '[[Source|ref]] <!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'):
+            source.write_text("# Reader\n\n## Claims\n### [C1] A claim\nBody " + reference + "\n")
+            payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+            self.assertFalse(payload["notes"][0]["integrity_ok"])
+
+    def test_numbered_references_resolve_claims_and_do_not_replace_body_prose(self):
+        self.put("wiki/Source.md", "# Source\n\n## Claims\n### [C1] Source claim\nEvidence.\n")
+        comment = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        source = self.put("wiki/Reader.md", "")
+        prefix = "# Reader\n\n## Claims\n### [C1] Derived claim\n"
+        for target, body, error in (("Source#^c1", "", "has no body text"),
+                                    ("Source#^c2", "Prose ", "does not exist")):
+            with self.subTest(target=target):
+                source.write_text(prefix + body + "[[" + target + "|ref]]" + comment + "\n")
+                payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+                errors = " ".join(payload["notes"][0]["parse_errors"])
+                self.assertIn(error, errors)
+        source.write_text(prefix + "One [[Source#^c1|ref]]" + comment + " and two [[Source|ref]]" + comment + ".\n")
+        payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+        self.assertTrue(payload["notes"][0]["integrity_ok"])
+        self.assertEqual(payload["notes"][0]["claims"][0]["cites"], 2)
+        source.write_text(prefix + "Literal bang \\![[Source#^c1|ref]]" + comment + ".\n")
+        payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+        self.assertEqual(payload["notes"][0]["claims"][0]["cites"], 1)
+        for template in ("{}.", "- {}", "1. {}", "**{}**", "<!-- metadata only -->\n{}"):
+            source.write_text(prefix + template.format("[[Source#^c1|ref]]" + comment) + "\n")
+            payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+            self.assertIn("has no body text", " ".join(payload["notes"][0]["parse_errors"]))
+
+    def test_numbered_references_require_a_claim_body_location(self):
+        reference = '[[Source|ref]]<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        source = self.put("wiki/Reader.md", "")
+        for body in (reference + "\n### [C1] Claim\nProse.\n",
+                     "[[Source|ref]]<!-- bad -->\n### [C1] Claim\nProse.\n",
+                     "### [C1] Claim " + reference + "\nProse.\n"):
+            source.write_text("# Reader\n\n## Claims\n" + body)
+            payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+            self.assertFalse(payload["notes"][0]["integrity_ok"])
+
+    def test_article_ranges_preserve_evidence_graph_and_time_windows(self):
+        import trust
+
+        anchors = ("@anchor: doi:fixture | valid_at: 2020-01-01\n"
+                   "@anchor: url:https://example.org/old | valid_at: 2020-01-01 | invalid_at: 2020-02-01 | readwise: fixture\n")
+        review = "@pass: reviewer | status: verified | at: 2020-01-01\n"
+        fields = {"valid_at": "2020-01-01", "invalid_at": "2020-02-01"}
+        reference = '[[Source#^c1|ref]]<!-- ' + json.dumps({"metadata": {"citation": fields}}) + ' -->'
+        source = self.put("wiki/Source.md", "# Source\n\n## Claims\n### [C1] Source\nEvidence.\n```anchors\n" + anchors + "```\n")
+        reader = self.put("wiki/Reader.md", "# Reader\n\n## Claims\n### [C1] First\nSupported prose.\n"
+                          "@cite: [[Source#^c1]] | valid_at: 2020-01-01 | invalid_at: 2020-02-01\n"
+                          "```anchors\n" + review + "```\n### [C2] Second\nContext.\n")
+        old = [trust.parse_wiki_note(p, date.today()) for p in (source, reader)]
+        source.write_text("# Source\n\n<!-- claim:c1 -->\n\nEvidence.<!-- /claim:c1 -->\n\n## Evidence\n```anchors c1\n" + anchors + "```\n")
+        reader.write_text("# Reader\n\n## Natural topic\n\n<!-- claim:c2 -->\n\nContext.<!-- /claim:c2 -->\n\n"
+                          "The next explanation includes <!-- claim:c1 -->supported prose. " + reference +
+                          "\n\nMore detail.<!-- /claim:c1 -->\n\n## Evidence\n```anchors c1\n" + review + "```\n```anchors c2\n```\n")
+        new = [trust.parse_wiki_note(p, date.today()) for p in (source, reader)]
+        def evidence(notes):
+            return {c.key: {kind: [m.fields for m in getattr(c, kind)] for kind in ("anchors", "cites", "passes")}
+                    for n in notes for c in n.claims}
+        self.assertEqual(evidence(new), evidence(old))
+        self.assertTrue(all(n.integrity_ok() for n in new), [n.parse_errors for n in new])
+        for day in (date(2019, 12, 31), date(2020, 1, 15), date(2020, 2, 1)):
+            with self.subTest(day=day), patch.object(trust, "vault_root", return_value=self.vault):
+                self.assertEqual(trust.score_notes(new, day), trust.score_notes(old, day))
+
+    def test_article_ranges_own_same_line_references_and_report_original_utf8_offsets(self):
+        import trust
+
+        metadata = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        body = ('中文 😀 before <!-- claim:c4 -->first [[Source#^c1|ref]]' + metadata +
+                '<!-- /claim:c4 --> then <!-- claim:c2 -->second [[Other|ref]]' + metadata + '<!-- /claim:c2 --> after.')
+        text = "# Reader\r\n\r\n" + body + "\r\n"
+        source = self.put("wiki/Reader.md", "")
+        source.write_bytes(text.encode("utf-8"))
+        note = trust.parse_wiki_note(source, date.today())
+        self.assertTrue(note.integrity_ok(), note.parse_errors)
+        self.assertEqual([(c.number, c.cites[0].fields["_cite_title"]) for c in note.claims], [(4, "Source"), (2, "Other")])
+        for claim in note.claims:
+            start = text.index(f"<!-- claim:c{claim.number} -->") + len(f"<!-- claim:c{claim.number} -->")
+            end = text.index(f"<!-- /claim:c{claim.number} -->")
+            self.assertEqual(claim.source_range, (start, end))
+            self.assertEqual(source.read_bytes()[slice(*claim.range_utf8)].decode("utf-8"), text[start:end])
+        self.assertEqual(source.read_bytes(), text.encode("utf-8"))
+
+    def test_localized_claims_keep_frontmatter_identity_with_a_simple_h1(self):
+        import trust
+
+        source = self.put("wiki-cn/Example.md", '---\ntitle: "Example (中文)"\nlang: zh-CN\n---\n# Example\n\n<!-- claim:c1 -->\n\n正文。<!-- /claim:c1 -->\n')
+        note = trust.parse_wiki_note(source, date.today())
+        self.assertEqual(note.title, "Example (中文)")
+        self.assertTrue(note.integrity_ok(), note.parse_errors)
+        self.assertEqual([c.number for c in note.claims], [1])
+
+    def test_article_range_errors_never_infer_ownership(self):
+        import trust
+
+        opening, closing = "<!-- claim:c1 -->", "<!-- /claim:c1 -->"
+        invalid = (
+            opening + closing, "Before " + opening + "unclosed", "Before " + closing,
+            "Before " + closing + " backwards " + opening,
+            "Before " + opening + "one" + closing + opening + "two" + closing,
+            "Before " + opening + "outer <!-- claim:c2 -->inner<!-- /claim:c2 -->" + closing,
+            "Before " + opening + "outer <!-- claim:c2 -->cross" + closing + "<!-- /claim:c2 -->",
+            "Before <!-- claim:c01 -->bad<!-- /claim:c01 -->",
+            "Before <!-- claim:c0 -->bad<!-- /claim:c0 -->",
+            "Before <!-- claim:c1٢ -->bad<!-- /claim:c1٢ -->",
+            "Before <!-- claim:c1", opening + "same-line **Markdown**" + closing,
+            "a*" + opening + "formatting" + closing + "*b",
+            "## Heading " + opening + "bad" + closing,
+            "[" + opening + "linked" + closing + "](https://example.org)",
+            "[[Topic " + opening + "link" + closing + "]]",
+            opening + "\n\nProse\n\n## Revision Log\n\nHistory" + closing,
+            "## Revision Log\n\n" + opening + "\n\nHistory" + closing,
+            "## Evidence\n\n" + opening + "\n\nAdministrative" + closing,
+            "## References\n\n" + opening + "\n\nAdministrative" + closing,
+            opening + "\n\nProse\n\n```anchors c1\n```\n\n" + closing,
+            "Before " + opening + "[[Source|ref]]" + closing + '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->',
+            opening + "\nNo blank line" + closing, "- " + opening + "List item" + closing,
+            "> " + opening + "Quote" + closing, "| a | b |\n|---|---|\n| " + opening + "x | y" + closing + " |",
+            "| a |\n|---|\n| " + opening + "x |\n| y" + closing + " |",
+        )
+        source = self.put("wiki/Reader.md", "")
+        for body in (opening + "\n\nOwn line" + closing, "- Item " + opening + "claim" + closing,
+                     "| a | b |\n|---|---|\n| " + opening + "x [[Source|y]]" + closing + " | z |"):
+            with self.subTest(valid=body):
+                source.write_text("# Reader\n\n" + body + "\n\n## References\n\n```anchors c1\n```\n")
+                note = trust.parse_wiki_note(source, date.today())
+                self.assertEqual(([c.number for c in note.claims], note.parse_errors), ([1], []), body)
+        for body in invalid:
+            with self.subTest(body=body):
+                source.write_text("# Reader\n\n" + body + "\n")
+                note = trust.parse_wiki_note(source, date.today())
+                self.assertFalse(note.integrity_ok(), body)
+        source.write_text("# Reader\n\nBefore " + opening + "unclosed [[Source|ref]]"
+                          '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->\n')
+        self.assertEqual(trust.parse_wiki_note(source, date.today()).claims, [])
+
+    def test_article_ranges_ignore_literal_examples_and_validate_ledger_owners(self):
+        import trust
+
+        base = "# Reader\n\n<!-- claim:c4 -->\n\nActual assertion.<!-- /claim:c4 -->\n\n"
+        examples = ("`<!-- claim:c1 -->` and \\<!-- claim:c2 -->\n\n"
+                    "~~~markdown\n<!-- claim:c3 -->\n## Claims\n### [C1] Example\n~~~\n\n"
+                    "<!-- Example: <!-- claim:c5 -->\n\n")
+        source = self.put("wiki/Reader.md", base + examples)
+        note = trust.parse_wiki_note(source, date.today())
+        self.assertTrue(note.integrity_ok(), note.parse_errors)
+        self.assertEqual([c.number for c in note.claims], [4])
+        for ledger in ("```anchors c7\n```", "```anchors c4 extra\n```", "```anchors c4\nunknown\n```",
+                       "```anchors c4\n```\n```anchors c4\n```", "```anchors c4\n@anchor: doi:x | valid_at: 2020-01-01",
+                       "```anchors c4\n@unknown: x\n```", "```anchors\n```"):
+            with self.subTest(ledger=ledger):
+                source.write_text(base + "## Evidence\n\n" + ledger + "\n")
+                self.assertFalse(trust.parse_wiki_note(source, date.today()).integrity_ok())
+        source.write_text(base + "## Claims\n### [C4] Duplicate identity\nBody.\n")
+        self.assertIn("duplicate or mixed", " ".join(trust.parse_wiki_note(source, date.today()).parse_errors))
+        source.write_text(base + "## Claims\n### [C1٢] Invalid identity\nBody.\n")
+        self.assertIn("malformed legacy claim", " ".join(trust.parse_wiki_note(source, date.today()).parse_errors))
+        source.write_text(base + "## References\n\n```anchors c4\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n")
+        note = trust.parse_wiki_note(source, date.today())
+        self.assertTrue(note.integrity_ok(), note.parse_errors)
+        self.assertEqual(len(note.claims[0].anchors), 1)
+
+    def test_legacy_cite_examples_inside_inline_code_or_comments_are_not_evidence(self):
+        import trust
+
+        record = "@cite: [[Missing]] | valid_at: 2020-01-01"
+        for example in ("`example\n" + record + "\nend`", "<!-- example\n" + record + "\n-->"):
+            with self.subTest(example=example):
+                source = self.put("wiki/Reader.md", "# Reader\n\nBefore <!-- claim:c1 -->Assertion with "
+                                  + example + " text.<!-- /claim:c1 -->\n")
+                note = trust.parse_wiki_note(source, date.today())
+                self.assertTrue(note.integrity_ok(), note.parse_errors)
+                self.assertEqual(note.claims[0].cites, [])
+                self.assertIn(record, "\n".join(note.claims[0].body_lines))
+
+    def test_article_provenance_never_creates_nonwiki_or_unowned_graph_edges(self):
+        self.put("wiki/Source.md", "# Source\n\n## Claims\n### [C1] Seed\nEvidence.\n"
+                 "```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n")
+        self.put("research/Ordinary.md", "# Ordinary\n\n<!-- claim:c7 -->\n\nAn ordinary assertion.<!-- /claim:c7 -->\n")
+        metadata = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        source = self.put("wiki/Reader.md", "")
+        for target in ("Ordinary", "Ordinary#^c7"):
+            source.write_text("# Reader\n\nOutside [[Source#^c1|ref]]" + metadata +
+                              "\n\n<!-- claim:c2 -->\n\nAssertion [[" + target + "|ref]]" + metadata + "<!-- /claim:c2 -->\n")
+            payload = json.loads(self.cli("trust.py", "--json").stdout)
+            notes = {n["title"]: n for n in payload["notes"]}
+            self.assertEqual(set(notes), {"Reader", "Source"})
+            self.assertTrue(notes["Reader"]["integrity_ok"], notes["Reader"]["parse_errors"])
+            self.assertEqual(notes["Reader"]["note_score"], 0)
+            self.assertEqual(notes["Reader"]["claims"][0]["cites"], 1)
+            self.assertEqual(len(notes["Reader"]["claims"][0]["range_utf8"]), 2)
+        for target in ("Missing", "Ordinary#^c1", "Source#^c2", "Source#^c1٢"):
+            source.write_text("# Reader\n\n<!-- claim:c2 -->\n\nAssertion [[" + target + "|ref]]" + metadata + "<!-- /claim:c2 -->\n")
+            payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
+            self.assertFalse(payload["notes"][0]["integrity_ok"])
+
+    def test_wiki_citations_fail_on_global_reflect_title_ambiguity(self):
+        self.put("wiki/Shared.md", "# Shared\n\n## Claims\n### [C1] A source\nEvidence.\n"
+                 "```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n")
+        self.put("research/Shared.md", "# Shared\n\nA separate source.\n")
+        source = self.put("wiki/Reader.md", "# Reader\n\n<!-- claim:c1 -->\n\nAssertion [[Shared|ref]]"
+                          '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} --><!-- /claim:c1 -->\n')
+        note = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)["notes"][0]
+        self.assertFalse(note["integrity_ok"])
+        self.assertIn("ambiguous", " ".join(note["parse_errors"]))
+        self.assertEqual(note["note_score"], 0)
+
+    def test_unreadable_notes_do_not_abort_unrelated_trust_scores(self):
+        import _reflect
+
+        source = self.put("wiki/Source.md", "# Source\n\n## Claims\n### [C1] Seed\nEvidence.\n"
+                          "```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n")
+        unavailable = self.put("wiki/Unavailable.md", "# Unavailable\n\n## Claims\n### [C1] Hidden\nBody.\n")
+        ordinary = self.put("research/Unavailable.md", "# Ordinary unavailable\n")
+        citation = '<!-- {"metadata":{"citation":{"valid_at":"2020-01-01"}}} -->'
+        reader = self.put("wiki/Reader.md", "")
+        for path in (unavailable, ordinary):
+            path.chmod(0)
+            self.addCleanup(path.chmod, 0o600)
+        with self.assertRaises(PermissionError):
+            _reflect.TitleIndex(self.vault)
+        for target in ("Source#^c1", "Unavailable", "Ordinary unavailable"):
+            with self.subTest(target=target):
+                reader.write_text("# Reader\n\nBefore <!-- claim:c1 -->Assertion [[" + target + "|ref]]"
+                                  + citation + "<!-- /claim:c1 -->\n")
+                payload = json.loads(self.cli("trust.py", "--json").stdout)
+                by_path = {Path(n["path"]): n for n in payload["notes"]}
+                self.assertTrue(by_path[source]["integrity_ok"])
+                self.assertGreater(by_path[source]["note_score"], 0)
+                self.assertIn("read error", " ".join(by_path[unavailable]["parse_errors"]))
+                self.assertEqual(by_path[unavailable]["note_score"], 0)
+                self.assertEqual(by_path[reader]["integrity_ok"], target == "Source#^c1")
+                if target != "Source#^c1":
+                    self.assertEqual(by_path[reader]["note_score"], 0)
+                    self.assertIn("not found", " ".join(by_path[reader]["parse_errors"]))
+
+    def test_editor_pending_requires_its_own_pair_and_preserves_reviewer_floor(self):
+        import trust
+
+        prefix = "# Reader\n\n<!-- claim:c1 -->\n\nAn assertion.<!-- /claim:c1 -->\n\n## Evidence\n```anchors c1\n"
+        reviewer = "@pass: reviewer | status: verified | at: 2020-01-01\n"
+        source = self.put("wiki/Reader.md", prefix + reviewer + "```\n")
+        before = trust.parse_wiki_note(source, date.today())
+        source.write_text(prefix + reviewer + "@pass: editor | status: pending | at: 2020-02-01\n```\n")
+        after = trust.parse_wiki_note(source, date.today())
+        self.assertTrue(after.integrity_ok(), after.parse_errors)
+        self.assertEqual(trust.score_notes([before], date.today()), trust.score_notes([after], date.today()))
+        self.assertEqual(trust.score_notes([after], date.today())[0][after.claims[0].key], 0.1)
+        source.write_text(prefix + "@pass: editor | status: pending | at: 2020-02-01\n```\n")
+        pending_only = trust.parse_wiki_note(source, date.today())
+        self.assertEqual(trust.score_notes([pending_only], date.today())[0][pending_only.claims[0].key], 0)
+        for marker in ("@pass: editor | status: verified | at: 2020-01-01",
+                       "@pass: reviewer | status: pending | at: 2020-01-01",
+                       "@pass: editor | status: pending | valid_at: 2020-01-01",
+                       "@pass: editor | status: pending | at: bad | valid_at: 2020-01-01"):
+            with self.subTest(marker=marker):
+                source.write_text(prefix + marker + "\n```\n")
+                self.assertFalse(trust.parse_wiki_note(source, date.today()).integrity_ok())
 
     def test_default_staleness_includes_bucketed_research(self):
         source = self.put("research/topic/note.md", "A working note.\n")

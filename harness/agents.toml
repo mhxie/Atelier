@@ -30,7 +30,7 @@ description = "Probes the painter's thoughts with sharp questions; affirms or co
 source = "agents/curator.md"
 voices = { native = "sonnet", direct = "deepseek_pro", agy = "gemini_flash" }
 status = "canonical"
-description = "Drafts note-content operations (compactions, merges, new notes, wiki entries) for the orchestrator to write under $OV/. Le cercle archetype: The Collector (Caillebotte)."
+description = "Drafts note operations and wiki article edits with stable claims and evidence history for the orchestrator to write under $OV/. Le cercle archetype: The Collector (Caillebotte)."
 
 [agents.forgetter]
 source = "agents/forgetter.md"

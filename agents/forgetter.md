@@ -82,10 +82,10 @@ QMD scores are ordering signals, not calibrated similarity or deletion threshold
 
 The only category that touches L4 — and even here the proposed action is "probe", not "delete".
 
-1. Extract claim text from each `### [C1..N]` heading of wiki entries in scope.
+1. Extract each claim's bounded prose and stable ID using `scripts/trust.py` (explicit ranges or legacy headings); headings and paragraph breaks do not define article claims.
 2. Run the bounded semantic query above for the claim; read the top L2 peer.
 3. Contradiction signal: explicit correction language (`not`, `wasn't`, `没有`, `actually`, `wrong`, `now believe`, `事实上`, "changed my mind") within ~3 sentences of the claim's phrasing. A peer merely restating or disagreeing stylistically is not a contradiction.
-4. The peer's `last_modified` must be **newer** than the most recent `valid_at` among the claim's `@anchor`/`@cite` markers (fallback: the wiki file's `last_modified`). An older peer is historical context the entry already accounts for.
+4. The peer's `last_modified` must be **newer** than the latest `valid_at` in the claim's anchors or citation metadata, including legacy markers (fallback: wiki file's `last_modified`). An older peer is historical context already accounted for.
 
 **Evidence:** wiki claim ID + text, contradicting path, signal phrase, date delta.
 **Default action:** surface to Challenger (probes genuine vs rhetorical); on genuine, the orchestrator dispatches Curator to rewrite the claim + Revision Log.

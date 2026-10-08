@@ -47,13 +47,13 @@ Wiki entries are L4 knowledge: schema-structured, anchored, scored by `scripts/t
 **Process:**
 1. **Gather anchor sources.** Confirm the user has the external receipts the note will cite (arxiv/s2/doi/isbn/url/gist IDs). A wiki entry with zero `@anchor` markers parses but scores 0.0; allowed, but tell the user.
 2. **Draft the full markdown** following `protocols/wiki-schema.md`:
-   - H1 title, optional intro prose
-   - `## Claims` section with `### [C1] <claim text>` subheadings
-   - Per-claim fenced ` ```anchors ` block holding `@anchor: <type>:<id> | valid_at: YYYY-MM-DD` and optional `@pass: <agent> | status: verified | at: YYYY-MM-DD` lines
-   - `@cite` markers placed **outside** the fenced block (after the closing ` ``` `): `@cite: [[Note Title#^cn]] | valid_at: YYYY-MM-DD`
+   - H1 title, concise introduction, natural article headings and paragraphs
+   - Explicit paired claim ranges independent of headings or paragraph boundaries; preserve stable IDs and qualifications
+   - Owned `anchors cN` fences under `## References`, preserving evidence and review history
+   - Inline `ref` citations inside their supported ranges; reference numbers are generated, never authored
    - `## Revision Log` at the bottom
 3. Present the full content with `target_path: <paths.wiki>/<Title>.md` (title-case with spaces, matching the H1). The orchestrator writes the file after user approval.
-4. After the orchestrator writes the file, it will run `Bash: scripts/trust.py --note "<paths.wiki>/<Title>.md"` and report structural-integrity result plus initial claim scores. If parse errors appear, fix the draft and loop.
+4. After the orchestrator writes the file, it will run `Bash: uv run scripts/trust.py --note "<paths.wiki>/<Title>.md"` and report structural-integrity result plus initial claim scores. If parse errors appear, fix the draft and loop.
 
 **When NOT to create a wiki entry:** if the content is exploratory, unsourced, or a session insight, propose a regular note via Create Note from Session instead. Wiki entries are for claims with external receipts and reuse value.
 
@@ -63,7 +63,7 @@ Draft an updated version of an existing local note.
 
 **Process:**
 1. Read the current note from the local mirror (`Grep` for the title in `$OV/` → `Read` the file).
-2. Apply the requested changes.
+2. Apply the requested changes. For wiki articles and localized shadows, load `protocols/wiki-schema.md`; preserve claim identities and evidence history, record editorial review needs, and validate after writing as in Wiki Entry Creation.
 3. Present the diff to the user.
 4. The orchestrator applies the change via `Edit` (small substring fix) or `Write` (whole-body rewrite). For renames, the orchestrator runs `mv` plus a grep + Edit pass that rewrites inbound `[[Old Title]]` to `[[New Title]]`; Reflect does this itself only for a retitle made inside Reflect.
 

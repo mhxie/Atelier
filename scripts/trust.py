@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
-"""Compute deterministic TrustRank over wiki claims.
+"""Compute deterministic TrustRank with dated evidence and reviewer floors.
 
-External anchors seed Personalized PageRank and cites propagate trust from the
-cited claim. Structurally valid notes with a verified reviewer pass receive a
-claim floor; pass markers do not add graph mass. With no seeds, every score is
-zero. Marker validity uses ``[valid_at, invalid_at)`` and may be queried as of
-a date. The stdlib power iteration redistributes dangling mass only to anchor
-seeds.
+Anchors seed PageRank; citations propagate it; passes add no graph mass.
 """
 
 from __future__ import annotations
@@ -19,8 +14,12 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from markdown_it import MarkdownIt
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import tier  # type: ignore[import-not-found]  # noqa: E402
+from _paths import tier, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _claim_ranges import LEDGER_HEADINGS, MarkdownSource, REFERENCE_RE, byte_range  # noqa: E402
+from _reflect import TitleIndex, read_head  # noqa: E402
 
 WIKI_DIR = tier("wiki")
 DAMPING = 0.85
@@ -29,22 +28,17 @@ MAX_ITER = 200
 TOL = 1e-9
 
 ANCHOR_TYPES = {"s2", "arxiv", "doi", "isbn", "url", "gist"}
-PASS_AGENTS = {"reviewer", "challenger", "thinker", "scout", "curator"}
-PASS_STATUSES = {"verified", "flagged", "inconclusive"}
+PASS_AGENTS = {"reviewer", "challenger", "thinker", "scout", "curator", "editor"}
+PASS_STATUSES = {"verified", "flagged", "inconclusive", "pending"}
 
-CLAIM_HEADING_RE = re.compile(r"^###\s+\[C(\d+)\]\s*(.*)$")
-CLAIMS_HEADING_RE = re.compile(r"^##\s+Claims\s*$")
 FENCE_OPEN_RE = re.compile(r"^```anchors\s*$")
 FENCE_CLOSE_RE = re.compile(r"^```\s*$")
-H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 # Unified format: [[Note Title#^c3]] or [[Note Title]] (note-level)
-CITE_TARGET_RE = re.compile(r"^\[\[([^\]#]+?)(?:#\^c(\d+))?\]\]\s*$")
+CITE_TARGET_RE = re.compile(r"^\[\[([^\]#]+?)(?:#\^c([1-9][0-9]*))?\]\]\s*$")
 BARE_CITE_RE = re.compile(r"^\s*@cite:\s+")
 
 
-# ----------------------------------------------------------------------------
 # Data model
-# ----------------------------------------------------------------------------
 
 
 @dataclass(slots=True, eq=False, repr=False)
@@ -65,11 +59,7 @@ class Marker:
         return _parse_iso(v) if v else None
 
     def active_on(self, as_of: date) -> bool:
-        # Window: [valid_at, invalid_at). invalid_at is an EXCLUSIVE
-        # boundary: a marker becomes dead at 00:00 on its invalid_at
-        # date. This matches the schema's "markers are never deleted,
-        # only invalidated" story: if you invalidate on 2026-04-12,
-        # queries as-of 2026-04-12 see the marker as already dead.
+        # Evidence validity is half-open: [valid_at, invalid_at).
         va = self.valid_at
         if va is None or va > as_of:
             return False
@@ -89,13 +79,19 @@ class Claim:
         self.anchors: list[Marker] = []
         self.cites: list[Marker] = []
         self.passes: list[Marker] = []
+        self.source_range: tuple[int, int] = (0, 0)
+        self.range_utf8: list[int] | None = None
 
     @property
     def key(self) -> str:
         return f"{self.note_path.as_posix()}#C{self.number}"
 
     def has_body(self) -> bool:
-        return any(line.strip() for line in self.body_lines)
+        body = REFERENCE_RE.sub("", "\n".join(self.body_lines))
+        body = re.sub(r"(?<!!)\[ref\]\[[^\]\n]+\]", "", body)
+        return any(char.isalnum() for block in MarkdownIt("commonmark").parse(body)
+                   for token in block.children or [] if token.type in {"text", "code_inline"}
+                   for char in token.content)
 
 
 class WikiNote:
@@ -103,6 +99,7 @@ class WikiNote:
         self.path = path
         self.title: str | None = None
         self.claims: list[Claim] = []
+        self.provenance: list[Marker] = []
         self.parse_errors: list[str] = []
 
     def integrity_ok(self) -> bool:
@@ -121,9 +118,7 @@ class WikiNote:
         return False
 
 
-# ----------------------------------------------------------------------------
 # Parser
-# ----------------------------------------------------------------------------
 
 def _parse_iso(value: str) -> date | None:
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
@@ -135,11 +130,7 @@ def _parse_iso(value: str) -> date | None:
 
 
 def _split_marker_line(line: str) -> tuple[str, str, list[str]] | None:
-    """Split `@kind: first | k: v | k: v` into (kind, first_value, extras).
-
-    Returns None if the line is blank, a comment, or does not begin with a
-    recognized marker prefix.
-    """
+    """Split recognized markers into kind, first value and extras; other lines return None."""
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
@@ -184,19 +175,14 @@ def _parse_marker(kind: str, first: str, extras: list[str], line_no: int, raw: s
         k, _, v = extra.partition(":")
         fields[k.strip()] = v.strip()
 
-    # `@pass` markers use `at:` as their temporal anchor (schema line 108).
-    # `@anchor` and `@cite` use `valid_at:`. Normalize @pass into `valid_at`
-    # so the bi-temporal filter has a single field to check.
+    # Normalize pass `at:` into the shared validity field.
     if kind == "@pass" and "valid_at" not in fields and "at" in fields:
         fields["valid_at"] = fields["at"]
 
     va = _parse_iso(fields.get("valid_at", ""))
     if va is None:
         return None, f"line {line_no}: missing or invalid valid_at"
-    # Schema § Structural Integrity item 9: valid_at must be <= today (wall
-    # clock). The --as-of flag is a separate bi-temporal *filter*, not a
-    # relaxation of item 9: the point of item 9 is that markers cannot be
-    # backdated from the future. `today` is the real current date.
+    # --as-of filters evidence; it never permits markers dated after wall-clock today.
     if va > date.today():
         return None, f"line {line_no}: valid_at `{fields['valid_at']}` is in the future (item 9)"
     if "invalid_at" in fields:
@@ -208,208 +194,206 @@ def _parse_marker(kind: str, first: str, extras: list[str], line_no: int, raw: s
         status = fields.get("status", "")
         if status not in PASS_STATUSES:
             return None, f"line {line_no}: unrecognized @pass status `{status}`"
+        if (fields["_agent"] == "editor") != (status == "pending"):
+            return None, f"line {line_no}: editor and pending are reserved for the editor/pending pair"
+        if fields["_agent"] == "editor" and fields.get("at") != fields["valid_at"]:
+            return None, f"line {line_no}: editor/pending requires an ISO at date matching valid_at"
 
     return Marker(kind, fields, line_no, raw), None
+
+
+def _citation_markers(document: MarkdownSource):
+    for token in document.references:
+        start, end = token.meta["source_range"]
+        match = token.meta["match"]
+        line = document.text.count("\n", 0, start) + 1
+        try:
+            fields = json.loads((match[2] or "")[4:-3])["metadata"]["citation"]
+            if (not isinstance(fields, dict) or set(fields) - {"valid_at", "invalid_at"}
+                    or not all(isinstance(v, str) for v in fields.values())):
+                raise ValueError("invalid citation fields")
+        except (ValueError, TypeError, KeyError):
+            yield start, end, None, f"line {line}: missing or invalid citation metadata"
+            continue
+        marker, err = _parse_marker("@cite", f"[[{match[1]}]]",
+                                    [f"{k}: {v}" for k, v in fields.items()], line, match[0])
+        yield start, end, marker, err
+
+
+def _record_marker(note: WikiNote, claim: Claim | None, parsed, line: int, raw: str) -> None:
+    kind, first, extras = parsed
+    marker, err = _parse_marker(kind, first, extras, line, raw)
+    if err:
+        note.parse_errors.append(err)
+    elif claim is None:
+        note.parse_errors.append(f"line {line}: marker outside any claim body")
+    else:
+        getattr(claim, {"@anchor": "anchors", "@cite": "cites", "@pass": "passes"}[kind]).append(marker)
 
 
 def parse_wiki_note(path: Path, today: date) -> WikiNote:
     note = WikiNote(path)
     try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
+        text = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as e:
         note.parse_errors.append(f"read error: {e}")
         return note
-
-    lines = text.splitlines()
-
-    # Item 1 is enforced by the caller (walking WIKI_DIR). Items 2-10 here.
-
-    in_claims_section = False
-    in_fence = False
+    document = MarkdownSource(text)
+    note.parse_errors.extend(document.errors)
+    legacy_sections: list[tuple[int, int]] = []
+    section_start: int | None = None
     current_claim: Claim | None = None
-
-    for idx, raw in enumerate(lines, start=1):
-        if note.title is None:
-            m = H1_RE.match(raw)
-            if m:
-                note.title = m.group(1).strip()
-                continue
-
-        if CLAIMS_HEADING_RE.match(raw):
-            in_claims_section = True
+    for i, block in enumerate(document.tokens):
+        if block.type != "heading_open":
             continue
-
-        # A level-2 heading other than `## Claims` closes the claims section.
-        if in_claims_section and raw.startswith("## ") and not CLAIMS_HEADING_RE.match(raw):
-            if in_fence:
-                note.parse_errors.append(
-                    f"line {idx}: `{raw.strip()}` appeared while an anchors fence was still open (item 5)"
-                )
-            in_claims_section = False
+        start, end = block.meta["source_range"]
+        title = document.tokens[i + 1].content
+        if block.tag == "h1" and note.title is None:
+            note.title = title.strip()
+        if block.tag == "h2":
+            if section_start is not None:
+                legacy_sections.append((section_start, start))
+            if current_claim is not None:
+                current_claim.source_range = (current_claim.source_range[0], start)
+            section_start = end if title == "Claims" else None
             current_claim = None
-            in_fence = False
-            continue
-
-        if not in_claims_section:
-            continue
-
-        if in_fence:
-            if FENCE_CLOSE_RE.match(raw):
-                in_fence = False
-                continue
-            parsed = _split_marker_line(raw)
-            if parsed is None:
-                if raw.strip() and not raw.strip().startswith("#"):
-                    note.parse_errors.append(
-                        f"line {idx}: non-marker line inside anchors fence: `{raw.strip()}`"
-                    )
-                continue
-            kind, first, extras = parsed
-            marker, err = _parse_marker(kind, first, extras, idx, raw)
-            if err:
-                note.parse_errors.append(err)
-                continue
-            if current_claim is None:
-                note.parse_errors.append(
-                    f"line {idx}: marker outside any claim body"
-                )
-                continue
-            if marker.kind == "@anchor":
-                current_claim.anchors.append(marker)
-            elif marker.kind == "@cite":
-                current_claim.cites.append(marker)
-            else:
-                current_claim.passes.append(marker)
-            continue
-
-        if FENCE_OPEN_RE.match(raw):
-            in_fence = True
-            continue
-
-        # Stray fence close with no open.
-        if FENCE_CLOSE_RE.match(raw):
-            continue
-
-        # Bare @cite outside fence (Obsidian backlink format).
-        if BARE_CITE_RE.match(raw):
-            if current_claim is None:
-                note.parse_errors.append(
-                    f"line {idx}: @cite marker outside any claim body"
-                )
-                continue
-            parsed = _split_marker_line(raw)
-            if parsed is not None:
-                kind, first, extras = parsed
-                if kind == "@cite":
-                    marker, err = _parse_marker(kind, first, extras, idx, raw)
-                    if err:
-                        note.parse_errors.append(err)
-                    else:
-                        current_claim.cites.append(marker)
-                    continue
-                else:
-                    note.parse_errors.append(
-                        f"line {idx}: `{kind}` marker must be inside a fenced anchors block"
-                    )
-                    continue
-
-        m = CLAIM_HEADING_RE.match(raw)
-        if m:
-            number = int(m.group(1))
-            title = m.group(2).strip()
-            expected = len(note.claims) + 1
-            if number != expected:
-                note.parse_errors.append(
-                    f"line {idx}: claim number [C{number}] is not sequential (expected [C{expected}])"
-                )
-            current_claim = Claim(path, number, title, idx)
+        match = re.fullmatch(r"\[C([1-9][0-9]*)\]\s*(.*)", title) if block.tag == "h3" else None
+        if section_start is not None and block.tag == "h3" and title.startswith("[C") and match is None:
+            note.parse_errors.append(f"line {block.map[0] + 1}: malformed legacy claim heading")
+        if section_start is not None and match:
+            if current_claim is not None:
+                current_claim.source_range = (current_claim.source_range[0], start)
+            current_claim = Claim(path, int(match[1]), match[2], block.map[0] + 1)
+            current_claim.source_range = (end, len(text))
             note.claims.append(current_claim)
-            continue
+    if section_start is not None:
+        legacy_sections.append((section_start, len(text)))
+    for item in document.ranges:
+        body = text[item.start:item.end]
+        title = next((line.strip() for line in body.splitlines() if line.strip()), "")
+        claim = Claim(path, item.number, REFERENCE_RE.sub("", title).strip(), text.count("\n", 0, item.start) + 1)
+        claim.source_range = (item.start, item.end)
+        claim.range_utf8 = byte_range(text, item.start, item.end)
+        note.claims.append(claim)
+    note.claims.sort(key=lambda claim: claim.source_range)
+    owners = {}
+    for index, claim in enumerate(note.claims):
+        if claim.number in owners:
+            note.parse_errors.append(f"duplicate or mixed legacy/article claim c{claim.number}")
+        if any(c.source_range[1] > claim.source_range[0] for c in note.claims[:index]):
+            note.parse_errors.append(f"overlapping legacy/article claim ownership at c{claim.number}")
+        owners[claim.number] = claim
+        body = text[slice(*claim.source_range)]
+        for token in reversed(document.legacy_cites):
+            start, end = token.meta["source_range"]
+            if claim.source_range[0] <= start and end <= claim.source_range[1]:
+                body = body[:start - claim.source_range[0]] + body[end - claim.source_range[0]:]
+        claim.body_lines = body.splitlines()
 
-        if current_claim is not None:
-            current_claim.body_lines.append(raw)
+    def owner(start, end):
+        matches = [c for c in note.claims if c.source_range[0] <= start and end <= c.source_range[1]]
+        if len(matches) > 1:
+            note.parse_errors.append(f"line {text.count(chr(10), 0, start) + 1}: overlapping claim ownership")
+        return matches[0] if len(matches) == 1 else None
 
-    # Post-parse structural checks.
+    fences = set()
+    section = ""
+    for i, block in enumerate(document.tokens):
+        if block.type == "heading_open" and block.tag == "h2":
+            section = document.tokens[i + 1].content
+        if block.type == "fence" and block.info.split()[:1] == ["anchors"]:
+            start, end = block.meta["source_range"]
+            match = re.fullmatch(r"anchors(?: (c[1-9][0-9]*))?", block.info.strip())
+            if match is None:
+                note.parse_errors.append(f"line {block.map[0] + 1}: malformed anchors fence owner")
+                continue
+            claim = owners.get(int(match[1][1:])) if match[1] else owner(start, end)
+            if match[1]:
+                if match[1] in fences or claim is None or claim.range_utf8 is None or section not in LEDGER_HEADINGS:
+                    note.parse_errors.append(f"line {block.map[0] + 1}: duplicate, orphan, or misplaced anchors owner {match[1]}")
+                fences.add(match[1])
+            elif claim is None:
+                note.parse_errors.append(f"line {block.map[0] + 1}: anchors fence outside any claim body")
+            elif claim is not None and claim.range_utf8 is not None:
+                note.parse_errors.append(f"line {block.map[0] + 1}: article evidence requires an owned anchors fence")
+            last = text[start:end].splitlines()[-1]
+            if not re.fullmatch(r" {0,3}" + re.escape(block.markup[0]) + "{" + str(len(block.markup)) + r",}\s*", last):
+                note.parse_errors.append(f"line {block.map[0] + 1}: unclosed anchors fence")
+            for offset, raw in enumerate(block.content.splitlines(), start=block.map[0] + 2):
+                parsed = _split_marker_line(raw)
+                if parsed is not None:
+                    _record_marker(note, claim, parsed, offset, raw)
+                elif raw.strip() and not raw.strip().startswith("#"):
+                    note.parse_errors.append(f"line {offset}: non-marker line inside anchors fence: `{raw.strip()}`")
+    for token in document.legacy_cites:
+        start, end = token.meta["source_range"]
+        _record_marker(note, owner(start, end), _split_marker_line(token.content),
+                       text.count("\n", 0, start) + 1, token.content)
+    for start, end, marker, err in _citation_markers(document):
+        claim = owner(start, end)
+        crossing = any(a < end and start < b and not (a <= start and end <= b)
+                       for a, b in (c.source_range for c in note.claims))
+        if err or crossing:
+            note.parse_errors.append(err or f"line {marker.line_no}: citation crosses a claim boundary")
+        elif claim is not None:
+            claim.cites.append(marker)
+        elif any(a <= start < b for a, b in legacy_sections):
+            note.parse_errors.append(f"line {marker.line_no}: reference outside any claim body")
+        else:
+            note.provenance.append(marker)
     if note.title is None:
         note.parse_errors.append("missing H1 title")
-    if not any(CLAIMS_HEADING_RE.match(line) for line in lines):
-        note.parse_errors.append("missing `## Claims` section")
-    elif not note.claims:
-        # Empty claims section is itself a structural fail.
-        note.parse_errors.append("no claims found under `## Claims`")
+    else:
+        note.title = read_head(path)[0] or note.title
+    if not note.claims:
+        note.parse_errors.append("no claims found" if document.has_claim_syntax or legacy_sections else "missing claim ranges or `## Claims` section")
     for claim in note.claims:
         if not claim.has_body():
             note.parse_errors.append(
                 f"[C{claim.number}] has no body text"
             )
-    if in_fence:
-        note.parse_errors.append("unclosed anchors fence at end of file")
-
     return note
 
 
-# ----------------------------------------------------------------------------
 # Graph construction + PageRank
-# ----------------------------------------------------------------------------
 
 
 def _resolve_cites(notes: list[WikiNote]) -> None:
-    """Pass 1: validate every @cite target and append any dangling-cite
-    errors to the owning note's parse_errors list. This must run BEFORE
-    edge construction so that a note which turns out to have a broken
-    cite never contributes seeds or edges on the strength of its other
-    valid markers. Codex P1 fix: dangling-cite errors used to be appended
-    inside the same loop that built edges, so edges from a note with any
-    valid markers survived even after the note was marked failed.
-    """
-    title_index: dict[str, Path] = {}
+    """Resolve before graph construction; ordinary notes provide provenance only."""
+    wiki = {note.path: note for note in notes}
+    visible = None
+    ordinary = {}
     for note in notes:
-        if note.title:
-            title_index[note.title] = note.path
-
-    claim_keys: set[str] = set()
-    for note in notes:
-        for claim in note.claims:
-            claim_keys.add(claim.key)
-
-    for note in notes:
-        for claim in note.claims:
-            for c in claim.cites:
-                target_title = c.fields["_cite_title"]
-                target_path = title_index.get(target_title)
-                if target_path is None:
-                    note.parse_errors.append(
-                        f"line {c.line_no}: @cite target `[[{target_title}]]` not found in zk/wiki/"
-                    )
-                    continue
-                target_cn = c.fields.get("_cite_claim_number") or ""
-                if target_cn:
-                    target_key = f"{target_path.as_posix()}#C{target_cn}"
-                    if target_key not in claim_keys:
-                        note.parse_errors.append(
-                            f"line {c.line_no}: @cite target `[[{target_title}]] #C{target_cn}` does not exist"
-                        )
+        for c in [*note.provenance, *(c for claim in note.claims for c in claim.cites)]:
+            c.fields.pop("_provenance_only", None)
+            target_title = c.fields["_cite_title"]
+            if visible is None:
+                visible = TitleIndex(vault_root(), skip_unreadable=True)
+            relative = visible.resolve(target_title)
+            target_path = visible.root / relative if relative is not None else None
+            if target_path is None:
+                note.parse_errors.append(f"line {c.line_no}: @cite target `[[{target_title}]]` not found or ambiguous")
+                continue
+            c.fields["_cite_path"] = target_path.as_posix()
+            target_note = wiki.get(target_path)
+            target_cn = c.fields.get("_cite_claim_number") or ""
+            if target_note is None:
+                c.fields["_provenance_only"] = "true"
+                if target_cn and target_path not in ordinary:
+                    ordinary[target_path] = parse_wiki_note(target_path, date.today())
+                target_note = ordinary.get(target_path)
+            if target_cn and (target_note is None or not any(str(claim.number) == target_cn for claim in target_note.claims)
+                              or c.fields.get("_provenance_only") and any(e != "missing H1 title" for e in target_note.parse_errors)):
+                note.parse_errors.append(f"line {c.line_no}: @cite target `[[{target_title}]] #C{target_cn}` does not exist or has invalid ownership")
 
 
 def build_graph(
     notes: list[WikiNote], as_of: date
 ) -> tuple[list[str], dict[str, list[str]], dict[str, float], set[str]]:
-    """Return (nodes, out_edges, personalization, claim_nodes).
+    """Build anchor -> claim and cited -> citing edges after citation validation.
 
-    Edge direction: cited -> citing. Anchor -> claim.
-    Personalization is uniform over anchor seed nodes active on `as_of`.
-
-    Two-pass construction:
-      Pass 1 (done by the caller via `_resolve_cites`): validate all
-             @cite targets, append dangling-cite errors.
-      Pass 2 (this function): build the trust graph using only notes
-             that pass structural integrity AFTER pass 1.
+    Only valid notes participate; active anchors receive uniform personalization.
     """
-    title_index: dict[str, Path] = {}
-    for note in notes:
-        if note.title:
-            title_index[note.title] = note.path
-
     notes_by_path: dict[Path, WikiNote] = {n.path: n for n in notes}
 
     anchor_nodes: set[str] = set()
@@ -436,10 +420,9 @@ def build_graph(
                 edges.append((node_id, claim.key))
 
             for c in claim.cites:
-                if not c.active_on(as_of):
+                if not c.active_on(as_of) or c.fields.get("_provenance_only"):
                     continue
-                target_title = c.fields["_cite_title"]
-                target_path = title_index[target_title]  # Resolved in pass 1.
+                target_path = Path(c.fields["_cite_path"])  # Resolved by _resolve_cites.
                 target_note = notes_by_path[target_path]
                 # A cite edge only propagates trust from a source note that
                 # itself passed integrity. If the target failed pass 1, we
@@ -479,14 +462,7 @@ def pagerank(
     max_iter: int = MAX_ITER,
     tol: float = TOL,
 ) -> dict[str, float]:
-    """Personalized PageRank via power iteration.
-
-    Matches networkx.pagerank(G, personalization=...) semantics:
-      - Dangling nodes (no out-edges) redistribute their mass to the
-        personalization vector.
-      - Teleport mass (1 - alpha) goes to the personalization vector.
-      - If personalization is empty, falls back to uniform.
-    """
+    """Iterate personalized PageRank; dangling and teleport mass follow personalization."""
     n = len(nodes)
     if n == 0:
         return {}
@@ -494,11 +470,7 @@ def pagerank(
 
     total_p = sum(personalization.values())
     if total_p <= 0:
-        # No trust seeds. TrustRank with an empty seed set is zero
-        # everywhere: no mass enters the graph. Do not fall back to
-        # uniform personalization here — uniform would imply that every
-        # claim is intrinsically trusted, which is the opposite of the
-        # seed-only semantics in Gyongyi et al. 2004.
+        # No seeds means zero trust; uniform personalization would invent intrinsic trust.
         return {v: 0.0 for v in nodes}
     p = [personalization.get(v, 0.0) / total_p for v in nodes]
 
@@ -524,9 +496,7 @@ def pagerank(
     return {nodes[i]: r[i] for i in range(n)}
 
 
-# ----------------------------------------------------------------------------
 # Scoring
-# ----------------------------------------------------------------------------
 
 
 def score_notes(
@@ -562,9 +532,7 @@ def score_notes(
     return claim_scores, note_scores
 
 
-# ----------------------------------------------------------------------------
 # CLI
-# ----------------------------------------------------------------------------
 
 
 def load_wiki(as_of: date, only: Path | None = None) -> list[WikiNote]:
@@ -572,12 +540,9 @@ def load_wiki(as_of: date, only: Path | None = None) -> list[WikiNote]:
         if not only.exists():
             sys.stderr.write(f"trust.py: no such file: {only}\n")
             sys.exit(2)
-        # WIKI_DIR is absolute ($OV/wiki); resolve `only` to absolute too,
-        # otherwise the documented relative form (--note zk/wiki/foo.md
-        # via the project's zk symlink) would be rejected because
-        # `only.parents` would compare relative-to-absolute.
+        # Resolve relative --note paths before comparing against the absolute wiki root.
         only_abs = only.resolve()
-        if WIKI_DIR not in only_abs.parents:
+        if WIKI_DIR not in only_abs.parents or "secure" in only_abs.relative_to(WIKI_DIR).parts:
             sys.stderr.write(
                 f"trust.py: {only} is not under {WIKI_DIR} (structural integrity item 1)\n"
             )
@@ -592,13 +557,9 @@ def load_wiki(as_of: date, only: Path | None = None) -> list[WikiNote]:
     excluded = {"index.md"}
 
     notes: list[WikiNote] = []
-    # rglob (recursive): wiki entries live in domain subdirectories
-    # (one directory per domain cluster), not at the top level. A non-recursive
-    # glob silently scanned 0 entries after the corpus was reorganized into
-    # subdirs. `excluded` matches by basename, so per-subdir index.md files
-    # are skipped too.
+    # Recurse into domain buckets; exclusions also apply to their index basenames.
     for path in sorted(WIKI_DIR.rglob("*.md")):
-        if path.name in excluded:
+        if path.name in excluded or "secure" in path.relative_to(WIKI_DIR).parts or path.is_symlink():
             continue
         notes.append(parse_wiki_note(path, as_of))
     return notes
@@ -705,6 +666,7 @@ def format_json(
                         "anchors": sum(1 for a in c.anchors if a.active_on(as_of)),
                         "cites": sum(1 for ct in c.cites if ct.active_on(as_of)),
                         "passes": sum(1 for p in c.passes if p.active_on(as_of)),
+                        **({"range_utf8": c.range_utf8} if c.range_utf8 is not None else {}),
                     }
                     for c in note.claims
                 ],
@@ -713,116 +675,10 @@ def format_json(
     return json.dumps(payload, indent=2) + "\n"
 
 
-REVISION_DATE_RE = re.compile(r"^-\s+\**(\d{4}-\d{2}-\d{2})")
-
-
-def _last_revised(path: Path) -> str:
-    """Extract the most recent date from the ## Revision Log section."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return "unknown"
-    in_revision = False
-    for line in text.splitlines():
-        if re.match(r"^##\s+Revision Log\s*$", line):
-            in_revision = True
-            continue
-        if in_revision and line.startswith("## "):
-            break
-        if in_revision:
-            m = REVISION_DATE_RE.match(line)
-            if m:
-                return m.group(1)  # Latest-first per schema.
-    return "unknown"
-
-
-def format_index(
-    notes: list[WikiNote],
-    claim_scores: dict[str, float],
-    note_scores: dict[Path, float],
-    as_of: date,
-) -> str:
-    """Generate a markdown index of the wiki corpus with trust scores."""
-    lines: list[str] = []
-    lines.append("# Wiki Index")
-    lines.append("")
-    lines.append(f"Auto-generated by `scripts/trust.py --index` on {as_of.isoformat()}.")
-    lines.append(f"Scanned **{len(notes)}** entries under `{WIKI_DIR}/`.")
-    lines.append("")
-
-    # Build cite-edge summary for the graph section.
-    title_to_path: dict[str, Path] = {}
-    for n in notes:
-        if n.title is not None:
-            title_to_path[n.title] = n.path
-
-    outbound: dict[Path, list[str]] = {n.path: [] for n in notes}
-    inbound: dict[Path, list[str]] = {n.path: [] for n in notes}
-    for note in notes:
-        if not note.integrity_ok():
-            continue
-        for claim in note.claims:
-            for c in claim.cites:
-                target_title = c.fields.get("_cite_title", "")
-                target_path = title_to_path.get(target_title)
-                if target_path and target_path != note.path and note.title:
-                    if target_title not in outbound[note.path]:
-                        outbound[note.path].append(target_title)
-                    if note.title not in inbound[target_path]:
-                        inbound[target_path].append(note.title)
-
-    # Entries table, ranked by trust score descending.
-    ranked = sorted(
-        notes,
-        key=lambda n: (-note_scores.get(n.path, 0.0), n.path.as_posix()),
-    )
-
-    lines.append("## Entries")
-    lines.append("")
-    for note in ranked:
-        score = note_scores.get(note.path, 0.0)
-        n_claims = len(note.claims)
-        n_anchors = sum(
-            1 for cl in note.claims for a in cl.anchors if a.active_on(as_of)
-        )
-        revised = _last_revised(note.path)
-        status = "ok" if note.integrity_ok() else "FAIL"
-        title = note.title or "(untitled)"
-        slug = note.path.stem
-
-        lines.append(f"### [[{slug}|{title}]]")
-        lines.append("")
-        lines.append(f"- **Score:** {score:.4f}  |  **Claims:** {n_claims}  |  **Anchors:** {n_anchors}  |  **Status:** {status}")
-        lines.append(f"- **Last revised:** {revised}")
-
-        cited_by = inbound.get(note.path, [])
-        cites_out = outbound.get(note.path, [])
-        if cited_by:
-            lines.append(f"- **Cited by:** {', '.join(f'[[{t}]]' for t in cited_by)}")
-        if cites_out:
-            lines.append(f"- **Cites:** {', '.join(f'[[{t}]]' for t in cites_out)}")
-        if not cited_by and not cites_out:
-            lines.append("- **Graph:** isolated (no @cite edges)")
-
-        lines.append("")
-
-    # Graph summary.
-    total_cites = sum(len(v) for v in outbound.values())
-    isolated = sum(1 for n in notes if not inbound[n.path] and not outbound[n.path])
-    lines.append("## Graph Summary")
-    lines.append("")
-    lines.append(f"- **Total @cite edges:** {total_cites}")
-    lines.append(f"- **Isolated entries:** {isolated} / {len(notes)}")
-    lines.append(f"- **Mean trust score:** {sum(note_scores.values()) / max(len(note_scores), 1):.4f}")
-    lines.append("")
-
-    return "\n".join(lines) + "\n"
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="scripts/trust.py",
-        description="TrustRank over zk/wiki/ (Personalized PageRank, deterministic, stdlib-only).",
+        description="TrustRank over the configured wiki (deterministic Personalized PageRank).",
     )
     parser.add_argument(
         "--note",
@@ -840,11 +696,6 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Emit JSON for /lint consumption.",
     )
-    parser.add_argument(
-        "--index",
-        action="store_true",
-        help="Generate zk/wiki/index.md with trust-scored corpus overview.",
-    )
     args = parser.parse_args(argv)
 
     if args.as_of:
@@ -857,10 +708,7 @@ def main(argv: list[str] | None = None) -> int:
 
     target = None
     if args.note is not None:
-        # Validate + resolve the requested note, but score against the FULL
-        # corpus: a single-note corpus cannot resolve @cite targets to other
-        # entries, which falsely failed structural integrity (and floored the
-        # scores) for any healthy note citing another.
+        # Score the full corpus so --note can resolve its citation targets.
         candidate = load_wiki(as_of, only=args.note)[0]
         notes = load_wiki(as_of)
         target = next(
@@ -875,20 +723,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         notes = load_wiki(as_of)
     claim_scores, note_scores = score_notes(notes, as_of)
-
-    if args.index:
-        # --index writes zk/wiki/index.md (not stdout).
-        index_path = WIKI_DIR / "index.md"
-        # --index needs the full corpus, not a single note.
-        if args.note is not None:
-            sys.stderr.write("trust.py: --index cannot be combined with --note\n")
-            return 2
-        all_notes = load_wiki(as_of, only=None)
-        all_claim_scores, all_note_scores = score_notes(all_notes, as_of)
-        content = format_index(all_notes, all_claim_scores, all_note_scores, as_of)
-        index_path.write_text(content, encoding="utf-8")
-        sys.stderr.write(f"trust.py: wrote {index_path.as_posix()}\n")
-        return 0
 
     if args.json:
         json_notes = [target] if target is not None else notes

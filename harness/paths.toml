@@ -82,3 +82,11 @@ private_tools    = "_tools/tools"
 # Per-user values go in `harness/paths.local.toml` so the canonical file
 # stays generic. Scripts call `wiki_dirs()` which returns the primary
 # `wiki` directory plus every entry in this table.
+
+# Classification uses logical names above; localized wikis inherit L4 as shadows.
+# Labels describe a knowledge layer, never a claim's current review status.
+[knowledge_levels]
+1 = { label = "Capture", paths = ["inbox", "digest", "cache", "audio_memos"], segments = ["raw"] }
+2 = { label = "Working", paths = ["daily_notes", "reflections", "research", "agent_findings", "wip", "gtd", "travel", "health", "work", "career", "people", "talent", "finance", "personal", "housing", "auto", "abroad", "secure", "dev", "projects", "archive", "sessions", "notes"] }
+3 = { label = "Sources", paths = ["papers", "preprints"] }
+4 = { label = "Wiki", paths = ["wiki"] }

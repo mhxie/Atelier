@@ -6,64 +6,64 @@ Design rationale for location-based certification and claim-level trust lives in
 
 ## Session-Visible Markers
 
-Because wiki entries live under `<paths.wiki>/` and nothing outside that directory participates in the trust graph, a reader scanning a session (the orchestrator, a subagent, or the user skimming chat) has no visible cue that a referenced file is wiki-grade. The file-path prefix `<paths.wiki>/` is the cue. When agents cite a wiki entry in session output, they cite by path (`<paths.wiki>/<title>.md`), not by bare note title, so the certification is legible inline. Notes outside `<paths.wiki>/` continue to be cited as `[[Note Title]]`. A `[[Note Title]]` reference in any session output is alloy by default; a `<paths.wiki>/...` path reference is wiki-grade. Mixing the two forms in one citation (e.g., `[[<paths.wiki>/foo]]`) is a schema violation the Reviewer flags.
+Session output identifies wiki entries by path (`<paths.wiki>/<title>.md`); other notes use `[[Note Title]]`. Inside notes, use title wikilinks so Reflect preserves backlinks and renames. Reflect's L1–L4 labels come from the path registry projection described in `protocols/local-first-architecture.md`; L4 identifies the layer, while review status belongs to individual claims. Never combine path prefixes with wikilink titles (`[[<paths.wiki>/foo]]`).
 
-Wiki entries are structured around claims, not paragraphs: each claim has its own anchor set and trust score, and note-level aggregation is a derived view.
+Wiki entries read as articles. Each explicitly bounded claim has its own evidence and trust score; headings, paragraphs, and display numbers do not define identity. Note-level aggregation is a derived view.
 
 ## Note Structure
 
-A wiki entry has three required sections and lives in `<paths.wiki>/`. The full layer model is documented in `protocols/local-first-architecture.md`.
+A wiki entry opens with its readable H1 title. Localized notes use `lang` metadata and may keep a distinct canonical frontmatter `title` for link identity; the H1 omits the language suffix. Otherwise frontmatter `title` and H1 agree. Introduce the subject, then group explanations and qualifications under natural H2/H3 sections. Omit Summary/Claims scaffolding, repeated assertion headings, and C-number reading instructions. Put evidence under `## References` (`## Evidence` also works) and history under `## Revision Log`.
 
-A wiki entry MUST begin with an `# <Title>` H1 line matching the filename. `scripts/trust.py` derives the note title from the first `# ` heading and reports `missing H1 title` (a structural-integrity failure that blocks the trust floor) when it is absent. Like every note except daily notes (`AGENTS.md`), it opens with that H1; the trust engine also uses it to identify and cross-cite the entry. After the H1, the body may carry an optional one-line `>` blockquote primer, then opens with `## Summary`. (The skeleton example below elides the H1 line for brevity; in a real entry it is required and is line 1.)
+````markdown
+# Example concept
 
-```markdown
-## Summary
+A concise introduction.
 
-One- to three-paragraph synthesis. Prose. No anchors here — the synthesis is alloy on top of the claims and is not separately scored.
+## How it works
 
-## Claims
+The explanation connects <!-- claim:c2 -->one assertion and its qualifications. [ref][study]<!-- /claim:c2 --> with <!-- claim:c1 -->another assertion. [[Sample Wiki Entry#^c1|ref]]<!-- {"metadata":{"citation":{"valid_at":"2026-04-06"}}} --><!-- /claim:c1 -->
 
-### [C1] One-sentence claim text
+## References
 
-Optional body paragraph(s) elaborating the claim. Verbatim quotes from anchors should appear here, attributed.
-
-```anchors
-@anchor: s2:gyongyi-vldb-2004 | valid_at: 2026-04-06
-@pass: reviewer | status: verified | at: 2026-04-06
+```anchors c2
+@anchor: url:https://example.org/study | valid_at: 2026-04-06
 ```
 
-@cite: [[PageRank fundamentals]] | valid_at: 2026-04-06
-
-### [C2] One-sentence claim text
-
-Body.
-
-```anchors
-@anchor: arxiv:2501.13956 | valid_at: 2026-04-06
-@anchor: url:https://github.com/getzep/graphiti | valid_at: 2026-04-06
+```anchors c1
 ```
+
+[study]: https://example.org/study "Study, p. 12"
 
 ## Revision Log
 
-- 2026-04-12: [C2] anchor `arxiv:2501.13956` invalidated — paper retracted. See @cite [[Graphiti retraction note]].
-- 2026-04-06: Initial draft. Claims [C1], [C2] anchored from scout brief sources.
-```
+- 2026-04-06: Initial draft; review pending.
+````
 
-**Revision log ordering: latest entry first.** New rows go at the top of the list, not the bottom. The most recent change is almost always the one the reader needs; paging to the bottom of a long log to find it wastes attention. This is a human convention, not a parser-enforced rule — `scripts/trust.py` ignores the Revision Log entirely.
+`<!-- claim:cN -->` and `<!-- /claim:cN -->` delimit one continuous range. IDs are canonical `c` plus a positive integer, unique per note, independent of order, and never reused or renumbered. Multiple claims can share a paragraph; a range can span paragraphs. Require one opening and one later closing marker, nonempty prose, and no nesting, crossing, duplicate pairs, or disjoint repetitions. Unannotated text never inherits nearby evidence. Keep essential qualifications and supporting citation occurrences within the range.
 
-The `## Summary`, `## Claims`, and `## Revision Log` headings are required, below the `# <Title>` H1 mandated above. Topic tags (body `#tags`) are allowed but not required and play no role in the trust engine.
+Endpoints must be prose positions, outside code, headings, links, entities, escapes, and citation-plus-metadata units. Markers must preserve ordinary Markdown text and formatting. At an existing paragraph boundary, put a line-leading marker on its own line followed by a blank line; mid-paragraph markers remain inline. A marker cannot open a list item or quote line, and a range touching a table stays within one cell. Never introduce a paragraph break to express ownership. Incomplete or malformed ranges fail visibly; the parser never infers a closing boundary. Ranges cannot intersect evidence fences or References, Evidence, and Revision Log sections.
+
+One `anchors cN` fence under the references section owns that range's structured records. Duplicate fences and owners without a range fail validation. An unanchored claim may omit its fence or use an empty one. Preserve every evidence field, duplicate record, date, and invalidation during conversion. The parser reports article `range_utf8` as half-open UTF-8 byte offsets into the unchanged source, excluding the marker comments; internal Python offsets count code points.
+
+Legacy `## Claims` with `### [Cn] <claim>` headings and local `anchors` fences remains readable. Its IDs also remain stable across reordering and may have gaps. A note may contain both representations with distinct, non-overlapping ownership; never define one ID twice. Legacy `@cite` records remain readable, while new writing keeps citation links beside their supported prose.
+
+Revision Log entries are latest first and outside claim scope. The trust graph ignores log prose. Topic tags do not affect certification or scores.
+
+## Index Hierarchy
+
+Inside the wiki, folders carry navigation; elsewhere links, not folders, organize notes. A folder's `index.md` (exact lowercase name) is its index; every other note is an article, whatever its claims. A note's home is the nearest existing `index.md` in its folder or an enclosing one, within its own language folder; folders without one are skipped and the root `index.md` has none. Reflect derives the breadcrumb and Indexes tree from these paths, so write no parent metadata and no standalone "All topics" or "back to index" links. Reading routes in an index may link any note; body links never create parentage. Localized breadcrumbs skip a missing localized index rather than fall back to the source language, so localize each index with its folder.
 
 ## Citing a Claim
 
-A claim is addressed by its `[Cn]` heading number. Cite it as `[[Note Title#^cn]]`, from alloy notes and from another entry's `@cite` (`@cite: [[Note Title#^c1]] | valid_at: ...`): `scripts/trust.py` reads the title and claim number, and Reflect opens the note, since it has no block or heading anchors. Session output keeps the path form from "Session-Visible Markers": `<paths.wiki>/Note Title.md [C1]`.
+A claim is addressed by its stable `cN` ID. Ordinary navigation uses `[[Note Title#^cN]]`; evidence uses the citation-reference form below. The suffix resolves the exact range or legacy claim heading. Session output keeps the path form from "Session-Visible Markers": `<paths.wiki>/Note Title.md [C1]`.
 
-Claim text carries no `^cn` or other `^id` block identifier: Reflect shows it as raw text, and the `[Cn]` heading already numbers the claim.
+Do not add bare `^cN` block identifiers. Reflect generates all visible reference numbers; authors maintain source keys and stable identities, never display numbers.
 
 ## The Marker Vocabulary
 
-`@anchor` and `@pass` markers live inside fenced code blocks with the language label `anchors`, one marker per line, pipe-separated key-value pairs. The fenced format for these two marker types is non-negotiable because they contain URLs and structured data where code formatting is appropriate, and `scripts/trust.py` parses them by fence label.
+`@anchor` and `@pass` markers live in `anchors cN` fences, one marker per line, with pipe-separated fields. Legacy claims use their local `anchors` fences. Unknown records fail validation and remain visible; never drop them during editing or rendering.
 
-`@cite` markers live **outside** the fenced block, as regular Markdown lines immediately after the closing ` ``` `. This lets Reflect render the `[[wikilink]]` targets as live backlinks. The parser accepts `@cite` lines both inside and outside fences for backward compatibility, but new entries must place `@cite` outside the fence.
+Internal citations are inline wikilinks with attached metadata, outside fences so backlinks and renames work. Legacy `@cite` records remain parseable inside or outside fences; new writing uses citation references.
 
 ### `@anchor`
 
@@ -111,39 +111,41 @@ Tag convention: Readwise saves that back wiki anchors carry the `anchor-evidence
 
 **`/lint` behavior.** A `url:` or `gist:` anchor without a `readwise:` field is a WARN, not an ERROR. The anchor is still valid; the evidence is just harder to retrieve if the URL goes down. Pre-existing anchors without `readwise:` fields may be retrofitted opportunistically.
 
-### `@cite`
+### Citation references
 
-An internal pointer to another wiki entry. This is an **edge** in the trust graph: it propagates trust from the cited note's claims to this claim. `@cite` markers do not contribute initial mass.
+A citation to another wiki entry or claim propagates trust; it never seeds trust. Place it beside the supported prose inside the owning range:
 
-**Placement:** `@cite` markers are placed **outside** the fenced `anchors` block, as regular Markdown lines immediately after the closing ` ``` `. This lets Reflect render the `[[wikilink]]` targets as live backlinks. The parser also accepts `@cite` inside fences for backward compatibility, but new entries must place `@cite` outside.
-
-**Claim-level citation:** a `#^cn` suffix names claim `[Cn]` (see "Citing a Claim"):
-
-```
-@cite: [[Note Title#^c3]] | valid_at: <YYYY-MM-DD> [| invalid_at: <YYYY-MM-DD>]
-@cite: [[Note Title]] | valid_at: <YYYY-MM-DD>
+```markdown
+Supported statement. [[Note Title#^c3|ref]]<!-- {"metadata":{"citation":{"valid_at":"2026-04-06"}}} -->
 ```
 
-`scripts/trust.py` parses the note title and claim number from it; Reflect opens the note. Without the suffix, the citation points at the note as a whole and uses the note-level aggregate score as the upstream signal.
+`ref` is a reserved display alias. Reflect derives numbers by first occurrence, displays adjacent citation groups in ascending order, and preserves each occurrence's locator and dates. Keep each citation run adjacent, with punctuation outside the run. Identity remains the resolved note plus optional claim suffix; whole-note and specific-claim targets are distinct. Ordinary topical links, including numeric aliases, do not create evidence edges.
 
-`@cite` markers must resolve. A `@cite` to a note that does not exist in `<paths.wiki>/`, or a `@cite` with a `#^cn` suffix to a non-existent claim, is a **dangling internal cite** — caught by structural-integrity check, fails the floor.
+Keep the JSON comment immediately adjacent on the same line. `metadata.citation` accepts only string `valid_at` and optional `invalid_at`, with the same date rules as anchors. Malformed metadata fails structural integrity; never invent a date. Keep the wikilink outside the comment. Code examples, escaped links, and comments do not create edges. References alone do not satisfy the body-prose requirement.
+
+Targets resolve to existing wiki or ordinary notes; missing, ambiguous, or nonexistent claim targets fail integrity. Ordinary-note citations provide provenance without changing their layer, creating graph nodes, or adding trust. An ordinary-note claim target must expose a valid range or legacy claim. Citations outside claim ranges provide note-level provenance only. A missing claim never widens to the whole note. Existing `@cite: [[Note Title#^c3]] | valid_at: ...` records remain valid. Conversions preserve target, date window, and history.
+
+External references use `[ref][source-key]` with `[source-key]: URL "Author or study, locator"` definitions at the bottom. Preserve any API name, subject or assertion carried by the original link label as ordinary prose beside the compact citation. These links do not seed trust themselves; the owning range's `@anchor` records do. Definitions with the same URL can retain different locators. Numbering is presentation, independent of anchor URL matching or review status; unknown records remain available. Copies carry their definitions; rename conflicting keys and occurrences together, never rebind them silently.
 
 ### `@pass`
 
-A record of an internal agent pass: Reviewer, Challenger, Thinker, or other team agents. **`@pass` markers never accumulate trust.** They serve two purposes:
+A record of an agent pass or an editor's review-needed event. **`@pass` markers never accumulate trust.** They serve two purposes:
 
 1. **Audit trail.** They show what scrutiny the claim has survived.
 2. **Floor trust eligibility.** A wiki entry that has at least one `@pass: reviewer | status: verified` and passes structural integrity becomes eligible for the claim-level floor trust of 0.1 on its unanchored claims.
 
 ```
 @pass: <agent> | status: <verified|flagged|inconclusive> | at: <YYYY-MM-DD> [| ref: <session-id-or-note>]
+@pass: editor | status: pending | at: <YYYY-MM-DD>
 ```
 
 `<agent>` is one of: `reviewer`, `challenger`, `thinker`, `scout`, `curator`. The optional `ref` field points at the session reflection or another note where the pass was recorded, for audit.
 
+The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass, renewing evidence, or revoking the existing note-level verified floor. Preserve earlier records.
+
 ## Bi-temporal Anchors
 
-Every marker carries `valid_at`, the date the marker was added. Markers can later be invalidated by adding `invalid_at`. The original line is **never deleted**; the invalidation is an additive change. This preserves the answer to "what did the system believe at time T?"
+`valid_at` records when evidence was added; display it as “Evidence recorded,” not a whole-note review date. Add `invalid_at` to invalidate an anchor or citation; preserve the original target and addition date. Reviewer records use `at`. This retains the evidence available at a past time.
 
 Example evolution:
 
@@ -157,7 +159,7 @@ Later, after the paper is retracted:
 @anchor: arxiv:2501.13956 | valid_at: 2026-04-06 | invalid_at: 2026-04-12
 ```
 
-The `Revision Log` section at the bottom of the note records the change in human-readable form, with a `@cite` to the note that explains the invalidation if there is one.
+The `Revision Log` records the change with an ordinary wikilink to its explanation. It is outside the scored claim body. An editorial rewrite preserves claim meaning or explicitly disposes of affected evidence and review records; a pending label alone cannot cancel the note's verified floor. `--as-of` filters evidence windows against current prose, not a historical text snapshot.
 
 `scripts/trust.py` filters markers by `invalid_at` when computing current trust: a marker with `invalid_at <= today` is excluded from the graph. The original record is preserved on disk forever. This is the Graphiti-style append-only-but-mutable contract.
 
@@ -167,7 +169,7 @@ The trust engine treats all valid markers as equal weight regardless of age. Tem
 
 This is the rule that makes the design work. State it bluntly so it never drifts.
 
-> **External anchors are the only seeds of trust. Internal `@cite` edges propagate trust. Internal `@pass` markers never accumulate trust — only floor it.**
+> **External anchors are the only seeds of trust. Citations to wiki claims propagate trust; ordinary notes provide provenance. Internal `@pass` markers never accumulate trust; verified reviewer passes enable the floor.**
 
 In TrustRank terms: `personalization` is the dict of anchor-bearing claim nodes. Non-anchored claims get `0` initial mass. Personalized PageRank then propagates that mass through `@cite` edges. The damping factor (typically `0.85`) handles cycles natively.
 
@@ -204,7 +206,7 @@ N.score = mean(Ci.score for Ci in N.claims)
 
 Mean across claims. Weighted aggregation (by claim length, anchor count, or claim age) is tracked under § Open v2 Items.
 
-The note-level score is a derived view shown in the trust report and used for ranking in search results. Internal `@cite` references that point at a whole note (no `#^cn` suffix) read this aggregate as the upstream signal. Internal `@cite` references that point at a specific claim (`[[Note Title#^c2]]`) read the claim-level score directly.
+The note-level score is a derived view shown in the trust report and used for ranking in search results. Citation references to a whole note (no `#^cn` suffix) read this aggregate as the upstream signal; references to a specific claim read its claim-level score directly.
 
 ## Structural Integrity Check
 
@@ -213,12 +215,12 @@ A note **passes structural integrity** if all of the following hold. `scripts/tr
 **Required (enforced by `scripts/trust.py`):**
 
 1. The note's file path is under `<paths.wiki>/`.
-2. The note has a `## Claims` section.
-3. Every claim heading matches `### [Cn] <text>` with `n` sequential starting from 1.
-4. Every claim has at least one paragraph of body text.
-5. Every fenced `anchors` block parses: every line is either blank, a comment, or matches `@anchor:` / `@pass:` (and optionally `@cite:` for backward compatibility) with valid pipe-separated fields. Bare `@cite:` lines outside fences parse as markers when they appear in the `## Claims` section after a claim heading.
+2. The note has an H1 and at least one valid range or legacy claim.
+3. IDs are unique positive integers; source ownership is unambiguous, non-overlapping, and independent of order.
+4. Every claim has substantive prose; metadata and references alone are insufficient.
+5. Every evidence fence and citation reference parses. Fences contain only blank/comment lines or valid markers; article fences have a unique existing owner under References or Evidence. Legacy `@cite` records also parse outside fences, excluding literal code/comment examples. Citation and metadata units cannot cross a claim boundary.
 6. Every `@anchor` has a recognized type and a `valid_at`.
-7. Every `@cite` resolves: the target note exists in `<paths.wiki>/`. If a `#^cn` suffix is given, the target claim exists in the target note.
+7. Every internal citation resolves to a note and, when supplied, its `#^cN` claim; only wiki targets propagate trust.
 8. Every `@pass` has a recognized agent and status.
 9. `valid_at` is a valid ISO date <= today.
 10. If `invalid_at` is present, it is a valid ISO date > the corresponding `valid_at`.
@@ -227,12 +229,11 @@ A note **passes structural integrity** if all of the following hold. `scripts/tr
 
 11. At least one claim in the note has a `@pass: reviewer | status: verified` marker.
 
-**Recommended (enforced by `/lint` Phase 1):**
+**Authoring checks:**
 
-12. The `## Summary` section exists and is non-empty.
-13. The `## Revision Log` section exists.
-14. No claim is orphaned: every claim is referenced from `## Summary` or has at least one `@anchor` or `@cite`.
-15. URLs in `@anchor` markers reach a 200 (cached / periodic check, not real-time).
+12. The introduction, narrative order, examples, and qualifications make the article useful without claim IDs.
+13. Revision Log records substantive changes; evidence and audit details stay outside the article's prose.
+14. Claims have retrievable support, and source locators refer to the correct occurrence. `/lint` owns its deterministic checks; it does not establish scientific validity or poll every URL.
 
 ## Open v2 Items
 
@@ -242,19 +243,19 @@ Documented here so they do not get lost between sessions.
 - **Signed edges (`contradicts`).** A claim that contradicts another claim is not a positive edge. The literature recommends a separate post-processing penalty rather than a signed PageRank, since signed PageRank breaks the stochastic matrix assumption. Defer until contradictions are common enough to matter.
 - **Anchor weight from S2 / OpenAlex.** Use `influentialCitationCount` or FWCI as the seed weight for paper anchors. v1 treats all weights as 1.0. The schema field `weight` already exists for forward compatibility.
 - **Note-level aggregation alternatives.** Weighted mean by claim length, anchor count, or claim age. v1 is unweighted mean.
-- **Claim invalidation.** Currently a marker can be invalidated. A whole claim cannot — there is no `[Cn]` invalidation syntax. If a claim becomes wrong, the v1 workflow is to invalidate all its markers and add a Revision Log entry. v2 may add `### [Cn] ~~Claim text~~` strikethrough as a structural signal.
+- **Claim retirement.** Markers can be invalidated; claim retirement has no dedicated syntax. Preserve the ID and evidence history, disposition its support, and record the change in Revision Log. Never recycle an old ID for a different assertion.
 
 ## Localized Shadow Wikis
 
 Every wiki entry in `<paths.wiki>/` may have one or more **localized shadow copies** in a sibling directory (e.g., a `wiki-cn` directory for Chinese, `wiki-ja` for Japanese — naming is user-private). Shadow paths are configured in `harness/paths.local.toml` under `[paths.wiki_localized]`; the canonical `harness/paths.toml` ships with no shadows defined, so OSS users opt in by language.
 
-Shadows are generated by `/promote` (Phase 4) when a localized target is configured, and can be regenerated on demand. They share the filename of the source English entry, by convention.
+Shadows are generated by `/promote` (Phase 4) when a localized target is configured, and can be regenerated on demand.
 
 Translation rules:
-- Translate all prose (Summary, claim text, body paragraphs, Revision Log) into the target language
-- DO NOT translate: technical terms, code identifiers, URLs, file paths, `@anchor`/`@pass`/`@cite` markers, block IDs
-- Shadow filename matches the English source filename exactly; the shadow keeps the English `# <Title>` H1 (see `/promote` Phase 4)
-- Put a localized backreference right below the H1, e.g. for Chinese: `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`
+- Translate article prose, headings, and Revision Log entries into the target language; keep the `## References`, `## Evidence` and `## Revision Log` headings in English, since the parser recognizes only those
+- DO NOT translate: technical terms, code identifiers, URLs, paths, claim IDs, evidence fields, or citation targets/aliases/JSON
+- Keep the source filename for native language switching. Preserve a distinct canonical frontmatter `title` for backlinks, set BCP 47 `lang`, and use a simple H1 without a language suffix. Reflect derives its display title from the H1; `display_title` is only for an explicit override. Display names never become citation keys.
+- Omit in-body language-switch links and translation boilerplate. Reflect supplies the language buttons and title superscript from metadata.
 
 Localized shadows are not part of the trust graph: `scripts/trust.py` only scans `<paths.wiki>/`. The shadow copy is for reading convenience. It does not need its own anchors or reviewer passes.
 

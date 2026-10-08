@@ -101,9 +101,6 @@ class Todo:
             return "P3"
         return "P2"
 
-    def is_stale(self, threshold: int = 30) -> bool:
-        return self.age_days >= threshold
-
     def short_source(self) -> str:
         return Path(self.source).name
 

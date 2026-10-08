@@ -92,7 +92,7 @@ description = "Daily and weekly digest: JSON collection, capped overdue TODO rem
 source = "skills/promote/SKILL.md"
 category = "knowledge"
 status = "canonical"
-description = "Promote L2 working notes into a schema-compliant L4 wiki entry."
+description = "Promote L2 notes into L4 articles with bounded claims, owned evidence, automatic references and metadata-driven localized titles."
 # Reflection workflows default to fresh sessions (a reused session pollutes
 # the new reflection); resume_friendly marks the continuation-safe exceptions.
 resume_friendly = true

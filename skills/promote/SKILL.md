@@ -1,6 +1,6 @@
 ---
 name: promote
-description: Promote L2 working notes into a schema-compliant L4 wiki entry.
+description: Promote L2 notes into L4 articles with bounded claims, owned evidence, automatic references and metadata-driven localized titles.
 ---
 # /promote — Create L4 wiki entry from L2 source notes
 
@@ -72,18 +72,18 @@ Approved claims and anchors:
 Instructions:
   1. Generate a wiki entry following protocols/wiki-schema.md exactly:
      - H1 title
-     - ## Summary (prose synthesis, no anchors)
-     - ## Claims with [C1], [C2], ... headings
-     - Each claim gets a body paragraph (no `^cn` block ID)
-     - Each claim gets a fenced ```anchors block with @anchor markers
+     - Concise introduction and natural article headings, examples, and qualifications
+     - Paired claim ranges with stable IDs; several claims may share a paragraph
+     - Owned ```anchors cN fences under ## References, with @anchor records
+     - Citation occurrences inside supported ranges; generate all display numbers
      - ## Revision Log with today's date and creation context
   2. For @anchor markers:
      - Use the appropriate type (s2, arxiv, doi, isbn, url, gist)
      - Set valid_at to today's date
      - Include the source URL or identifier from the Researcher's brief
-  3. Do NOT add @cite markers yet (those require target entries to exist).
+  3. Defer internal citation references until their target entries exist.
      Leave a comment in the Revision Log noting which existing wiki entries
-     could be cross-referenced once the entry is created.
+     could receive citation references once the entry is created.
   4. Do NOT add @pass markers (those come from post-creation review).
   5. Return the full markdown content as a draft.
 ```
@@ -92,11 +92,11 @@ Instructions:
 
 1. **Present the draft** to the user for review. Show the full markdown.
 2. On user approval, **write the file** to `<paths.wiki>/<Title>.md` (title-case with spaces, matching the H1).
-3. Run `scripts/trust.py --note "<paths.wiki>/<Title>.md"` to verify structural integrity.
+3. Run `uv run scripts/trust.py --note "<paths.wiki>/<Title>.md"` to verify structural integrity.
    - If errors: show them, ask the user if they want to fix or abort.
    - If clean: report the initial trust score (will be raw PageRank, no floor until a reviewer pass).
-4. Run `scripts/lint.py` to check for corpus-level issues (shared anchors, etc.).
-5. Regenerate the wiki index: `scripts/trust.py --index`.
+4. Run `uv run scripts/lint.py` to check for corpus-level issues (shared anchors, etc.).
+5. Every `index.md` is curated; never regenerate one. If a route should reach the entry, propose that edit to its nearest index for approval (`protocols/wiki-schema.md` § Index Hierarchy).
 
 ### Phase 4: Localized Shadows
 
@@ -105,13 +105,12 @@ After the English entry passes validation, generate a shadow copy for each langu
 For each `(language_code, shadow_dir)` entry:
 
 1. **Translate** the entry to the target language following these rules:
-   - Translate all prose (Summary, claim text, body paragraphs, Revision Log)
+   - Translate article prose, headings, and Revision Log entries; keep `## References`, `## Evidence` and `## Revision Log` headings in English for the parser
    - Leave untranslated: technical terms (e.g., Lance, Ray Data, PyArrow, MVCC), code identifiers, URLs, file paths
-   - Leave untranslated: `@anchor`/`@pass` blocks and `@cite` lines, copied exactly as-is
-   - Start the file with frontmatter `title: "<Title> (<language>)"`, e.g. `(中文)`, so title-keyed editors such as Reflect resolve `[[<Title>]]` to the English entry
-   - Then keep the `# Title` in English (filename must match the source)
-   - Put a localized backreference right below the H1, e.g. for Chinese:
-     `> 本文为 [[English Title]] 的中文版本。核心技术术语保留英文原文。`
+   - Copy evidence blocks and citation targets, aliases, and JSON metadata exactly
+   - Keep the filename and a distinct canonical frontmatter `title: "<Title> (<language>)"` so existing backlinks remain unambiguous
+   - Use `# <Title>` without a language suffix and `lang: "<BCP 47 code>"`; Reflect derives the display title from H1
+   - Omit redundant `display_title`, in-body language switches and translation boilerplate; Reflect supplies the native controls
 2. **Write** to `$OV/<shadow_dir>/<Title>.md` (same filename as the English version).
 3. This step is automatic and does not require additional user approval.
 
@@ -119,9 +118,9 @@ For each `(language_code, shadow_dir)` entry:
 
 After successful creation, suggest next steps:
 
-1. **Add @cite edges:** If the lint report shows `shared-anchor-no-cite` findings involving the new entry, suggest specific @cite markers to add.
+1. **Add citation references:** For `shared-anchor-no-cite` findings, suggest references using `protocols/wiki-schema.md`.
 2. **Request reviewer pass:** "Run a review session to add `@pass: reviewer | status: verified` markers, which unlocks the 0.1 trust floor."
-3. **Update the wiki index:** Already done in Phase 3 step 5.
+3. **Route from `index.md`:** Propose a curated route edit under Phase 3 step 5 if useful.
 4. **Snapshot anchors to Readwise:** Save all `url:` anchors to Readwise with `anchor-evidence` + category tag, backfill `readwise:` document IDs.
 
 ## Example Invocation
@@ -130,32 +129,11 @@ After successful creation, suggest next steps:
 User: /promote distributed locking patterns
 ```
 
-The command finds notes about distributed locking in daily notes, agent findings, and reading notes. Extracts claims about lock granularity, consensus protocols, lease-based mechanisms. Produces a wiki entry like:
-
-```markdown
-# Distributed Locking Patterns
-
-## Summary
-[synthesis of the key patterns...]
-
-## Claims
-
-### [C1] Lease-based locks with TTL are preferred over indefinite locks in distributed systems
-
-[body with evidence...]
-
-```anchors
-@anchor: url:https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html | valid_at: 2026-04-11
-```
-
-## Revision Log
-
-- 2026-04-11: Initial draft promoted from [[2026-04-08]] daily note and [[Deep Dive Brief]] agent finding. Candidate @cite edges: [[Related Wiki Entry A]] (shared concept overlap), [[Related Wiki Entry B]] (shared mechanism overlap).
-```
+The command finds source notes about lock granularity, consensus, and leases, then proposes an article organized around their mechanisms and limits. `protocols/wiki-schema.md` owns the source-format example. Claims retain their individual evidence even when one paragraph compares several mechanisms.
 
 ## Error Handling
 
 - **No relevant source notes found:** "No notes found related to [topic]. Try a different search term, or provide specific file paths."
-- **All claims already covered by existing wiki entries:** "The claims in these notes are already covered by [existing entry]. Consider adding @cite markers to the existing entry instead of creating a new one."
+- **All claims already covered:** Suggest citation references to the existing entries instead of a duplicate.
 - **Structural integrity failure after write:** Show the specific errors from trust.py. Offer to fix in place or delete and retry.
 - **Curator unavailable:** The orchestrator can generate the draft directly using the schema as a template, though the Curator's Content Preservation Checklist adds safety.

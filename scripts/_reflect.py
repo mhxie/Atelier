@@ -1,16 +1,6 @@
-"""Reflect note titles and `[[Title]]` resolution over a vault.
+"""Reflect title identity, native-link resolution and Markdown compatibility.
 
-Mirrors reflect-open's note claims: a key is answered by the first tier that
-claims it (daily date, exact title, exact alias, emoji-folded title, emoji-folded
-alias, then filename stem), and a key two notes claim in that tier is ambiguous. A note's title is its frontmatter
-`title:`, else its first H1, else its filename. Hidden, .reflectignore'd
-(folder-name patterns), and raw/ folders and symlinks are outside Reflect's
-index, except the archive tier's link into raw_store, which it lists read-only;
-secure/ notes, which Reflect shows read-only, are off-limits here. None is ever
-opened.
-
-`nonnative()` names the syntax reflect-open's renderer shows as raw text,
-ignores, or folds, so audits and migrations share one definition.
+Excluded notes stay unread; only the archive-tier link may be traversed.
 """
 
 from __future__ import annotations
@@ -49,7 +39,15 @@ class Note:
 def _scalar(value: str) -> str:
     value = value.strip()
     if len(value) > 1 and value[0] == value[-1] and value[0] in "\"'":
+        quote = value[0]
+        if quote == '"':
+            try:
+                return json.loads(value).strip()
+            except json.JSONDecodeError:
+                pass
         value = value[1:-1]
+        if quote == "'":
+            value = value.replace("''", "'")
     return value.strip()
 
 
@@ -97,6 +95,24 @@ def read_head(path: Path) -> tuple[str | None, tuple[str, ...]]:
     return title, tuple(a for a in aliases if a)
 
 
+def title_issue(text: str, title: str | None) -> str | None:
+    """Require an opening H1; explicit language metadata permits a display title."""
+    lines = text.splitlines()
+    localized = False
+    if lines and lines[0].rstrip() == "---":
+        end = next((i + 1 for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), 0)
+        fields = dict(line.split(":", 1) for line in lines[1:end-1] if re.match(r"^(title|lang):", line)) if end else {}
+        localized = _scalar(fields.get("title", "")) == title and bool(re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", _scalar(fields.get("lang", ""))))
+        lines = lines[end:]
+    first = next((line for line in lines if line.strip()), "")
+    heading = _H1_RE.fullmatch(first)
+    if heading is None:
+        return "missing opening H1"
+    if title and not localized and title not in {"|", ">", "|-", ">-", "|+", ">+"} and title != heading.group(1):
+        return "authored title differs from opening H1"
+    return None
+
+
 def fold_key(title: str) -> str:
     """Reflect's foldKey, the exact match: NFC, trimmed, lowercase."""
     return unicodedata.normalize("NFC", title).strip().lower()
@@ -131,7 +147,7 @@ def backup_limit(root: Path) -> int | None:
     return mib * 1024 * 1024 if type(mib) is int and 1 <= mib <= 95 else None
 
 
-def notes(root: Path) -> Iterator[Note]:
+def notes(root: Path, *, skip_unreadable: bool = False) -> Iterator[Note]:
     """Every Reflect-visible note under `root`, in path order."""
     ignore = root / ".reflectignore"
     patterns = ignore.read_text(encoding="utf-8").splitlines() if ignore.is_file() else []
@@ -140,19 +156,24 @@ def notes(root: Path) -> Iterator[Note]:
         for name in sorted(filenames):
             path = here / name
             if name.endswith(".md") and not path.is_symlink():
-                title, aliases = read_head(path)
+                try:
+                    title, aliases = read_head(path)
+                except OSError:
+                    if not skip_unreadable:
+                        raise
+                    continue
                 yield Note(path.relative_to(root), title, aliases)
 
 
 class TitleIndex:
     """Which note a `[[X]]` names, the way Reflect resolves it."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, skip_unreadable: bool = False):
         self.root = root
         daily = Path(tier_segments().get("daily_notes", "daily"))
         self._claims: dict[str, dict[str, set[Path]]] = {t: defaultdict(set) for t in TIERS}
         self._titles: dict[Path, str] = {}
-        for note in notes(root):
+        for note in notes(root, skip_unreadable=skip_unreadable):
             title = note.title or note.path.stem
             self._titles[note.path] = title
             if note.path.parent == daily and _DATE_RE.match(note.path.stem):
@@ -177,10 +198,6 @@ class TitleIndex:
             if paths := self._claims[tier].get(self._key(tier, target)):
                 return next(iter(paths)) if len(paths) == 1 else None
         return None
-
-    def has(self, target: str) -> bool:
-        """Does `[[target]]` name any note, even ambiguously?"""
-        return any(self._key(tier, target) in self._claims[tier] for tier in TIERS)
 
     def link_title(self, path: Path) -> str | None:
         """The title that links `path` (vault-relative) unambiguously, if any."""
@@ -249,11 +266,7 @@ def _cjk(char: str) -> bool:
 
 
 def _mid_sentence(prev: str, nxt: str, strict: bool) -> bool:
-    """Does the break between `prev` and `nxt` fall inside running prose?
-
-    `strict` (a note that also has long unwrapped lines, so short breaks may be
-    intended) accepts only a lowercase continuation or a break between two CJK letters.
-    """
+    """Detect a prose continuation; strict mode requires lowercase or adjacent CJK letters."""
     head, tail = nxt.lstrip(), prev.rstrip().rstrip("*_\"')]）」』】》”’")
     if not head or not tail or prev.rstrip().endswith(("**", "__")):
         return False  # a bold line reads as a heading of what follows
@@ -269,13 +282,7 @@ def _mid_sentence(prev: str, nxt: str, strict: bool) -> bool:
 
 
 def wrapped_blocks(lines: list[str]) -> list[tuple[int, int]]:
-    """[start, end) line ranges of hard-wrapped paragraphs or list items.
-
-    Reflect shows every newline as a break, so a block counts as wrapped only
-    when each line but the last is 55-100 characters, none ends in a hard
-    break, most end mid-sentence, and every break falls inside running prose,
-    judged strictly unless the note's prose is wrapped throughout.
-    """
+    """Return half-open line ranges of hard-wrapped prose, excluding intentional breaks."""
     body = dict(_scan(lines))
     prose = [line for line in body.values() if _is_text(line) or _LIST_ITEM_RE.match(line)]
     strict = sum(len(line) > 110 for line in prose) > max(1, len(prose) // 20)
@@ -321,14 +328,17 @@ def note_link_target(dest: str, note: Path, titles: TitleIndex) -> Path | None:
 
 
 def nonnative(text: str, note: Path | None = None, titles: TitleIndex | None = None) -> Counter:
-    """Counts of syntax in a note body that reflect-open does not render natively.
-
-    With the note's absolute path and a TitleIndex, a relative `.md` link to a
-    Reflect note (secure ones included) counts as `md_note_link`: it opens, but
-    never backlinks or follows renames.
-    """
-    lines = text.splitlines()
+    """Count nonnative syntax; Markdown note links open but lack Reflect backlinks."""
     hits: Counter = Counter()
+    if re.search(r"<!--\s*/?claim\b", text, re.I):
+        from _claim_ranges import MarkdownSource
+
+        document = MarkdownSource(text)
+        hits["claim_range"] = len(document.errors)
+        if not document.errors:
+            for start, end, _closing, _number in reversed(document.markers):
+                text = text[:start] + text[end:]
+    lines = text.splitlines()
     if lines and lines[0].rstrip() == "---":
         end = next((i for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), 0)
         hits["frontmatter_tags"] += any(line.startswith("tags:") for line in lines[1:end])

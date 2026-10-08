@@ -4,7 +4,7 @@
 
 ## Note titles
 
-Reflect titles are flat, so each must be unambiguous without its folder. Every note but a daily note opens with an H1, which Reflect shows as its title; Reflect reads frontmatter `title:` first, so an existing one must match the H1. A generic filename (README, Index, Taxonomy, ...) gets a scoped H1 such as `# <Scope>: <Topic>`; a colon separates scope from topic, never ` · ` or a dash. `scripts/zk_audit.py` flags fallback collisions.
+Reflect titles are flat, so each must be unambiguous without its folder. Every note but a daily note opens with an H1, which Reflect shows as its title; Reflect reads frontmatter `title:` first, so an existing one must match the H1. A generic filename (README, Index, Taxonomy, ...) gets a scoped H1 such as `# <Scope>: <Topic>`; a colon separates scope from topic, never ` · ` or a dash. `scripts/zk_audit.py` flags duplicate titles and missing or conflicting opening H1s.
 
 ## Image policy
 

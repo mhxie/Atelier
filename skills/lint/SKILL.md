@@ -16,12 +16,12 @@ Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint
 
 | Check | Severity | Source |
 |---|---|---|
-| Per-note parse errors — items 1-10 of `protocols/wiki-schema.md`, plus dangling `@cite` targets (both surface under the `parse-error` code) | ERROR | `scripts/trust.py` parser + resolver |
-| Duplicate titles across wiki entries (breaks `@cite` resolution) | ERROR | `scripts/lint.py` |
+| Per-note parse errors: schema items 1-10, malformed citation metadata, or dangling targets (`parse-error`) | ERROR | `scripts/trust.py` parser + resolver |
+| Duplicate titles across wiki entries (breaks citation resolution) | ERROR | `scripts/lint.py` |
 | Slug ↔ title alignment (filename stem matches H1 title) | WARN | `scripts/lint.py` |
-| Orphan entry — no inbound `@cite` from any other wiki entry (trust cannot propagate to it) | WARN | `scripts/lint.py` graph topology |
-| No outbound cite — entry does not `@cite` any other wiki entry | INFO | `scripts/lint.py` graph topology |
-| Shared anchor, no cite — two entries reference the same `@anchor` but lack a `@cite` edge | INFO | `scripts/lint.py` graph topology |
+| Orphan entry: no inbound citation from another wiki entry | WARN | `scripts/lint.py` graph topology |
+| No outbound citation to another wiki entry | INFO | `scripts/lint.py` graph topology |
+| Shared anchor without a citation edge between entries | INFO | `scripts/lint.py` graph topology |
 | `url:` or `gist:` anchor missing `readwise:` field (`readwise-missing`) | WARN | `scripts/lint.py` — save to Readwise with `anchor-evidence` tag and backfill the document ID; fix via `uv run scripts/snapshot_anchors.py --apply --note "<paths.wiki>/<Title>.md"` |
 | Technical term in claim body not in vocabulary allowlist and not matching any wiki entry title (`unfounded-term`) | INFO | `scripts/lint.py` — add term to `scripts/wiki_vocabulary.txt` if common knowledge, or add a wiki entry, or add a parenthetical definition inline |
 | Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — run /promote Phase 4 or regenerate the shadow manually. Configured shadow paths live under `[paths.wiki_localized]` in `harness/paths.local.toml`. |
@@ -81,7 +81,7 @@ claiming exact identity or preference coverage.
 ### Phase 1a: Structural lint
 
 ```
-Bash: python3 scripts/lint.py --json
+Bash: uv run scripts/lint.py --json
 ```
 
 Read `wiki_dir`, `counts`, and `findings` using the Phase 0 finding fields.
@@ -104,7 +104,7 @@ For each ERROR-level finding: show the code, file path, and message verbatim. Do
 
 For WARN-level findings: show them but mark them as non-blocking.
 
-For INFO-level findings: roll them up into a one-line summary (e.g., "4 entries with no outbound `@cite`: consider adding cross-references") unless the user asks for the full list.
+Summarize INFO findings (e.g., "4 entries lack outbound citations") unless the user asks for the full list.
 
 **Staleness section** (from Phase 1b): present after the structural findings, under a separate heading. Group by category:
 - **stale** notes: list paths, suggest archiving to `<paths.archive>/`
@@ -119,11 +119,11 @@ For each fixable category, ask the user before acting:
 | Finding code | Fix | How |
 |---|---|---|
 | `slug-mismatch` | Rename file or edit H1 | Ask the user which side to change. Never rename without confirmation — downstream `@cite` targets key off the title. |
-| `parse-error` (e.g., missing `valid_at`, non-sequential `[Cn]`) | Edit the wiki entry | Route to the user; do not auto-edit wiki entries. |
+| `parse-error` (e.g., missing `valid_at`, duplicate claim IDs or invalid ranges) | Edit the wiki entry | Route to the user; do not auto-edit wiki entries. |
 | `duplicate-title` | Edit one of the H1 titles | Ask the user which note keeps the title. |
-| `dangling-cite` | Fix the `@cite` target or remove the marker | Surfaced under `parse-error` code (trust.py's resolver appends to `parse_errors`). Route to the user. |
-| `orphan-entry` | Add `@cite` markers from related entries | Suggest specific claims in other entries that could cite the orphan. The `shared-anchor-no-cite` findings often point to the right pairs. |
-| `shared-anchor-no-cite` | Add `@cite` between the pair | Show the shared anchor and suggest which direction the cite should flow (from the more general to the more specific claim). |
+| `dangling-cite` | Correct the citation target | Surfaced under `parse-error` code (trust.py's resolver appends to `parse_errors`). Route to the user. |
+| `orphan-entry` | Add inline citation references inside related claims | Suggest supported claim links using `protocols/wiki-schema.md`; shared-anchor findings can identify candidates. |
+| `shared-anchor-no-cite` | Add a supported citation reference | Show the shared anchor and propose the citing claim and target. A shared source alone does not establish dependence. |
 
 ### Phase 4: Rerun (if fixes applied)
 

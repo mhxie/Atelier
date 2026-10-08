@@ -18,7 +18,7 @@ in `protocols/epistemic-hygiene.md`.
 | L4: Locally certified | `<paths.wiki>/` | Location, not `#wiki` or `#compiled-truth`, identifies wiki entries. Only this subtree participates in trust propagation, bi-temporal anchoring, and wiki structural lint. |
 | L5: Foundation | Reserved for settled, textbook-level knowledge | No folder or active workflow yet. |
 
-`protocols/wiki-schema.md` owns L4 claims, anchors, `@cite` graph edges, and
+`protocols/wiki-schema.md` owns L4 claims, anchors, citation graph edges, and
 validation. `scripts/trust.py` walks only the wiki subtree and reports per-note
 scores; everything outside stays working knowledge or receipts. Paper IDs use
 `s2:`, `arxiv:`, or `doi:`; articles use `url:` or a Readwise document ID.
@@ -27,6 +27,14 @@ scores; everything outside stays working knowledge or receipts. Paper IDs use
 Promotion is opportunistic and upward: capture becomes working material,
 anchored recurring claims earn wiki entries, and curated receipts enter L3.
 Invalidation is additive through bi-temporal markers, not destructive demotion.
+
+`harness/paths.toml` owns machine-readable L1–L4 labels and logical path groups.
+After path changes, `scripts/zk_audit.py --sync-reflect-levels` exports the merged
+mapping to `$OV/.reflect/knowledge-levels.json`; ordinary audit reports drift.
+Reflect reads this versioned projection for note-header and list labels. The
+deepest matching tree or `raw` segment wins; file rules match exactly. Unmapped
+paths have no level. Localized wiki roots are L4 translations, not independently
+validated entries. A level label never replaces claim review status.
 
 ## Project Layout
 

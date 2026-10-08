@@ -54,3 +54,6 @@ atelier-mbp
 # Reflect OSS hub-note names (public product vocabulary, not user content).
 audio memos
 audio-memos
+
+# Retired trust.py index heading, public since b9aa165; the vault index borrows it.
+Wiki Index

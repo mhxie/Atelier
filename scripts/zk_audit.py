@@ -1,23 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only post-ingestion hygiene audit of $OV; heuristics, not repair authority.
-
-Checks missing domain READMEs/digests, archive overlap, root markdown orphans
-(except README.md), empty markdown, suspicious top-level directories, and the
-vault layout: a Git work tree outside file-sync folders whose raw/ and secure/
-folders (and root cache and archive, the only folder so named) are links into raw_store, files at or
-above reflect-open's backup size guard outside raw_store, plus Reflect titles that
-fall back to a filename another note shares, and syntax Reflect does not
-render (`_reflect.nonnative`). Archive empty stubs and archive
-duplicate titles are counted, not individually listed, to avoid drowning
-current ingestion debt.
-Individual checks explain their false-positive bias.
-
-Run `uv run scripts/zk_audit.py [--json]` for a human/JSON report. Advisory
-findings exit 0; IO errors exit 2. `--fix-links` only creates missing links
-into raw_store; it never moves or deletes. `--fix-large` moves each oversized
-file into its folder's raw/ link and repoints Markdown links to it. `_paths.vault_root()` requires $OV,
-with no relative fallback; domain names are discovered, never hardcoded.
-"""
+"""Audit $OV hygiene and Reflect compatibility; advisory findings exit 0, IO errors 2."""
 
 from __future__ import annotations
 
@@ -33,8 +15,8 @@ from pathlib import Path
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write, raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
-from _reflect import TitleIndex, backup_limit, nonnative, notes as reflect_notes, title_key, walk  # type: ignore[import-not-found]  # noqa: E402
+from _paths import atomic_write, knowledge_levels, raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
+from _reflect import TitleIndex, backup_limit, nonnative, notes as reflect_notes, title_issue, title_key, walk  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
 
@@ -95,6 +77,8 @@ class Report:
     large_files: list[Finding] = field(default_factory=list)
     duplicate_titles: list[Finding] = field(default_factory=list)
     duplicate_titles_archive_count: int = 0
+    title_format: list[Finding] = field(default_factory=list)
+    title_format_archive_count: int = 0
     archive_tasks: list[Finding] = field(default_factory=list)
     reflect_syntax: list[Finding] = field(default_factory=list)
     reflect_syntax_kinds: dict[str, int] = field(default_factory=dict)
@@ -115,10 +99,12 @@ class Report:
             + len(self.layout)
             + len(self.large_files)
             + len(self.duplicate_titles)
+            + len(self.title_format)
             + len(self.archive_tasks)
             + len(self.reflect_syntax)
             + self.empty_md_archive_count
             + self.duplicate_titles_archive_count
+            + self.title_format_archive_count
             + self.reflect_syntax_raw_count
         )
 
@@ -137,6 +123,8 @@ class Report:
                 "large_files": [f.to_dict() for f in self.large_files],
                 "duplicate_titles": [f.to_dict() for f in self.duplicate_titles],
                 "duplicate_titles_archive_count": self.duplicate_titles_archive_count,
+                "title_format": [f.to_dict() for f in self.title_format],
+                "title_format_archive_count": self.title_format_archive_count,
                 "archive_tasks": [f.to_dict() for f in self.archive_tasks],
                 "reflect_syntax": [f.to_dict() for f in self.reflect_syntax],
                 "reflect_syntax_kinds": self.reflect_syntax_kinds,
@@ -151,13 +139,7 @@ def _is_hidden(name: str) -> bool:
 
 
 def discover_working_domains(root: Path) -> list[Path]:
-    """Working-tier domains: top-level directories under $OV that are
-    neither hidden, infrastructure, nor a different-tier home.
-
-    A "domain" here is the unit the ingestion protocol mints: e.g.,
-    auto/, career/, finance/. Whether it has a raw/ subdir is incidental
-    (skeleton domains without raw/ still need a README).
-    """
+    """Discover working-tier domains, including skeletons without raw/ folders."""
     if not root.is_dir():
         return []
     out: list[Path] = []
@@ -182,16 +164,7 @@ def check_missing_readmes(domains: list[Path]) -> list[Finding]:
 
 
 def check_raw_without_digest(domains: list[Path]) -> list[Finding]:
-    """For each `<domain>/raw/<sub>/`, look for any .md file in the
-    working tier (anywhere under <domain>/ but not under raw/) whose
-    text mentions <sub> by name or as `raw/<sub>`.
-
-    Heuristic, not a parser: a digest can reference its source many
-    ways (wikilink, relative path, prose mention). We accept any
-    literal substring match. False negatives are possible (digest
-    refers to source by a synonym); false positives are unlikely
-    (matching on the exact subdir name).
-    """
+    """Match raw source folder names in working Markdown; synonym-only references may be missed."""
     out: list[Finding] = []
     for d in domains:
         raw_dir = d / "raw"
@@ -232,11 +205,7 @@ def check_raw_without_digest(domains: list[Path]) -> list[Finding]:
 
 
 def _normalize_token(s: str) -> str:
-    """Lowercase, strip an `-admin` / `_admin` / ` admin` suffix.
-
-    Lets `health-admin` overlap match `health/`, `finance-admin` match
-    `finance/`, etc. without enumerating user-specific suffixes.
-    """
+    """Lowercase and strip an admin suffix before comparing directory names."""
     s = s.strip().lower()
     for suffix in ("-admin", "_admin", " admin"):
         if s.endswith(suffix):
@@ -246,14 +215,7 @@ def _normalize_token(s: str) -> str:
 
 
 def check_archive_overlap(root: Path, domains: list[Path]) -> list[Finding]:
-    """Surface archive subtrees whose normalized name overlaps a current
-    working-tier domain. Pure surfacing: do not propose a target;
-    consolidation is per-subtree user judgment on the next manual pass.
-
-    Walks two archive levels: `archive/<bucket>/` and
-    `archive/<bucket>/<sub>/`. Matches by normalized substring in either
-    direction (working-tier name in archive name, or vice versa).
-    """
+    """Surface overlapping archive names across two levels; consolidation requires user judgment."""
     out: list[Finding] = []
     archive = root / tier_segments()["archive"]
     if not archive.is_dir():
@@ -301,10 +263,7 @@ def check_archive_overlap(root: Path, domains: list[Path]) -> list[Finding]:
 
 
 def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
-    """Return (root orphans except README.md, listed empty files, archive-empty count).
-
-    Archive stubs stay aggregate-only so old ingestion debt cannot drown current gaps.
-    """
+    """Return root orphans, empty files and an aggregate count of archive stubs."""
     if not root.is_dir():
         return [], [], 0
 
@@ -339,10 +298,7 @@ def check_root_orphans(root: Path) -> tuple[list[Finding], list[Finding], int]:
 
 
 def check_suspicious_dirs(root: Path) -> list[Finding]:
-    """Find top-level Finder duplicates, empty dirs, and eligible README-less skeletons.
-
-    Three entries clear a skeleton: avoid flagging a real domain still being built.
-    """
+    """Find Finder duplicates, empty directories and small README-less skeletons."""
     out: list[Finding] = []
     if not root.is_dir():
         return out
@@ -432,10 +388,7 @@ def check_layout(root: Path, store: Path | None) -> list[Finding]:
 
 
 def fix_links(root: Path, store: Path) -> list[Path]:
-    """Create the links check_layout reports missing; never moves or deletes.
-
-    Only inside a Git work tree, so a stale $OV cannot grow a stray vault.
-    """
+    """Create missing raw_store links only inside a Git worktree; never move or delete."""
     made: list[Path] = []
     if not (root / ".git").exists():
         return made
@@ -468,10 +421,7 @@ def check_large_files(root: Path, limit: int | None) -> list[Finding]:
 
 
 def fix_large(root: Path, store: Path, limit: int) -> list[tuple[Path, Path]]:
-    """Move oversized files into their folder's raw/ link, creating it, then repoint links.
-
-    Skips a file whose folder has a real raw/ (a layout finding) or whose name is taken.
-    """
+    """Move oversized files into raw/ and repoint links, preserving existing names and real directories."""
     from relink import LINK_RE, encode_href, mask_code, relative_path, unmask_code  # type: ignore[import-not-found]
 
     moved: list[tuple[Path, Path]] = []
@@ -511,39 +461,45 @@ def fix_large(root: Path, store: Path, limit: int) -> list[tuple[Path, Path]]:
 
 
 def check_duplicate_titles(root: Path) -> tuple[list[Finding], int]:
-    """Reflect-visible notes whose filename-fallback title another note shares.
-
-    Mirrors Reflect's catalog: hidden, .reflectignore'd (folder-name patterns
-    only), raw/, and secure/ folders, root daily notes, and symlinks are
-    skipped, so secure notes are never read. Setext H1s are
-    not parsed, so a note titled only by one is a false positive. Groups whose
-    only extra members sit under the archive tier are counted, not listed.
-    """
+    """Find duplicate Reflect titles without reading excluded notes; archive-only duplicates stay aggregated."""
     seg = tier_segments()
     archive, daily = root / seg["archive"], root / seg["daily_notes"]
-    groups: dict[str, list[tuple[Path, bool]]] = defaultdict(list)
+    groups: dict[str, list[Path]] = defaultdict(list)
     for note in reflect_notes(root):
         path = root / note.path
         if path.parent != daily:
-            groups[title_key(note.title or path.stem)].append((path, note.title is None))
+            groups[title_key(note.title or path.stem)].append(path)
     out: list[Finding] = []
     archive_only = 0
     for key, notes in sorted(groups.items()):
-        if len(notes) < 2 or all(not fallback for _, fallback in notes):
+        if len(notes) < 2:
             continue
-        if sum(not p.is_relative_to(archive) for p, _ in notes) < 2:
+        if sum(not p.is_relative_to(archive) for p in notes) < 2:
             archive_only += 1
             continue
-        out.append(Finding("duplicate_title", key, ", ".join(sorted(_rel(p) for p, _ in notes))))
+        out.append(Finding("duplicate_title", key, ", ".join(sorted(_rel(p) for p in notes))))
     return out, archive_only
 
 
-def check_archive_tasks(root: Path) -> list[Finding]:
-    """Archived notes with open `+ [ ]` lines outside code fences.
+def check_title_format(root: Path) -> tuple[list[Finding], int]:
+    """Non-daily opening H1 debt, with archive notes aggregated."""
+    seg = tier_segments()
+    archive, daily = Path(seg["archive"]), Path(seg["daily_notes"])
+    out: list[Finding] = []
+    archived = 0
+    for note in reflect_notes(root):
+        if note.path.is_relative_to(daily) or note.path.parts[0] == "assets":
+            continue
+        issue = title_issue((root / note.path).read_text(encoding="utf-8", errors="replace"), note.title)
+        if issue and note.path.is_relative_to(archive):
+            archived += 1
+        elif issue:
+            out.append(Finding("title_format", _rel(root / note.path), issue))
+    return out, archived
 
-    Reflect lists them as live tasks; demoting the note's `+` checkboxes to
-    `-` keeps the record and drops it from the Tasks view.
-    """
+
+def check_archive_tasks(root: Path) -> list[Finding]:
+    """Find archived '+' tasks still visible in Reflect, excluding code fences."""
     archive = Path(tier_segments()["archive"])
     out: list[Finding] = []
     for note in reflect_notes(root):
@@ -561,10 +517,7 @@ def check_archive_tasks(root: Path) -> list[Finding]:
 
 
 def check_reflect_syntax(root: Path) -> tuple[list[Finding], dict[str, int], int]:
-    """Reflect-visible notes using syntax reflect-open shows raw, ignores, or folds.
-
-    User-authored daily notes and raw inbox captures are counted, not listed.
-    """
+    """Audit unsupported Reflect syntax; daily notes and inbox captures stay aggregate-only."""
     seg = tier_segments()
     raw_tiers = [Path(seg["daily_notes"]), Path(seg["inbox"])]
     titles = TitleIndex(root)
@@ -586,15 +539,18 @@ def check_reflect_syntax(root: Path) -> tuple[list[Finding], dict[str, int], int
 
 
 def _rel(path: Path) -> str:
-    """Render a path relative to $OV if possible, else absolute.
-
-    Audit output is for the human reading the report, so showing
-    `auto/raw/Tesla...` is friendlier than the absolute Drive path.
-    """
+    """Render relative to $OV where possible, else absolute."""
     try:
         return "$OV/" + path.relative_to(OV).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _knowledge_levels_path(root: Path) -> Path:
+    path = root / ".reflect" / "knowledge-levels.json"
+    if path.parent.is_symlink() or path.is_symlink():
+        raise ValueError("Reflect knowledge levels must use a real in-vault .reflect directory and file")
+    return path
 
 
 def run_audit() -> Report:
@@ -606,8 +562,15 @@ def run_audit() -> Report:
     report.root_orphans, report.empty_md, report.empty_md_archive_count = check_root_orphans(OV)
     report.suspicious_dirs = check_suspicious_dirs(OV)
     report.layout = check_layout(OV, raw_store())
+    try:
+        levels_match = json.loads(_knowledge_levels_path(OV).read_text()) == knowledge_levels(OV)
+    except (OSError, ValueError):
+        levels_match = False
+    if not levels_match:
+        report.layout.append(Finding("layout", _rel(OV / ".reflect" / "knowledge-levels.json"), "Reflect knowledge levels missing, stale or symlinked; run --sync-reflect-levels after checking location"))
     report.large_files = check_large_files(OV, backup_limit(OV))
     report.duplicate_titles, report.duplicate_titles_archive_count = check_duplicate_titles(OV)
+    report.title_format, report.title_format_archive_count = check_title_format(OV)
     report.archive_tasks = check_archive_tasks(OV)
     report.reflect_syntax, report.reflect_syntax_kinds, report.reflect_syntax_raw_count = check_reflect_syntax(OV)
     return report
@@ -662,6 +625,8 @@ def format_human(report: Report) -> str:
             report.archive_tasks,
             "demote the note's `+ [ ]`/`+ [x]` to `-`, or move live items to a GTD quarter",
         ),
+        ("[11] Opening H1 titles", report.title_format,
+         f"+ {report.title_format_archive_count} archive notes (aggregated)" if report.title_format_archive_count else None),
         (
             "[9] Syntax Reflect does not render",
             report.reflect_syntax,
@@ -690,16 +655,16 @@ def format_human(report: Report) -> str:
         lines.append("")
 
     total = report.total()
-    arch = report.empty_md_archive_count + report.duplicate_titles_archive_count + report.reflect_syntax_raw_count
+    arch = report.empty_md_archive_count + report.duplicate_titles_archive_count + report.reflect_syntax_raw_count + report.title_format_archive_count
     actionable = total - arch
     if arch:
         summary = (
-            f"Summary: 11 categories, {actionable} actionable + {arch} aggregated "
+            f"Summary: 12 categories, {actionable} actionable + {arch} aggregated "
             f"= {total} total finding(s). Audit is advisory; no $OV content was modified."
         )
     else:
         summary = (
-            f"Summary: 11 categories, {total} total finding(s). "
+            f"Summary: 12 categories, {total} total finding(s). "
             "Audit is advisory; no $OV content was modified."
         )
     lines.append(summary)
@@ -719,6 +684,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="Emit JSON output.")
     parser.add_argument("--fix-links", action="store_true", help="Create missing links into raw_store, then audit.")
     parser.add_argument("--fix-large", action="store_true", help="Move oversized files into raw_store, then audit.")
+    parser.add_argument("--sync-reflect-levels", action="store_true", help="Export L1–L4 classification from the path registry, then audit.")
     args = parser.parse_args(argv)
 
     if not OV.is_dir():
@@ -729,6 +695,12 @@ def main(argv: list[str] | None = None) -> int:
             sys.stderr.write(msg + "\n")
         return 2
 
+    if args.sync_reflect_levels:
+        try:
+            atomic_write(_knowledge_levels_path(OV), json.dumps(knowledge_levels(OV), indent=2) + "\n")
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"zk_audit: {exc}\n")
+            return 2
     if args.fix_links and (store := raw_store()) is not None and store.is_dir():
         for link in fix_links(OV, store):
             sys.stderr.write(f"zk_audit: linked {_rel(link)}\n")

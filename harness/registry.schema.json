@@ -163,8 +163,25 @@
     },
     "harness/paths.toml": {
       "type": "object",
-      "required": ["paths"],
+      "required": ["paths", "knowledge_levels"],
       "properties": {
+        "knowledge_levels": {
+          "type": "object",
+          "required": ["1", "2", "3", "4"],
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[1-4]$": {
+              "type": "object",
+              "required": ["label", "paths"],
+              "additionalProperties": false,
+              "properties": {
+                "label": {"$ref": "#/$defs/text"},
+                "paths": {"$ref": "#/$defs/strings"},
+                "segments": {"$ref": "#/$defs/strings"}
+              }
+            }
+          }
+        },
         "paths": {
           "type": "object",
           "properties": {

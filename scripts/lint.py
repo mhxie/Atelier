@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Run corpus-level structural checks over the wiki.
-
-This complements ``trust.py``'s per-note validation with duplicate-title,
-slug, graph-topology, vocabulary, shadow, and evidence checks. Anchor dates
-are note-local creation dates, so cross-note date differences are valid.
-Only ERROR findings make the command fail.
-"""
+"""Check wiki corpus structure; only ERROR findings fail the command."""
 
 from __future__ import annotations
 
@@ -24,6 +18,7 @@ from trust import (  # noqa: E402
     BARE_CITE_RE,
     FENCE_CLOSE_RE,
     FENCE_OPEN_RE,
+    REFERENCE_RE,
     WIKI_DIR,
     WikiNote,
     _resolve_cites,
@@ -112,12 +107,7 @@ def check_slug_alignment(notes: list[WikiNote]) -> list[Finding]:
 
 
 def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
-    """Graph-level checks over the @cite / @anchor network.
-
-    Inspired by llm_wiki's graph-insights: detect orphan entries, entries
-    with no outbound cites, and entries that share @anchor sources but lack
-    @cite edges between them.
-    """
+    """Find orphan entries, unciting entries and unlinked entries sharing anchor sources."""
     findings: list[Finding] = []
     ok_notes = [n for n in notes if n.integrity_ok() and n.title]
 
@@ -134,9 +124,11 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
     for note in ok_notes:
         for claim in note.claims:
             for c in claim.cites:
+                if c.fields.get("_provenance_only"):
+                    continue
                 target_title = c.fields.get("_cite_title", "")
-                target_path = title_to_path.get(target_title)
-                if target_path and target_path != note.path:
+                target_path = Path(c.fields["_cite_path"]) if "_cite_path" in c.fields else title_to_path.get(target_title)
+                if target_path in inbound and target_path != note.path:
                     outbound[note.path].add(target_path)
                     inbound[target_path].add(note.path)
 
@@ -148,7 +140,7 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                     "orphan-entry",
                     note.path.as_posix(),
                     f"no other wiki entry cites `{note.title}` — "
-                    f"add @cite markers from related entries to enable trust propagation",
+                    f"consider inline citation references inside supported claims of related entries",
                 )
             )
 
@@ -159,7 +151,7 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                     "INFO",
                     "no-outbound-cite",
                     note.path.as_posix(),
-                    f"`{note.title}` does not @cite any other wiki entry",
+                    f"`{note.title}` does not cite any other wiki entry",
                 )
             )
 
@@ -192,7 +184,7 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
                         "shared-anchor-no-cite",
                         f"{pa.as_posix()} + {pb.as_posix()}",
                         f"`{title_a}` and `{title_b}` share @anchor `{anchor_id}` "
-                        f"but are not @cite-linked — consider adding a cross-reference",
+                        f"but have no citation link; consider an inline reference where one claim supports another",
                     )
                 )
 
@@ -200,11 +192,7 @@ def check_graph_topology(notes: list[WikiNote]) -> list[Finding]:
 
 
 def load_vocabulary() -> set[str]:
-    """Load the term allowlist from wiki_vocabulary.txt.
-
-    Returns a set of lowercased terms. Missing file returns an empty set
-    (the check degrades gracefully rather than erroring).
-    """
+    """Load lowercase allowed terms; a missing vocabulary returns an empty set."""
     if not VOCABULARY_PATH.exists():
         return set()
     terms: set[str] = set()
@@ -217,9 +205,7 @@ def load_vocabulary() -> set[str]:
 
 
 def _strip_anchors_and_cites(lines: list[str]) -> list[str]:
-    """Return only prose lines from a claim body, excluding fenced
-    ``anchors`` blocks and bare @cite lines.  These regions contain
-    structured identifiers that should not be scanned for jargon."""
+    """Exclude structured evidence from prose scanned for jargon."""
     result: list[str] = []
     in_fence = False
     for line in lines:
@@ -232,18 +218,12 @@ def _strip_anchors_and_cites(lines: list[str]) -> list[str]:
             continue
         if BARE_CITE_RE.match(line):
             continue
-        result.append(line)
+        result.append(REFERENCE_RE.sub("", line))
     return result
 
 
 def _has_inline_explanation(text: str, term: str, window: int = 80) -> bool:
-    """Heuristic: does *term* appear within *window* characters before
-    an opening parenthesis that likely contains a definition?
-
-    Examples that pass:
-        "SIMD (Single Instruction, Multiple Data)"
-        "OCC (optimistic concurrency control)"
-    """
+    """Look for a parenthetical definition within window characters after term."""
     idx = 0
     term_lower = term.lower()
     text_lower = text.lower()
@@ -260,14 +240,7 @@ def _has_inline_explanation(text: str, term: str, window: int = 80) -> bool:
 
 
 def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
-    """INFO-level check: flag technical terms in wiki claim bodies that are
-    not (a) in the vocabulary allowlist, (b) matching a wiki entry title,
-    or (c) explained inline with a parenthetical definition.
-
-    This is a readability nudge, not a gate. It helps ensure that every
-    non-trivial technical term is grounded somewhere a CS-undergrad reader
-    can find it.
-    """
+    """Informational readability check for jargon lacking a vocabulary entry, wiki title or definition."""
     findings: list[Finding] = []
     vocab = load_vocabulary()
     if not vocab:
@@ -366,12 +339,7 @@ def check_unfounded_terms(notes: list[WikiNote]) -> list[Finding]:
 
 
 def check_readwise_backfill(notes: list[WikiNote]) -> list[Finding]:
-    """WARN on url: and gist: anchors missing a readwise: field.
-
-    Per protocols/wiki-schema.md § Anchor Evidence Resolution, the readwise:
-    field is recommended (not required) on url: and gist: anchors.  Its
-    absence means the evidence is harder to retrieve if the URL goes down.
-    """
+    """Warn on URL/gist anchors lacking the recommended Readwise fallback."""
     skip_prefixes: list[str] = []
     if READWISE_SKIP_FILE.exists():
         for line in READWISE_SKIP_FILE.read_text(encoding="utf-8").splitlines():
@@ -415,7 +383,7 @@ def check_shadow_drift(notes: list[WikiNote]) -> list[Finding]:
         if not note.title:
             continue
         for shadow_dir in shadow_dirs:
-            sh_path = shadow_dir / note.path.name
+            sh_path = shadow_dir / note.path.relative_to(WIKI_DIR)
             lang_tag = shadow_dir.name
             if not sh_path.exists():
                 findings.append(

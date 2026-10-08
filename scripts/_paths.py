@@ -1,8 +1,4 @@
-"""Registry-backed path helpers for the Atelier vault.
-
-Paths resolve through the committed registry plus its optional local overlay.
-An unset ``$OV`` fails loudly; no helper falls back to a relative vault.
-"""
+"""Vault paths from the canonical registry and optional local overlay."""
 
 from __future__ import annotations
 
@@ -18,13 +14,7 @@ from pathlib import Path
 
 
 class PathsError(SystemExit):
-    """Path-registry failure.
-
-    Subclasses SystemExit so an unhandled error still exits a CLI with the
-    message (the historical behavior), while libraries, smoke checks, and
-    in-process tests can catch a TYPED error instead of a bare SystemExit
-    string killing the host process.
-    """
+    """Catchable registry error retaining the CLI's SystemExit behavior."""
 
 
 def reset() -> None:
@@ -35,11 +25,7 @@ def reset() -> None:
 
 @lru_cache(maxsize=1)
 def vault_root() -> Path:
-    """Return $OV as an absolute Path. Exit with a clear error if unset.
-
-    Refusing to fall back to a relative 'zk/' default because that silently
-    creates stray directories wherever the script runs.
-    """
+    """Return absolute $OV; an unset value fails instead of creating a relative vault."""
     ov = os.environ.get("OV")
     if not ov:
         prog = Path(sys.argv[0]).name if sys.argv else "<script>"
@@ -58,15 +44,7 @@ def _atelier_root() -> Path:
 
 @lru_cache(maxsize=1)
 def _registry() -> dict:
-    """Load harness/paths.toml, layer harness/paths.local.toml on top.
-
-    Returns the merged `[paths]` table. Missing files are tolerated: an
-    OSS user without a `paths.local.toml` just gets the canonical map.
-
-    Layering semantics: scalar keys are overridden; the
-    `wiki_localized` sub-table is unioned (per-user adds languages
-    without losing canonical entries, which are empty by default).
-    """
+    """Merge local scalar overrides and unioned wiki_localized entries into [paths]."""
     canonical_path = _atelier_root() / "harness" / "paths.toml"
     if not canonical_path.is_file():
         raise PathsError(
@@ -93,21 +71,14 @@ def _registry() -> dict:
 
 
 def _resolve_segment(segment: str, root: Path | None = None) -> Path:
-    """Resolve a registry segment to an absolute Path under `root` ($OV by default).
-
-    Absolute segments (rare; used for sandbox overrides) pass through.
-    """
+    """Resolve under root/$OV, preserving absolute sandbox overrides."""
     if segment.startswith("/"):
         return Path(segment).expanduser().resolve()
     return (root if root is not None else vault_root()) / segment
 
 
 def tier(name: str) -> Path:
-    """Return the absolute Path for a registry tier name.
-
-    Exits with a clear error if the tier is unknown so typos surface
-    immediately rather than silently writing to the wrong location.
-    """
+    """Resolve a tier to an absolute path; unknown names fail."""
     reg = _registry()
     if name not in reg:
         known = sorted(k for k in reg if k != "wiki_localized")
@@ -127,11 +98,7 @@ def tier(name: str) -> Path:
 
 
 def tier_files(name: str, pattern: str = "*.md") -> list[Path]:
-    """Return recursive matches sorted by filename/path, or [] for a missing tier.
-
-    Fission puts files in buckets: plain glob silently misses them. Filename
-    sorting keeps date-prefixed files chronological across those buckets.
-    """
+    """Match recursively across buckets, ordered by filename/path; missing tiers return []."""
     root = tier(name)
     if not root.is_dir():
         return []
@@ -142,28 +109,51 @@ def tier_files(name: str, pattern: str = "*.md") -> list[Path]:
 
 
 def tier_segments() -> dict[str, str]:
-    """Return the merged {name: segment} mapping (no path resolution).
-
-    Useful for lint checks that compare segments against directory names
-    in committed markdown.
-    """
+    """Return merged registry segments without resolving paths."""
     reg = _registry()
     return {k: v for k, v in reg.items() if isinstance(v, str)}
 
 
 def wiki_dirs() -> list[Path]:
-    """Return the list of wiki directories: primary + localized.
-
-    Order: primary `wiki` first, then localized entries in dict order
-    (Python 3.7+ preserves insertion order). Callers that just need the
-    primary directory should call `tier("wiki")` instead.
-    """
+    """Return the primary wiki followed by localized directories in registry order."""
     reg = _registry()
     dirs = [_resolve_segment(reg["wiki"])]
     for segment in reg.get("wiki_localized", {}).values():
         if isinstance(segment, str):
             dirs.append(_resolve_segment(segment))
     return dirs
+
+
+def knowledge_levels(root: Path | None = None) -> dict:
+    """Export Reflect's derived classification without reading note contents."""
+    root = root if root is not None else vault_root()
+    with (_atelier_root() / "harness" / "paths.toml").open("rb") as handle:
+        levels = tomllib.load(handle)["knowledge_levels"]
+    registry, definitions, rules = _registry(), [], []
+    for number, spec in levels.items():
+        level = int(number)
+        definitions.append({"level": level, "label": spec["label"]})
+        entries = [(registry[name], {}) for name in spec["paths"]]
+        if level == 4:
+            entries += [(path, {"role": "shadow"}) for path in registry["wiki_localized"].values()]
+        for segment, extra in entries:
+            if ".." in Path(segment).parts or "\\" in segment or ":" in segment:
+                raise PathsError(f"ERROR: invalid knowledge path: {segment!r}")
+            try:
+                path = (root / segment).relative_to(root).as_posix()
+            except ValueError:
+                continue  # Out-of-vault absolute overrides have no graph-relative rule.
+            if path == ".":
+                raise PathsError("ERROR: a knowledge tier cannot classify the whole vault")
+            rules.append({"path": path, "match": "tree", "level": level, **extra})
+        rules += [{"path": segment, "match": "segment", "level": level} for segment in spec.get("segments", [])]
+    assignments = {}
+    for rule in rules:
+        key = (rule["match"], rule["path"])
+        if key in assignments and assignments[key] != rule:
+            raise PathsError(f"ERROR: conflicting knowledge levels for {rule['path']!r}")
+        assignments[key] = rule
+    return {"version": 1, "levels": definitions, "rules": list(assignments.values())}
 
 
 def raw_store() -> Path | None:
@@ -206,12 +196,7 @@ _DATE_IN_TEXT = re.compile(r"\d{4}-\d{2}-\d{2}")
 
 
 def parse_iso_date(value: object):
-    """`YYYY-MM-DD` (a longer ISO timestamp is truncated) to a date, else None.
-
-    Seven scripts each parsed dates with their own None-vs-exit failure mode;
-    the shared contract is: garbage in, None out, and the caller decides
-    whether None is fatal.
-    """
+    """Parse YYYY-MM-DD or an ISO timestamp's date prefix; invalid input returns None."""
     from datetime import date
 
     if value is None:
@@ -226,11 +211,7 @@ def parse_iso_date(value: object):
 
 
 def date_in_text(value: object):
-    """First `YYYY-MM-DD` found anywhere in the text, else None.
-
-    The search sibling of `parse_iso_date`: five scripts each carried their own
-    filename or date-column regex with this same skip-on-miss contract.
-    """
+    """Return the first YYYY-MM-DD in text, else None."""
     if value is None:
         return None
     match = _DATE_IN_TEXT.search(str(value))
@@ -238,15 +219,7 @@ def date_in_text(value: object):
 
 
 def fmt(p: Path) -> str:
-    """Render under-vault paths as '$OV/<rel>' for token-efficient output.
-
-    Use in stdout, JSON output, error messages: anywhere paths reach the
-    orchestrator or user. Internal file operations should keep using the
-    absolute Path object directly.
-
-    Falls through to the absolute path string if `p` is not under the vault
-    (so logs of out-of-vault paths still resolve unambiguously).
-    """
+    """Render under-vault paths as $OV/<rel>; preserve absolute paths elsewhere."""
     try:
         rel = p.resolve().relative_to(vault_root())
         return f"$OV/{rel.as_posix()}"
@@ -254,11 +227,7 @@ def fmt(p: Path) -> str:
         return p.as_posix()
 
 
-# The vault lives on a Google Drive File Provider mount that intermittently
-# answers a read or an flock with EDEADLK while it materializes or syncs the
-# file. It is transient, not a real deadlock: the same path reads cleanly a
-# moment later. Untreated it has failed routine lock acquisition and aborted a
-# nightly sweep mid-plan.
+# File Provider may transiently return EDEADLK while materializing a file.
 TRANSIENT_MOUNT_ERRNOS = frozenset({errno.EDEADLK, errno.EAGAIN})
 
 

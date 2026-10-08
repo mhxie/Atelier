@@ -20,7 +20,7 @@ Applies to: anything written collaboratively with the system, anything the syste
 
 ### Wiki entry (location-based)
 
-A note that lives under `<paths.wiki>/` and follows the **wiki schema** (defined in `protocols/wiki-schema.md`): explicit `## Claims` section, each claim carrying its own anchor set, structured `@anchor` / `@cite` / `@pass` markers with bi-temporal `valid_at` / `invalid_at` semantics, and structural integrity verified by lint. **The certification is the location, not a tag.** Anything in `<paths.wiki>/` is a wiki entry by definition, and the trust engine treats it as one. No `#compiled-truth` tag, no `#wiki` tag — the directory walk is the contract.
+A note under `<paths.wiki>/` that follows `protocols/wiki-schema.md`: explicit claims, per-claim anchors and citation references, reviewer records, temporal validity, and lint-verified structural integrity. **Location is the certification.** Every entry in that directory participates in the trust graph; tags do not change eligibility.
 
 Applies to: notes the user wants the system to treat as authoritative in the local-first knowledge layer. These are the only notes that participate in TrustRank propagation.
 
