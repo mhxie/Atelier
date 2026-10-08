@@ -132,7 +132,7 @@ uv run scripts/routine_digest.py ack --manifest "$SCRATCH/routine-batch.json" --
 ```
 
 Run the same command without `--dry-run` only after explicit approval. Acking
-means reviewed, not merely displayed. Do not mail or write a digest artifact
+means reviewed, not merely displayed. Do not write a digest note
 from this lane.
 
 ### Recurring obligations

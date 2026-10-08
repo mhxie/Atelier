@@ -49,16 +49,17 @@ points at the canonical sources and adds only what is Codex-native.
   then the pinned QMD dependency.
   `sources/semantic.md` owns setup, scopes, and the bounded JSON contract.
   Queries use cached models only; downloads require explicit initialization.
-- Linked ledger tasks use `scripts/todos.py check` and `sync --file <quarter>.md`
+- Vault title/rendering hygiene: `scripts/zk_audit.py`; naming: `protocols/repo-conventions.md`. Linked ledger tasks use `scripts/todos.py check` and `sync --file <quarter>.md`
   (preview; `--apply` writes); see `protocols/local-first-architecture.md`.
+- Wiki articles: `protocols/wiki-schema.md` governs creation, edits and metadata-driven localized titles; `scripts/trust.py` reads canonical identities, bounded claims and evidence. Curator preserves identity and review history; Forgetter reads bounded claims. L1–L4 labels sync through `zk_audit.py --sync-reflect-levels`; `protocols/local-first-architecture.md` owns the contract.
 - Route context packs selected repository profiles and registered session logs
   with pinned Repomix; `protocols/session-continuity.md` owns selection and ceilings.
 - Reflection's energy and exploration intents share
   `skills/daily-reflection/SKILL.md` while keeping their selected context.
   That procedure and `protocols/session-log.md` own the branches and compact logs.
-- `$digest` uses `collect --json` then `write` with preinstalled markdown-it-py
-  and local MJML; optional quota comes from CodexBar OAuth JSON. The shared
-  command owns setup, offline boundaries, and the three-edition overdue TODO limit; never sync during a run.
+- `$digest` uses `collect --json` then `write` into one Reflect-native note; the
+  scheduled `daily-digest` routine uses configured CodexBar sources and compact quota tables. The shared command
+  owns setup, offline boundaries, approval before a rewrite, and the three-edition overdue TODO limit; never sync during a run.
 - Reading feedback connects Curate, Read, Introspect, and explicit policy evaluation through
   `protocols/decision-ledger.md` → Reading feedback loop. Use its typed
   `decisions.py` helpers for compact event batches and stored policy IDs;
@@ -79,13 +80,13 @@ points at the canonical sources and adds only what is Codex-native.
   recent Prefect state with `uv run --frozen python scripts/routine_status.py`.
   `scripts/cron_spec.py` uses Prefect's cron engine for health-check dates and cadence.
   The transfer procedure is in `scripts/launchd/README.md`: stop every source
-  scheduler before loading the Prefect deployment service. Runtime and adapter
-  ownership is documented in `protocols/runtime-adapters.md`; ordinary artifact
-  evidence and shared receipt validation live in `protocols/remote-routines.md`.
+  scheduler before loading the Prefect deployment service. Sandbox path handling lives in
+  `scripts/routine_adapter.py`; runtime ownership follows `protocols/runtime-adapters.md`.
+  Artifact evidence and shared receipt validation live in `protocols/remote-routines.md`.
   Connector discovery before reporting missing inputs follows
   `routines/_adapters/archived-prompt/PROCEDURE.md`.
   Autoevo drafts only in its isolated workspace; the trusted parent owns its
-  plain-file vault writes and single structured result (`protocols/autoevo.md`).
+  plain-file vault writes and structured result; notes require applied changes or fresh triage (`protocols/autoevo.md`).
 - Private routine mappings, tools, routines, digest declarations, and skills
   stay under their registered `$OV` roots. Classification and activation live
   in `protocols/components.md`; remote execution and digest context live

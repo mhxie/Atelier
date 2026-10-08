@@ -125,29 +125,6 @@ required_plugins = []
 optional_plugins = []
 allowed_adapters = ["archived-prompt"]
 
-# Readwise and optional CodexBar OAuth reads plus deterministic self-mail need
-# shell egress; retain the filesystem fence, disabled web search, and no plugins.
-[profiles.local-digest-mail]
-surface = "local"
-sandbox = "workspace-write"
-atelier_access = "read"
-web_search = "disabled"
-shell_network = "enabled"
-user_config = "ignore"
-timeout_seconds = 1800
-reasoning_effort = "medium"
-permissions = [
-  "atelier:read",
-  "vault:read-write",
-  "readwise:read",
-  "quota:read",
-  "mail:send-self",
-]
-required_clis = ["python3", "readwise", "security"]
-required_plugins = []
-optional_plugins = []
-allowed_adapters = ["archived-prompt"]
-
 [profiles.cloud-drive-research]
 surface = "cloud"
 web_search = "live"

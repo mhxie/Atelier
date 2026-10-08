@@ -6,6 +6,7 @@ from __future__ import annotations
 import sys
 
 import json
+import os
 import re
 import tomllib
 from dataclasses import dataclass
@@ -32,12 +33,6 @@ DEFAULT_MAX_FILES = 200
 
 MAX_CONTEXT_SOURCES = 8
 _CONTEXT_KEY = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
-
-# Gmail clips a message past roughly 102 KB and hides the rest behind a "View
-# entire message" link. That is a warning, not a failure: the document is
-# ordered so the clipped tail is the source index, which is navigation rather
-# than content. Worth reporting so a runaway window is visible.
-GMAIL_CLIP_BYTES = 102_000
 
 # Default lane for a routine that declares none: keyed on the first segment of
 # its output_dir. Unknown segments title-case themselves.
@@ -70,10 +65,6 @@ class Routine:
     cron: str = ""
     execution: str = "remote"
     max_lines: int = DEFAULT_ROUTINE_LINES
-    # True only when the row itself says `include = false`; the default
-    # exclusion of maintenance routines does not count. `write` uses this to
-    # find the digest's own row when no --routine is given.
-    excluded_explicitly: bool = False
     context: str | None = None
 
 def load_routines(ov: Path) -> list[Routine]:
@@ -128,7 +119,6 @@ def load_routines(ov: Path) -> list[Routine]:
                 cron=str(row.get("cron") or ""),
                 execution=str(row.get("execution") or "remote"),
                 max_lines=max_lines,
-                excluded_explicitly=digest_cfg.get("include") is False,
                 context=context,
             )
         )
@@ -201,50 +191,40 @@ def deep_read_lane_gap(deep_read: Any, manifest: dict[str, Any]) -> str | None:
         "deep_read 至少留一条给研究方向 (entry.lane = \"Research\")"
     )
 
-def artifact_name(manifest: dict[str, Any]) -> str:
-    window = manifest.get("window", {})
-    mode = str(manifest.get("mode", "weekly"))
-    return f"{window.get('until', 'unknown')}-{mode}-digest.html"
+def note_path(ov: Path, manifest: dict[str, Any]) -> Path:
+    """`<paths.digest>/YYYY-MM/<until>-<daily|weekly|backlog>-digest.md`, the one place a note lands."""
+    until = str((manifest.get("window") or {}).get("until") or "")
+    kind = "backlog" if manifest.get("selection") == "unacked" else str(manifest.get("mode") or "")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", until) or kind not in ("daily", "weekly", "backlog"):
+        raise SystemExit("manifest needs a daily or weekly mode and a YYYY-MM-DD window.until")
+    return ov / tier_segments()["digest"] / until[:7] / f"{until}-{kind}-digest.md"
 
-def resolve_output_dir(ov: Path, routine_name: str = "") -> Routine:
-    """Find the digest routine's own row, and refuse to run without an exclusion.
+def routine_files(ov: Path, routine: Routine) -> list[Path]:
+    """A row's matching files by name, never the digest's own notes, however the row reaches them.
 
-    A digest that ingests its own previous output compounds: yesterday's
-    document becomes today's source, and its headline outranks the real
-    findings. The registry already has the switch for this (`include = false`),
-    so the check is whether it was actually set, not whether we can work around
-    it here.
-
-    Without a name, the row is inferred: the registry is private config and the
-    routine's name is not exported into the sandbox, so the procedure cannot
-    state it. Exactly one row carrying an explicit `include = false` is the
-    digest's own; zero or several is an error naming the fix, never a guess.
+    The digest folder is matched by identity (device and inode), not by spelling,
+    so a differently cased, symlinked, or absolute output_dir cannot read it.
     """
-    routines = load_routines(ov)
-    if not routine_name:
-        excluded = [routine for routine in routines if routine.excluded_explicitly]
-        if len(excluded) == 1:
-            return excluded[0]
-        if not excluded:
-            raise SystemExit(
-                "no private routine carries digest = { include = false }; "
-                "set it on the digest routine's row or pass --routine"
-            )
-        names = ", ".join(sorted(routine.name for routine in excluded))
-        raise SystemExit(
-            f"several routines are excluded from the digest ({names}); "
-            "pass --routine to say which one writes it"
-        )
-    for routine in routines:
-        if routine.name != routine_name:
-            continue
-        if routine.include:
-            raise SystemExit(
-                f"routine {routine_name!r} writes the digest but is not excluded from it; "
-                "set digest = { include = false } on its private registry row"
-            )
-        return routine
-    raise SystemExit(f"routine {routine_name!r} has no private registry row")
+    directory = ov / routine.output_dir
+    if not directory.is_dir():
+        return []
+    try:
+        own = os.stat(ov / tier_segments()["digest"])
+    except OSError:  # no digest folder yet, so no note to keep out
+        own = None
+    seen: dict[Path, bool] = {}
+
+    def inside(folder: Path) -> bool:
+        if folder not in seen:
+            try:
+                found = os.path.samestat(os.stat(folder), own)
+            except OSError:
+                found = False
+            seen[folder] = found or (folder.parent != folder and inside(folder.parent))
+        return seen[folder]
+
+    return sorted((path for path in directory.glob(routine.file_pattern)
+                   if own is None or not inside(path.resolve().parent)), key=lambda path: path.name)
 
 def manifest_names_by_dir(manifest: dict[str, Any]) -> dict[str, set[str]]:
     """Filenames the manifest actually carries, keyed by their directory."""
@@ -280,7 +260,7 @@ def hidden_by_ack(
             continue
         count = sum(
             1
-            for path in directory.glob(routine.file_pattern)
+            for path in routine_files(ov, routine)
             if before < path.name <= after and path.name not in shown
         )
         if count:

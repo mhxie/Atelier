@@ -1,7 +1,7 @@
 {
   "name": "atelier-local-tools",
   "private": true,
-  "description": "Pinned local retrieval, context, and email tools; Python owns the Atelier CLI.",
+  "description": "Pinned local retrieval and context tools; Python owns the Atelier CLI.",
   "engines": { "node": ">=22" },
-  "dependencies": { "@tobilu/qmd": "2.8.3", "htmlparser2": "9.1.0", "mjml": "5.4.0", "node-llama-cpp": "3.20.0", "repomix": "1.18.0" }
+  "dependencies": { "@tobilu/qmd": "2.8.3", "htmlparser2": "9.1.0", "node-llama-cpp": "3.20.0", "repomix": "1.18.0" }
 }

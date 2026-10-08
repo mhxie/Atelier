@@ -351,13 +351,9 @@ class AdapterTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertEqual(result.stdout, repr(supplied or "") + "\n")
 
-    def test_digest_quota_permission_is_optional_and_does_not_enable_weather(self):
-        profiles = adapter._load_profiles(ROOT)
-        profile = profiles["local-digest-mail"]
-        self.assertIn("quota:read", profile["permissions"])
-        self.assertNotIn("quota:read", profiles["local-digest"]["permissions"])
-        self.assertNotIn("codexbar", profile["required_clis"])
-        self.assertEqual((profile["web_search"], profile["shell_network"]), ("disabled", "enabled"))
+    def test_the_local_digest_profile_cannot_read_quota(self) -> None:
+        # The model uses the cache; the process routine owns live quota collection.
+        self.assertNotIn("quota:read", adapter._load_profiles(ROOT)["local-digest"]["permissions"])
 
     def test_success_writes_verified_receipt_not_execution_state(self) -> None:
         fixture = Fixture()
@@ -520,6 +516,23 @@ class AdapterTests(unittest.TestCase):
                         fixture.execute(payload, flow_run_id="flow-replay")
                 launch.assert_not_called()
 
+    def test_failed_envelope_preserves_bounded_screened_reason(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        spec = adapter.resolve_model("sample", root=fixture.root, environ=fixture.env)
+        result = fixture.root / "result.json"
+        for summary in ("feed unavailable", "feed unavailable\nOPENAI_API_KEY=sk-" + "X" * 48 + "\n" + "detail" * 200,
+                        "feed unavailable\nDEMO_TOKEN=" + "X" * 48,
+                        "feed unavailable\nDEMO_TOKEN=\n" + "X" * 48):
+            with self.subTest(summary=summary[:16]):
+                result.write_text(json.dumps({"routine": "sample", "outcome": "failed", "summary": summary}))
+                with self.assertRaises(adapter.ExecutionError) as failed:
+                    adapter._model_result(result, spec, vault=fixture.vault, started_at="")
+                message = str(failed.exception)
+                self.assertIn("feed unavailable" if summary == "feed unavailable" else "credential screening", message)
+                self.assertNotIn("X" * 48, message)
+                self.assertLessEqual(len(message), len("model did not report a successful domain outcome: ") + 500)
+
     def test_artifact_binding_is_computed_by_the_parent(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
@@ -600,6 +613,51 @@ class AdapterTests(unittest.TestCase):
                     result = subprocess.run(["/bin/sh", "-c", check], env=supplied, timeout=3)
                     self.assertEqual(result.returncode, 1 if absent else 0)
 
+    def test_cache_grant_uses_only_the_registered_directory_and_explicit_writer(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        spec = adapter.resolve_model("sample", root=fixture.root, environ=fixture.env)
+        external = fixture.root.parent / "raw-store" / "cache"
+        external.mkdir(parents=True)
+        linked = fixture.vault / "cached-inputs"
+        linked.symlink_to(external, target_is_directory=True)
+        with mock.patch.object(adapter, "tier_segments", return_value={"cache": "cached-inputs"}):
+            for writers, permissions, sandbox, extra in (("sample", ["vault:read-write"], "workspace-write", True),
+                    ("", ["vault:read-write"], "workspace-write", False),
+                    ("sample-other", ["vault:read-write"], "workspace-write", False),
+                    ("sample", ["vault:read"], "workspace-write", False),
+                    ("sample", ["vault:read-write-extra"], "workspace-write", False),
+                    ("sample", ["vault:read-write"], "danger-full-access", False)):
+                spec.profile_values.update(permissions=permissions, sandbox=sandbox)
+                with self.subTest(writers=writers, permissions=permissions, sandbox=sandbox), mock.patch.dict(
+                        os.environ, {"ATELIER_CACHE_WRITERS": writers}):
+                    argv = adapter.codex_argv(spec, root=fixture.root, vault=fixture.vault,
+                                              cwd=fixture.root, output=fixture.root / "out")
+                    granted = [argv[i + 1] for i, flag in enumerate(argv[:-1]) if flag == "--add-dir"]
+                    self.assertEqual(granted, [str(fixture.vault)] + ([str(external.resolve())] if extra else []))
+                    self.assertNotIn(str(external.parent), granted)
+                    self.assertNotIn(str(external.parent / "sibling"), granted)
+            linked.unlink()
+            linked.mkdir()
+            spec.profile_values.update(permissions=["vault:read-write"], sandbox="workspace-write")
+            with mock.patch.dict(os.environ, {"ATELIER_CACHE_WRITERS": "sample"}):
+                argv = adapter.codex_argv(spec, root=fixture.root, vault=fixture.vault,
+                                          cwd=fixture.root, output=fixture.root / "out")
+            self.assertEqual(argv.count("--add-dir"), 1)
+
+    def test_lexical_parent_traversal_is_rejected_even_when_the_artifact_is_inside_outputs(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        spec = adapter.resolve_model("sample", root=fixture.root, environ=fixture.env)
+        (fixture.vault / "outputs").mkdir()
+        (fixture.vault / "outputs" / f"{CYCLE}.md").write_text("existing artifact")
+        result = fixture.root / "result.json"
+        result.write_text(json.dumps({"routine": "sample", "outcome": "delivered",
+                                     "output_file": f"outputs/../outputs/{CYCLE}.md",
+                                     "summary": "done", "skipped_inputs": []}))
+        with self.assertRaisesRegex(adapter.ExecutionError, "unsafe"):
+            adapter._model_result(result, spec, vault=fixture.vault, started_at="")
+
     def test_a_routine_without_a_model_keeps_the_default_invocation(self) -> None:
         # Support is opt-in: an undeclared model must not change today's argv.
         fixture = Fixture()
@@ -651,14 +709,13 @@ class AdapterTests(unittest.TestCase):
         payload["model"] = "demo_identity"
         self.assertNotIn("vendor/demo-1", json.dumps(payload))
 
-    def test_tool_caches_and_claude_credentials_refresh_before_sandbox_entry(self) -> None:
-        # CodexBar cannot refresh Claude OAuth, so quota:read refreshes it unsandboxed.
+    def test_tool_cache_refreshes_before_sandbox_entry(self) -> None:
         fixture = Fixture()
         self.addCleanup(fixture.close)
         payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
         spec = adapter.ModelSpec.from_payload(payload)
         spec.profile_values["permissions"] += ["readwise:read", "quota:read"]
-        for tool in ("readwise", "claude"):
+        for tool in ("readwise",):
             (fixture.bin / tool).write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             (fixture.bin / tool).chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
@@ -669,10 +726,9 @@ class AdapterTests(unittest.TestCase):
         kwargs = dict(env=fixture.env, cwd=fixture.root, seconds=30, input_text="")
         self.assertEqual(execute.call_args_list, [
             mock.call(["readwise", "--refresh", "--version"], **kwargs),
-            mock.call(["claude", "auth", "status", "--json"], **kwargs),
         ])
 
-        spec.profile_values["permissions"] = ["quota:read-extra"]
+        spec.profile_values["permissions"] = ["readwise:read-extra"]
         with mock.patch.object(adapter, "execute_process") as execute:
             adapter.warm_before_sandbox(spec, env=fixture.env, root=fixture.root)
         execute.assert_not_called()
@@ -682,16 +738,16 @@ class AdapterTests(unittest.TestCase):
         self.addCleanup(fixture.close)
         payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
         spec = adapter.ModelSpec.from_payload(payload)
-        spec.profile_values["permissions"].append("quota:read")
-        (fixture.bin / "claude").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
-        (fixture.bin / "claude").chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        spec.profile_values["permissions"].append("readwise:read")
+        (fixture.bin / "readwise").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        (fixture.bin / "readwise").chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
 
-        completed = subprocess.CompletedProcess(["claude"], 1, "PRIVATE_TEST_MARKER")
+        completed = subprocess.CompletedProcess(["readwise"], 1, "PRIVATE_TEST_MARKER")
         output = io.StringIO()
         with mock.patch.object(adapter, "execute_process", return_value=completed), redirect_stdout(output):
             adapter.warm_before_sandbox(spec, env=fixture.env, root=fixture.root)
 
-        self.assertIn("warning: claude refresh failed before sandbox entry", output.getvalue())
+        self.assertIn("warning: readwise refresh failed before sandbox entry", output.getvalue())
         self.assertNotIn("PRIVATE_TEST_MARKER", output.getvalue())
 
     def test_private_process_uses_the_explicit_vault_environment(self) -> None:
@@ -847,6 +903,43 @@ retry_safe = false
         self.assertIn("prefect server start --host 127.0.0.1", service)
         self.assertIn('PREFECT_SERVER_ANALYTICS_ENABLED="${ATELIER_PREFECT_SERVER_ANALYTICS_ENABLED:-false}"', service)
         self.assertIn("scripts/routine_prefect.py serve", service)
+
+    def test_launchd_local_path_config_finds_clis_and_preserves_overrides(self) -> None:
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        home = Path(fixture.env["HOME"])
+        user_bin, brew_bin = home / ".local/bin", fixture.root / "homebrew/bin"
+        for directory in (user_bin, brew_bin):
+            directory.mkdir(parents=True)
+        for name in ("codex", "node", "readwise"):
+            tool = brew_bin / name
+            tool.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            tool.chmod(0o700)
+        uv = user_bin / "uv"
+        uv.write_text(
+            '#!/bin/bash\nprintf "%s\\n" "$PATH"\n'
+            'for tool in codex node readwise; do command -v "$tool" || exit 1; done\n',
+            encoding="utf-8",
+        )
+        uv.chmod(0o700)
+        source = (ROOT / "scripts/routine_prefect_service.sh").read_text(encoding="utf-8")
+        script = fixture.root / "scripts/routine_prefect_service.sh"
+        script.write_text(source, encoding="utf-8")
+        (fixture.root / "harness/env.local.sh").write_text(
+            f'case ":$PATH:" in\n    *":{brew_bin}:"*) ;;\n'
+            f'    *) export PATH="$PATH:{brew_bin}" ;;\nesac\n', encoding="utf-8")
+        for inherited in ("/usr/bin:/bin", f"{fixture.bin}:/usr/bin:/bin",
+                          f"{fixture.bin}:{brew_bin}:/usr/bin:/bin"):
+            with self.subTest(path=inherited):
+                result = subprocess.run(["/bin/bash", str(script), "serve"], cwd="/",
+                                        env={**fixture.env, "PATH": inherited}, check=True,
+                                        text=True, capture_output=True, timeout=5)
+                path, codex, node, readwise = result.stdout.splitlines()
+                self.assertTrue(path.startswith(f"{user_bin}:{inherited}"))
+                self.assertEqual(path.split(":").count(str(brew_bin)), 1)
+                self.assertEqual(path.split(":").count(str(user_bin)), 1)
+                self.assertEqual(codex, str((fixture.bin if inherited.startswith(str(fixture.bin)) else brew_bin) / "codex"))
+                self.assertEqual((node, readwise), (str(brew_bin / "node"), str(brew_bin / "readwise")))
 
     def test_public_index_schedule_uses_the_current_qmd_cli(self) -> None:
         registry = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))
@@ -1343,7 +1436,11 @@ class AutoevoAdapterTests(unittest.TestCase):
 
     def test_argv_has_only_the_isolated_workspace_writable(self) -> None:
         cwd = Path(self.fixture.temporary.name).resolve() / "workspace"
-        argv = adapter.codex_argv(self.spec, root=self.root, vault=self.vault, cwd=cwd, output=cwd / "result.json")
+        external_cache = cwd.parent / "external-cache"
+        external_cache.mkdir()
+        with mock.patch.object(adapter, "tier_segments", return_value={"cache": str(external_cache)}), mock.patch.dict(
+                os.environ, {"ATELIER_CACHE_WRITERS": self.spec.schedule.name}):
+            argv = adapter.codex_argv(self.spec, root=self.root, vault=self.vault, cwd=cwd, output=cwd / "result.json")
         self.assertEqual(argv[argv.index("--sandbox") + 1], "workspace-write")
         self.assertEqual(argv[argv.index("--ask-for-approval") + 1], "never")
         self.assertEqual(argv[argv.index("-C") + 1], str(cwd))

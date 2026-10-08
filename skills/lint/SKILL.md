@@ -49,19 +49,6 @@ AGENTS.md size and bold-marker checks; do not repeat them manually.
 `registry-validator` setup error requires installing the pinned dependencies
 with `uv sync --locked` before retrying; lint itself never installs them.
 
-```
-Bash: uv run scripts/routine_digest.py check; echo "exit=$?"
-```
-
-Re-runs the rendered-digest invariants on the newest artifact under the digest
-routine's output directory (countdown printed once per ledger row, tech feed
-carrying Chinese notes, every decision card with a settling condition). Read
-the exit: `3` means findings, and each `check:` line is reported as WARN,
-because `write` printed the same lines the morning it happened and a finding
-is one nobody acted on. `0` is clean. Any other nonzero exit is an execution
-failure (unset `$OV`, a broken digest registry, an unreadable artifact) and
-counts as ERROR like any other Phase 0 failure.
-
 ### Phase 0b: $OV ingestion hygiene audit
 
 ```

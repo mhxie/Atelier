@@ -259,7 +259,7 @@ parallel = false
 # daily_brief.py, so no subagent is dispatched. 周报 means this digest, not
 # the weekly reflection review.
 [intents.digest]
-description = "Produce or mail the daily or weekly routine digest report (日报 / 周报): the action surface above the fold plus routine intel below."
+description = "Produce the daily or weekly routine digest note (日报 / 周报): the action surface above the fold plus routine intel below."
 examples = [
     "日报",
     "周报",
@@ -267,7 +267,7 @@ examples = [
     "routine digest",
     "daily digest",
     "汇总 routine",
-    "digest 邮件",
+    "digest 笔记",
 ]
 mode = "digest"
 procedure = "skills/digest/SKILL.md"

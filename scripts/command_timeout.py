@@ -9,6 +9,7 @@ from contextlib import suppress
 import math
 import os
 import signal
+import shutil
 import subprocess
 import sys
 import time
@@ -56,6 +57,70 @@ def stop_process_group(process: subprocess.Popen[bytes], *, grace_seconds: float
     except ProcessLookupError:
         pass
     process.wait()
+
+
+def _pipe_holders(process: subprocess.Popen) -> set[int]:
+    """Find surviving macOS pipe writers after the leader exits."""
+    descriptors = [str(stream.fileno()) for stream in (process.stdout, process.stderr)
+                   if stream is not None and not stream.closed]
+    if not descriptors:
+        return set()
+
+    def pipes(options):
+        result = subprocess.run([shutil.which("lsof") or "/usr/sbin/lsof", "-nP", "-Fpdn", *options],
+                                capture_output=True, text=True, timeout=2)
+        if result.returncode not in (0, 1) or result.returncode and (result.stdout or result.stderr):
+            result.check_returncode()
+        pid, endpoint = None, None
+        for line in result.stdout.splitlines():
+            if line.startswith("p"):
+                pid = int(line[1:])
+            elif line.startswith("f"):
+                endpoint = None
+            elif line.startswith("d"):
+                endpoint = line[1:]
+            elif line.startswith("n->") and endpoint is not None:
+                yield pid, endpoint, line[3:]
+
+    peers = {(peer, endpoint) for _pid, endpoint, peer in
+             pipes(["-a", "-p", str(os.getpid()), "-d", ",".join(descriptors)])}
+    if not peers:
+        return set()
+    candidates = {pid for pid, endpoint, peer in pipes(["-a", "-u", str(os.getuid())])
+                  if pid != os.getpid() and (endpoint, peer) in peers}
+    if not candidates:
+        return set()
+    return {pid for pid, endpoint, peer in pipes(["-a", "-p", ",".join(map(str, candidates))])
+            if (endpoint, peer) in peers}
+
+
+def stop_process_tree(process: subprocess.Popen) -> None:
+    """Stop live descendants and orphaned holders of the captured output pipes."""
+    process.poll()
+    groups = {process.pid}
+    holders = set()
+    try:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGSTOP)
+        table = subprocess.check_output(["/bin/ps", "-axo", "pid=,ppid="], text=True, timeout=2)
+        parents = {int(pid): int(parent) for pid, parent in (line.split() for line in table.splitlines())}
+        descendants = [process.pid]
+        for parent in descendants:
+            descendants.extend(pid for pid, ppid in parents.items() if ppid == parent and pid not in descendants)
+        for pid in descendants:
+            with suppress(ProcessLookupError):
+                groups.add(os.getpgid(pid))
+        holders = _pipe_holders(process)
+    finally:
+        try:
+            for group in groups - {process.pid, os.getpgrp()}:
+                with suppress(ProcessLookupError):
+                    os.killpg(group, signal.SIGKILL)
+            stop_process_group(process, grace_seconds=0)
+        finally:
+            for pid in holders - {process.pid}:
+                with suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
 
 
 _LIVE_CHILDREN: dict[subprocess.Popen, float] = {}

@@ -62,6 +62,8 @@ routine_prompts = "_routine_prompts"
 
 # L1: pending or raw capture
 inbox           = "inbox"
+# Generated digest notes in YYYY-MM/ buckets; routine collection never reads them.
+digest          = "inbox/digest"
 cache           = "cache"
 # Reflect's audio recordings; their transcripts land in notes/.
 audio_memos     = "audio-memos"

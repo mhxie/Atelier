@@ -54,7 +54,7 @@ def content_hash(path: Path) -> str:
 
     The verdict cache is keyed on this, not on the path alone. Without it an
     edit silently inherits the old ruling in both directions: newly added
-    sensitive text would ride an old approval into an email, and a note that was
+    sensitive text would ride an old approval into the digest note, and a note that was
     since redacted would stay buried forever. A changed file is simply a new
     question.
     """

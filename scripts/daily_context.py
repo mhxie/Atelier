@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Digest weather and timestamped quota; setup lives in the digest command.
-
---refresh-quota uses CodexBar OAuth. --offline forbids network; scheduled
-weather is always off. Missing context is non-fatal.
-"""
+"""Collect digest weather and timestamped quota; missing context is nonfatal."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ import argparse
 import json
 import math
 import os
-import signal
 import subprocess
 import sys
 import time
@@ -23,9 +18,14 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import PathsError, atomic_write, tier_segments, vault_root  # noqa: E402
+from command_timeout import stop_process_tree  # noqa: E402
 
 CONTEXT_SCHEMA = 1  # must match routine_collect.CONTEXT_SCHEMA
 DIGEST_CONFIG = "_meta/digest.toml"
+QUOTA_PROVIDERS = {"codex": "Codex", "claude": "Claude Code", "antigravity": "Antigravity"}
+ANTIGRAVITY_WINDOWS = (
+    "Gemini", "Claude + GPT", "Gemini Session", "Gemini Weekly", "Claude + GPT Session", "Claude + GPT Weekly",
+)
 
 HTTP_TIMEOUT = 12
 GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -91,16 +91,18 @@ def _quota_entry(
     name: str,
     window: str,
     used_percent: float,
-    reset_epoch: float,
+    reset_epoch: float | None,
     snapshot_epoch: float,
     now: float,
 ) -> dict[str, Any]:
-    values = (used_percent, reset_epoch, snapshot_epoch)
-    if (name not in {"Codex", "Claude Code"} or not isinstance(window, str)
-            or not window[:-1].isdigit() or window[-1:] not in {"m", "h", "d"}
+    values = (used_percent, snapshot_epoch) + (() if reset_epoch is None else (reset_epoch,))
+    if (name not in QUOTA_PROVIDERS.values() or not isinstance(window, str)
+            or not ((name == "Antigravity" and window in ANTIGRAVITY_WINDOWS)
+                    or (name != "Antigravity" and window[:-1].isdigit() and window[-1:] in {"m", "h", "d"}))
             or any(type(v) not in (int, float) or not math.isfinite(v) for v in values)
             or not 0 <= used_percent <= 100 or not 0 < snapshot_epoch <= now + 300
-            or reset_epoch <= max(now, snapshot_epoch)):
+            or (reset_epoch is not None and reset_epoch <= max(now, snapshot_epoch))
+            or (reset_epoch is None and now - snapshot_epoch >= 86400)):
         raise ValueError("invalid or expired quota window")
     used = int(round(used_percent))
     left = 100 - used
@@ -110,8 +112,8 @@ def _quota_entry(
         "used_percent": used,
         "left_percent": left,
         "level": quota_level(left),
-        "reset_epoch": int(reset_epoch),
-        "reset_relative": relative_reset(reset_epoch, now),
+        "reset_epoch": int(reset_epoch) if reset_epoch is not None else None,
+        "reset_relative": relative_reset(reset_epoch, now) if reset_epoch is not None else "重置时间未知",
         "snapshot_epoch": int(snapshot_epoch),
         "snapshot_age_hours": round(max(0.0, now - snapshot_epoch) / 3600, 1),
     }
@@ -125,42 +127,51 @@ def _epoch(value: str) -> float:
 
 
 def _codexbar_rows() -> list[dict[str, Any]]:
-    """One bounded OAuth read; never inherit GUI hooks or token overrides."""
+    """One bounded read of configured sources; exclude GUI hooks and token overrides."""
     env = {k: v for k, v in os.environ.items() if k in {
         "HOME", "PATH", "LANG", "TMPDIR", "CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR",
     }}
     env["CODEXBAR_CONFIG"] = str(Path(__file__).resolve().parents[1] / "harness/codexbar.json")
     proc = subprocess.Popen(
-        ["codexbar", "usage", "--provider", "both", "--source", "oauth", "--format", "json", "--json-only"],
+        ["codexbar", "usage", "--format", "json", "--json-only"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, env=env, start_new_session=True,
     )
     try:
         stdout, _ = proc.communicate(timeout=45)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.communicate()
+        stop_process_tree(proc)
+        proc.communicate(timeout=5)
         raise
     data = json.loads(stdout)  # A nonzero exit can still contain one good provider.
     rows = []
     for item in data if isinstance(data, list) else []:
         if not isinstance(item, dict) or item.get("error"):
             continue
-        name = {"codex": "Codex", "claude": "Claude Code"}.get(item.get("provider"))
+        name = QUOTA_PROVIDERS.get(item.get("provider"))
         usage = item.get("usage")
         if not name or not isinstance(usage, dict):
             continue
-        for key in ("primary", "secondary"):
-            window = usage.get(key)
+        windows = [(key, usage.get(key)) for key in ("primary", "secondary")]
+        if name == "Antigravity":
+            extra = usage.get("extraRateWindows")
+            summary = [w for w in extra if isinstance(w, dict) and w.get("title") in ANTIGRAVITY_WINDOWS[2:]] if isinstance(extra, list) else []
+            if summary:
+                windows = [(w["title"], w.get("window")) for w in summary if w.get("usageKnown") is not False]
+            else:
+                windows = [(label, usage.get(key)) for label, key in zip(ANTIGRAVITY_WINDOWS[:2], ("primary", "secondary"))]
+        for label, window in windows:
             if not isinstance(window, dict):
                 continue
             try:
-                minutes = window["windowMinutes"]
-                if type(minutes) is not int or minutes <= 0:
-                    continue
-                label = f"{minutes // 1440}d" if minutes % 1440 == 0 else (
-                    f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}m")
+                if name != "Antigravity":
+                    minutes = window["windowMinutes"]
+                    if type(minutes) is not int or minutes <= 0:
+                        continue
+                    label = f"{minutes // 1440}d" if minutes % 1440 == 0 else (
+                        f"{minutes // 60}h" if minutes % 60 == 0 else f"{minutes}m")
+                reset = window.get("resetsAt")
                 rows.append(dict(name=name, window=label, used_percent=window["usedPercent"],
-                                 reset_epoch=_epoch(window["resetsAt"]), snapshot_epoch=_epoch(usage["updatedAt"])))
+                                 reset_epoch=_epoch(reset) if reset is not None else None, snapshot_epoch=_epoch(usage["updatedAt"])))
             except (KeyError, TypeError, ValueError, AttributeError, OverflowError):
                 continue
     return rows
@@ -191,7 +202,7 @@ def read_quota(cache: Path | None, now: float, refresh: bool) -> tuple[list[dict
             warnings.append("quota: cache write unavailable")
         finally:
             os.umask(mask)
-    for name in ("Codex", "Claude Code"):
+    for name in QUOTA_PROVIDERS.values():
         if not any(entry["name"] == name for entry in entries):
             warnings.append(f"{name} quota: unavailable")
     return entries, warnings
@@ -210,10 +221,7 @@ def _get_json(url: str, params: dict[str, Any]) -> Any:
 
 
 def pick_location(results: list[dict[str, Any]], region: str | None, country: str | None) -> dict[str, Any] | None:
-    """The most populous candidate that matches the optional region and
-    country. The geocoder's own first result is not population-ordered: a
-    bare "Mountain View" comes back as the Arkansas town ahead of the
-    California city, and the forecast for the wrong one is worse than none."""
+    """Choose the most populous location matching region/country, not the geocoder's first result."""
     def ok(item: dict[str, Any]) -> bool:
         if region and str(item.get("admin1") or "").lower() != region.lower():
             return False
@@ -350,9 +358,9 @@ def build(
             region_arg = region_arg or configured.get("region")
             country_arg = country_arg or configured.get("country")
             place_source = "config"
-    if place and (offline or no_weather):
-        warnings.append(f"weather skipped for {place!r}: {'--offline' if offline else '--no-weather'}")
-    elif place:
+    if place and offline:
+        warnings.append(f"weather skipped for {place!r}: --offline")
+    elif place and not no_weather:  # a caller that opts out of weather is not missing it
         try:
             weather = weather_fetcher(place, day, region_arg, country_arg)
             if weather is not None:
@@ -399,7 +407,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="No network: cached quota only, no weather fetch.",
     )
-    parser.add_argument("--refresh-quota", action="store_true", help="Refresh quota through CodexBar OAuth.")
+    parser.add_argument("--refresh-quota", action="store_true", help="Refresh quota through configured CodexBar sources.")
     parser.add_argument("--no-weather", action="store_true", help="Skip weather independently of quota refresh.")
     parser.add_argument("--json", action="store_true", help="JSON instead of a text report.")
     parser.add_argument("--out", help="Write to a file instead of stdout.")

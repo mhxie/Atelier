@@ -1,15 +1,15 @@
 ---
 name: digest
-description: "Daily and weekly digest: JSON collection, capped overdue TODO reminders, status updates, and routine intel; local MJML artifacts written to $OV and mailed."
+description: "Daily and weekly digest: JSON collection, capped overdue TODO reminders, status updates, and routine intel; one Reflect-native note per day in $OV."
 ---
 # Digest
 
 > Also reachable via `/hi <natural language>` (e.g., `/hi 日报`, `/hi routine digest`,
-> `/hi 汇总 routine`, `/hi digest 邮件`). See `harness/intents.toml`
+> `/hi 汇总 routine`, `/hi digest 笔记`). See `harness/intents.toml`
 > `[intents.digest]` for the row's example phrases. Both paths execute this procedure.
 
-One document per run. Its first screen is what closes today; everything below it
-is intel that is never urgent by construction.
+One note per day. Its first screen is what closes today; everything below the
+fold is intel that is never urgent by construction.
 
 The split exists because the first screen is read before the day's deep work and
 the rest is read after it. Anything moved above the fold spends the day's
@@ -22,14 +22,18 @@ Two streams:
 - **weekly**: the 7-day cross-source roll-up. Intel only; no action surface,
   because a weekly read is not a morning read. Not scheduled: `/weekly` runs
   the same `collect --mode weekly` and folds the roll-up into the weekly
-  review, next to the goal check. This mode remains for a manual mail.
+  review, next to the goal check. Write its note only when asked.
 
-## Where the document goes
+## Where the note goes
 
-The artifact is written into the digest routine's declared `$OV` output
-directory and is the source of truth. The email is a presentation of that same
-render, not a second summary: `protocols/remote-routines.md` allows this only
-because one render reaches both destinations and the `$OV` write happens first.
+The note is `<paths.digest>/YYYY-MM/YYYY-MM-DD-daily-digest.md` (weekly and
+backlog notes share the month folder as `-weekly-digest.md` and
+`-backlog-digest.md`) and is the source of truth; Reflect indexes it and its Git
+sync carries it to the phone. Its last line carries `#日报` (weekly notes
+`#周报`), the one tag Reflect filters it by. The public `daily-digest` routine
+(`routine_digest.py morning`, 06:20 local) creates the model-free note
+(`curated: false`) when the day has none and never replaces one. This procedure
+re-renders the whole same-day note with the judged sections after approval.
 
 Readwise is downstream, not a destination. Reader stores originals; the digest
 links **into** it and never adds to it. The 新文章 section is that bridge, which
@@ -46,37 +50,40 @@ decision, and which saved articles are worth the user's time.
 ```bash
 SCRATCH=$(mktemp -d)
 MODE=daily   # or weekly
-PY="$(scripts/find_python.sh markdown_it)" || exit 1
+PY="$(scripts/find_python.sh prefect)" || exit 1
 BRIEF=""
 CONTEXT=""
 PLACE=""   # city where the day is spent, from the calendar; empty skips weather
 
 "$PY" scripts/routine_digest.py collect --mode "$MODE" --json --out "$SCRATCH/manifest.json"
+DAY=$("$PY" -c 'import json,sys; print(json.load(open(sys.argv[1]))["window"]["until"])' "$SCRATCH/manifest.json")
 if [ "$MODE" = daily ]; then
-    "$PY" scripts/daily_brief.py --json --out "$SCRATCH/brief.json" && BRIEF=1
+    "$PY" scripts/daily_brief.py --json --today "$DAY" --out "$SCRATCH/brief.json" && BRIEF=1
     readwise reader-list-documents --location new --limit 20 \
         --response-fields title,author,summary,category,word_count,reading_time,saved_at,tags,source_url \
         --json > "$SCRATCH/articles.json" || echo "readwise unavailable" >&2
 fi
-"$PY" scripts/daily_context.py --refresh-quota --no-weather --json --out "$SCRATCH/context.json" && CONTEXT=1
+"$PY" scripts/daily_context.py --no-weather --date "$DAY" --json --out "$SCRATCH/context.json" && CONTEXT=1
 ```
 
-Use this interpreter for every step; never substitute `uv run`. Python and the
-locked Node/MJML packages are deployment prerequisites (`uv sync --locked`,
-`npm ci`) and must never be installed or synced during a run.
+Use this interpreter for every step; never substitute `uv run`. The locked
+Python environment is a deployment prerequisite (`uv sync --locked`) and is
+never installed or synced during a run.
 
-Interactively, set `PLACE` to the city of today's first located calendar event,
-not an address. To fetch weather interactively, replace `--no-weather` with
-`--place "$PLACE"`; an empty place falls back to private weather config.
-Scheduled runs use `--refresh-quota --no-weather` only with `quota:read`;
-otherwise use `--offline`. Scheduled weather is disabled by the helper, and
-offline never makes network requests. Missing optional inputs, including
-CodexBar, are non-fatal: retain warnings and attach only completed artifacts.
+The scheduled note refreshes quota through the configured CodexBar sources
+(Codex OAuth, Claude CLI `/usage`, Antigravity `auto`). Antigravity retains named
+model windows; unknown usage is omitted, and snapshots without resets expire in 24h.
+Quota, action groups, selected signals, and tech feeds have H2 Outline targets. The two-row quota table gives each window one column; snapshot ages appear once in the colophon.
+This step only reads the cache, because a failed refresh empties it. For weather, set
+`PLACE` to the city of today's first located calendar event, not an address,
+and replace `--no-weather` with `--place "$PLACE"`; an empty place falls back to
+private weather config. Missing optional inputs, including CodexBar, are
+non-fatal: retain warnings and attach only completed inputs.
 
-Install the host's standalone [CodexBar 0.57.0](https://github.com/steipete/CodexBar/releases/tag/v0.57.0)
+Install the host's standalone [CodexBar 0.72.0](https://github.com/steipete/CodexBar/releases/tag/v0.72.0)
 and resource bundle on the runner's PATH, using existing provider logins.
 `harness/codexbar.json` disables hooks, browser cookies, and account swapping.
-Smoke the quota-only command above in the runner's environment before enabling
+Smoke `daily_context.py --refresh-quota --no-weather` in the runner's environment before enabling
 refresh. `<paths.cache>/digest-quota.json` stores only normalized measurements;
 offline reads retain timestamps and omit expired windows. Never install,
 log in, or retry during a digest run.
@@ -88,7 +95,7 @@ add `--unacked --max-files 40` to `collect`.
 
 Report the window, file count, status-update count, and every manifest or brief
 warning verbatim. If there are no files, status updates, or brief groups, say
-so and stop without writing or mailing an empty document.
+so and stop without writing an empty note.
 
 ### 2. Read the manifest
 
@@ -137,8 +144,8 @@ bare title asks the reader to open the piece to find out whether opening it was
 worth it, which is the tax this section exists to remove.
 
 Do not attach article bodies. Three full articles were measured at ~110,000
-characters, five times the whole depth budget and past the size where a mail
-client clips the message. Breadth with a real abstract each is the trade.
+characters, five times the whole depth budget. Breadth with a real abstract
+each is the trade.
 
 If the file is missing or empty, note it and continue; the digest does not
 depend on it.
@@ -176,12 +183,11 @@ Write `$SCRATCH/overview.json`:
 ```
 
 `between` and `settles` are what make a bullet a decision. `write` moves a
-需要的决策 bullet that lacks either under 信号 and names the demotion in the
-colophon, so the masthead's 决策 count only ever counts cards the reader can
-act on.
+需要的决策 bullet that lacks either under 信号 and names the demotion under
+输入缺口; the section count includes only actionable cards.
 
 `sources` paths must match the manifest's `path` values exactly. A path that
-does not match renders as `(unmatched)` in the document, which is a visible
+does not match renders as `(unmatched)` in the note, which is a visible
 signal that a bullet cited something it did not read. Copy the paths, do not
 retype them.
 
@@ -192,7 +198,7 @@ the brief) go into a top-level `gaps` array, one short line each:
 "gaps": ["Readwise CLI unavailable in the sandbox; no 新文章 this run."]
 ```
 
-The renderer places them in the colophon, below the fold. Never write a
+The source index carries coverage flags and report links once; detailed excerpts and primary links stay in the reports. Other gaps appear under 输入缺口, below the fold. Never write a
 section for them: a missing input changes nothing the reader does in the next
 twelve hours, and a section above the fold spends that attention on
 bookkeeping.
@@ -257,7 +263,7 @@ then 需要的决策. 前沿实验室 and the conditional 社会 stay.
 
 ### 4b. Curate the depth
 
-Below the fold the document carries what you pick, not every routine body
+Below the fold the note carries what you pick, not every routine body
 verbatim with its frontmatter, coverage tails, and effort reports. Write
 `deep_read` into the same `overview.json`:
 
@@ -295,9 +301,9 @@ Rules:
   manifest; do not copy them into `deep_read`. Each item's one-line note is
   read from the feed routine's own file (the summary after the link, inline
   or indented, in Chinese); `write` reports a feed whose notes are missing or
-  not Chinese in the colophon rather than rendering bare headlines silently.
-- When the window has no signal units, omit `deep_read`; the renderer then
-  falls back to the raw bodies, which is worse but never empty.
+  not Chinese under 输入缺口 rather than rendering bare headlines silently.
+- When the window has no signal units, omit `deep_read`; the depth then lists
+  the tech feed, and the source index links every file.
 
 Content rules:
 
@@ -308,52 +314,41 @@ Content rules:
   routine itself marked unverified stay marked.
 - **Name the gaps.** Routines log their blocked sources and skipped channels. A
   week where a monitor collected nothing is a finding.
-- **Budget.** The whole document targets an eight-minute read and the source index
+- **Budget.** The whole note targets an eight-minute read and the source index
   already spends most of it, so the written sections are the short part. Weekly
   carries seven days and earns proportionally more.
 - **Language.** Match the user's. Chinese topics and Chinese-language sources get
   Chinese. No em dashes.
 
 Overdue TODOs appear in at most three daily editions per source, text, and due
-date. Successful artifact writes record dates in the existing digest state;
-previews and weekly editions do not count. Same-day rebuilds retain the same
-selection. Exhausted TODOs remain open in their source and `todos.py list`.
+date. Successful note writes record dates in the digest state; previews and
+weekly notes do not count. Same-day rebuilds retain the same selection, status
+updates included. Exhausted TODOs remain open in their source and `todos.py list`.
 
-### 5. Write the artifact
+### 5. Preview, approve, write
 
 ```bash
 "$PY" scripts/routine_digest.py write \
   --manifest "$SCRATCH/manifest.json" \
   --overview "$SCRATCH/overview.json" \
-  ${BRIEF:+--brief "$SCRATCH/brief.json"} \
-  ${CONTEXT:+--context "$SCRATCH/context.json"}
+  ${BRIEF:+--brief} ${BRIEF:+"$SCRATCH/brief.json"} \
+  ${CONTEXT:+--context} ${CONTEXT:+"$SCRATCH/context.json"} \
+  --out "$SCRATCH/note.md"
 ```
 
-`write` resolves the destination from the digest routine's own
-private row carrying `digest = { include = false }`; if several rows match, it
-stops until `--routine <name>` selects one. Surface every size or `check:`
-warning but keep the artifact: input-quality findings and Gmail clipping are
-reports, not write failures. `"$PY" scripts/routine_digest.py check` re-runs
-those checks; `/lint` owns their WARN integration.
+The preview records nothing and prints its sha256. Show the user the first
+screen (above the `---` fold) and the overview sections; only after explicit
+approval, rerun with `--expect <that sha256>` in place of `--out`. Surface every
+warning; input-quality reports are not write failures. Exit 3 is a refusal:
+"differs from the approved preview" means preview again; "changed since the
+harness wrote it" means Reflect, the phone, or a retitled link changed the note,
+so show `diff -u` against the preview, ask, and only then add
+`--replace <the sha256 it printed>`. Reflect's own frontmatter keys (`id`,
+`pinned`, `private`, `aliases`) survive a replace even though the diff shows
+them removed. "Written from a newer collection" means collect again. "Predates
+the … note" means a later day's note exists, so this day's note stays as written.
 
-Interactively, show the user the first screen and the overview text before
-step 6. The scheduled run has no such gate, which is why the mail is addressed
-only to the user themselves.
-
-### 6. Mail it
-
-```bash
-"$PY" scripts/routine_digest.py mail \
-  --html "<the artifact path write printed>" \
-  --subject "<the document title>"
-```
-
-The deterministic mail command gets its sole recipient from private config; the
-model neither reads nor overrides it. On send failure, report it and stop: do
-not fail the cycle, retry, or choose another channel, because the artifact is
-already canonical. Always report the artifact path and mail status.
-
-### 7. Offer the ack
+### 6. Offer the ack
 
 ```bash
 "$PY" scripts/routine_digest.py ack --manifest "$SCRATCH/manifest.json" --dry-run
@@ -395,18 +390,16 @@ verdict.
 
 ## Notes
 
-- Scratch files live in `mktemp -d` output. The artifact itself is the only
-  durable output and `write` places it.
-- The renderer owns masthead/colophon placement, responsive MJML, escaping,
-  HTTP(S)-only links, and source labels. Do not reproduce or override those
-  deterministic presentation rules in the overview.
+- Scratch files live in `mktemp -d` output. The note is the only durable output
+  and `write` places it.
+- The renderer owns the Reflect-native shape, `[[Title]]` citations, inert
+  untrusted text, HTTP(S)-only links, and source labels. Do not reproduce or
+  override those deterministic presentation rules in the overview.
 - Per-routine lanes and exclusions live in `<paths.private_routines>/registry.toml`
   (`digest = { lane = "...", include = false }`), not here. A correction there
   is a private-state write and requires user approval.
 - Autoevo maintenance output is excluded by default and
   belongs to `/autoevo-review`.
-- The Prefect adapter owns any required Readwise tool-cache warm-up before the
-  sandbox; do not repair or install it during this procedure.
 - The brief's line cap never folds forfeitable items. When it reports `over_cap`,
   that is a real signal that too much is closing at once, not a formatting
   problem to fix.

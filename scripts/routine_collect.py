@@ -27,6 +27,7 @@ from routine_digest_core import (  # noqa: E402
     iter_sources,
     load_acks,
     load_routines,
+    routine_files,
     source_anchor,
 )
 
@@ -219,14 +220,22 @@ def load_todo_reminders(ov: Path) -> dict[str, list[str]]:
     return reminders
 
 
-def load_update_state(ov: Path) -> tuple[dict[str, str], list[str]]:
+def load_update_state(ov: Path, day: str = "") -> tuple[dict[str, str], list[str]]:
+    """Daily cursors; for `day`, the ones its first write started from, so a same-day recollect replays."""
     payload, warnings = _load_state_payload(ov)
     if warnings or not payload:
         return {}, warnings
-    daily = payload.get("daily")
+    replay = payload.get("replay") if isinstance(payload.get("replay"), dict) else {}
+    daily = replay.get("daily") if day and replay.get("day") == day else payload.get("daily")
     if not isinstance(daily, dict):
         return {}, ["digest update state daily cursor is invalid"]
     return {str(k): str(v) for k, v in daily.items() if isinstance(v, str)}, []
+
+def load_replay_first(ov: Path, day: str) -> dict[str, str]:
+    """For `day`, each source's first delivered row: the replay anchor once its start row is edited."""
+    replay = _load_state_payload(ov)[0].get("replay")
+    first = replay.get("first") if isinstance(replay, dict) and replay.get("day") == day else None
+    return {str(k): str(v) for k, v in first.items() if isinstance(v, str)} if isinstance(first, dict) else {}
 
 def load_delivered_state(ov: Path) -> tuple[dict[str, str], list[str]]:
     """{vault-relative path: effective date of the daily digest that carried it}.
@@ -314,8 +323,10 @@ def collect_digest_updates(
     update is repeated once in that week's roll-up, as a weekly report should.
     """
     sources, warnings = load_update_sources(ov)
-    daily_state, state_warnings = load_update_state(ov)
+    daily_state, state_warnings = load_update_state(ov, end.isoformat()) if mode == "daily" else load_update_state(ov)
     warnings.extend(state_warnings)
+    first = load_replay_first(ov, end.isoformat()) if mode == "daily" else {}
+    live = load_update_state(ov)[0] if first else {}
     selected: list[dict[str, Any]] = []
 
     for source in sources:
@@ -378,21 +389,24 @@ def collect_digest_updates(
             candidates = parsed
             cursor = daily_state.get(source.name)
             if cursor:
-                cursor_index = next(
-                    (
-                        index
-                        for index, item in enumerate(parsed)
-                        if cursor in (item["id"], item["legacy_id"])
-                    ),
-                    None,
-                )
-                if cursor_index is None:
+                index: dict[str, int] = {}
+                for position, item in enumerate(parsed):
+                    for key in (item["id"], item["legacy_id"]):
+                        index.setdefault(key, position)
+                anchor, after = index.get(first.get(source.name)), index.get(live.get(source.name))
+                if cursor in index:
+                    candidates = parsed[index[cursor] + 1:]
+                elif anchor is not None:  # the day's start row was edited; its first delivered row still stands
+                    candidates = parsed[anchor:]
+                elif after is not None:
+                    warnings.append(f"digest update rows for {source.name!r} delivered earlier today were edited; "
+                                    "showing only rows after them")
+                    candidates = parsed[after + 1:]
+                else:
                     warnings.append(
                         f"digest update cursor for {source.name!r} no longer matches; "
                         "replaying configured rows"
                     )
-                else:
-                    candidates = parsed[cursor_index + 1:]
             # A backdated daily render must never pull a future ledger row.
             # There is intentionally no lower window bound: an unreported
             # late-day update belongs in the next artifact, even on the next date.
@@ -415,15 +429,28 @@ def collect_digest_updates(
     )
     return selected, warnings
 
-def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any] | None:
-    """Merge delivery state under the publisher's lock without moving cursors back."""
+def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    """The state after this write, merged under the publisher's lock.
+
+    Only daily writes move delivery, and cursors never move back. The day's
+    first write snapshots the cursors it started from and, per source, the
+    first row it delivered (`replay`), so a same-day recollect selects the
+    day's rows again even after the row it started from was edited.
+    """
+    payload, warnings = _load_state_payload(ov)
+    if warnings:
+        raise SystemExit("; ".join(warnings))
     if manifest.get("mode") != "daily":
-        return None
+        return {"schema": 1, "daily": {}, "delivered": {}, "todo_reminders": {}, **payload}
     delivered_on = str(manifest.get("window", {}).get("until", ""))[:10]
     current, warnings = load_update_state(ov)
     delivered, more = load_delivered_state(ov)
     if warnings or more:
         raise SystemExit("; ".join(warnings + more))
+    replay = payload.get("replay") if isinstance(payload.get("replay"), dict) else {}
+    if delivered_on > str(replay.get("day", "")):
+        replay = {"day": delivered_on, "daily": dict(current), "first": {}}
+    started = replay.get("daily") if replay.get("day") == delivered_on and isinstance(replay.get("daily"), dict) else {}
     updates = manifest.get("updates") or []
     positions: dict[tuple[str, str], int] = {}
     declarations, warnings = load_update_sources(ov)
@@ -438,14 +465,21 @@ def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any] |
             for key in ("id", "legacy_id"):
                 positions.setdefault((row["source"], row[key]), row["sequence"])
     candidates = {}
+    first = replay.setdefault("first", {}) if replay.get("day") == delivered_on else {}
     for item in sorted(updates, key=lambda row: positions.get((row["source"], row["id"]), row.get("sequence", 0))):
         candidates[str(item["source"])] = str(item["id"])
+        if isinstance(first, dict) and positions.get((str(item["source"]), str(first.get(item["source"], "")))) is None:
+            first[str(item["source"])] = str(item["id"])  # the earliest row delivered today that still resolves
     for source, candidate in candidates.items():
         proposed = positions.get((source, candidate))
-        previous = positions.get((source, current.get(source, "")))
+        floor = current.get(source)
+        previous = positions.get((source, floor or ""))
+        if previous is None and floor is not None and replay.get("day") == delivered_on:
+            floor = started.get(source)  # the row delivered last was edited since; order from the day's start
+            previous = positions.get((source, str(floor or "")))
         if source in configured and proposed is None:
             raise SystemExit(f"digest update for {source!r} no longer resolves; recollect before writing")
-        if source in current and current[source] != candidate:
+        if floor is not None and floor != candidate:
             if proposed is None or previous is None:
                 raise SystemExit(f"cannot order digest updates for {source!r}; repair the source before writing")
             if proposed < previous:
@@ -461,14 +495,13 @@ def prepare_update_state(ov: Path, manifest: dict[str, Any]) -> dict[str, Any] |
             delivered = {k: v for k, v in delivered.items() if v[:10] >= floor.isoformat()}
         except ValueError:
             pass
-    reminders = load_todo_reminders(ov)
-    if not current and not delivered and not reminders:
-        return None
     return {
+        **payload,
         "schema": 1,
         "daily": dict(sorted(current.items())),
+        "replay": replay,
         "delivered": dict(sorted(delivered.items())),
-        "todo_reminders": reminders,
+        "todo_reminders": load_todo_reminders(ov),
     }
 
 def effective_date(now: datetime | None = None) -> date:
@@ -526,17 +559,6 @@ def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     if not match:
         return {}, text
     return _parse_meta_lines(match.group(1)), text[match.end():]
-
-def strip_frontmatter(text: str) -> str:
-    """The body without a leading metadata block; a leading `---` rule stays.
-
-    For renderers that show a routine file in full: the fence and its
-    `key: value` lines are bookkeeping and read as noise in a mail client.
-    """
-    match = _FRONTMATTER.match(text)
-    if not match or not _looks_like_meta_block(match.group(1)):
-        return text
-    return text[match.end():]
 
 def _looks_like_meta_block(raw: str) -> bool:
     """True when a `---` fenced block is frontmatter, not a horizontal rule.
@@ -735,9 +757,9 @@ def extract_excerpt(body: str, limit: int) -> str:
 def strip_inline_markup(text: str) -> str:
     """Flatten markdown emphasis and links into plain prose.
 
-    Excerpts are HTML-escaped at render time rather than converted, so leaving
-    `**bold**` in them would print the asterisks. Link text is kept and the URL
-    dropped: the index already carries the real links.
+    Excerpts render as plain text, so leaving `**bold**` in them would print
+    the asterisks. Link text is kept and the URL dropped: the index already
+    carries the real links.
     """
     text = re.sub(r"\[\^[^\]]*\]", "", text)
     text = re.sub(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", r"\1", text)
@@ -825,7 +847,7 @@ def collect_context_sources(
             continue
         latest: tuple[date, str, str] | None = None
         try:
-            for path in directory.glob(routine.file_pattern):
+            for path in routine_files(ov, routine):
                 try:
                     resolved = path.resolve(strict=True)
                     resolved.relative_to(resolved_dir)
@@ -899,13 +921,10 @@ def collect(
         for routine in active:
             by_dir.setdefault(routine.output_dir, []).append(routine)
         for output_dir, members in by_dir.items():
-            directory = ov / output_dir
-            if not directory.is_dir():
-                continue
             ack = acks.get(output_dir, "")
             candidates: dict[str, tuple[Path, Routine]] = {}
             for routine in members:
-                for path in directory.glob(routine.file_pattern):
+                for path in routine_files(ov, routine):
                     if path.name > ack:
                         candidates.setdefault(path.name, (path, routine))
             for name in sorted(candidates):
@@ -921,10 +940,7 @@ def collect(
                 break
     else:
         for routine in active:
-            directory = ov / routine.output_dir
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.glob(routine.file_pattern), key=lambda p: p.name):
+            for path in routine_files(ov, routine):
                 when, when_source = file_date(path)
                 if not (start <= when <= end):
                     continue
@@ -947,10 +963,7 @@ def collect(
         carried = 0
         already = 0
         for routine in active:
-            directory = ov / routine.output_dir
-            if not directory.is_dir():
-                continue
-            for path in sorted(directory.glob(routine.file_pattern), key=lambda p: p.name):
+            for path in routine_files(ov, routine):
                 when, when_source = file_date(path)
                 if not (carry_start <= when < start):
                     continue
@@ -1020,10 +1033,7 @@ def collect_health(
     included = [r for r in routines if r.include]
     reported: set[str] = set()
     for routine in included:
-        directory = ov / routine.output_dir
-        if not directory.is_dir():
-            continue
-        for path in directory.glob(routine.file_pattern):
+        for path in routine_files(ov, routine):
             when, _ = file_date(path)
             if start <= when <= end:
                 reported.add(routine.name)
@@ -1060,11 +1070,8 @@ def collect_health(
     # on a phone.
     debt = 0
     for routine in included:
-        directory = ov / routine.output_dir
-        if not directory.is_dir():
-            continue
         ack = acks.get(routine.output_dir, "")
-        debt += sum(1 for p in directory.glob(routine.file_pattern) if p.name > ack)
+        debt += sum(1 for p in routine_files(ov, routine) if p.name > ack)
 
     return {
         "declared": len(included),

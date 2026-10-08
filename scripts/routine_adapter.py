@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Validated process boundary for Prefect-owned local Atelier routines.
-
-Prefect owns scheduling, run identity, concurrency, retries, state, history,
-and logs.  This module owns only what the orchestrator cannot infer: the
-private routine declaration, each profile's fixed headless runtime boundary, and a compact
-receipt proving that the declared domain artifact exists.
-"""
+"""Validate private routine declarations, headless boundaries and artifact receipts for Prefect."""
 
 from __future__ import annotations
 
@@ -217,12 +211,9 @@ class ProcessSpec:
 
 def _load_toml(path: Path) -> dict[str, Any]:
     try:
-        value = tomllib.loads(path.read_text(encoding="utf-8"))
+        return tomllib.loads(path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigurationError(f"cannot read {path}: {exc}") from exc
-    if not isinstance(value, dict):
-        raise ConfigurationError(f"expected a TOML table in {path}")
-    return value
 
 
 def vault_root(environ: dict[str, str] | None = None) -> Path:
@@ -654,7 +645,7 @@ def adapter_prompt(spec: ModelSpec, *, root: Path) -> str:
         f"web={profile['web_search']}, shell_network={profile['shell_network']}, user_config={profile['user_config']}). "
         f"Effective action permission allowlist: `{permissions}`. Treat it as a strict model-level allowlist: skip "
         "every connector, CLI, web, or filesystem action not listed, even if an optional integration is installed. "
-        "This is not a shell-level connector ACL. "
+        "This is a model-level ACL. With Atelier/vault read permission, offline `\"$ATELIER_PYTHON\" -B \"$ATELIER_ROOT/scripts/interests.py\" active --json` queries (including --kind artist or --kind festival) are allowed; interests mutations and other CLI actions require listed permissions. "
         f"Read `{root}/AGENTS.md` first, then read `{root / source}` completely and execute "
         f"it in this process{' using the Codex adaptation table' if model_runtime(spec) == 'codex' else ''}. Treat the Atelier repository as read-only unless "
         "atelier_access is read-write. Do not inspect scheduler state or the private routine registry; Prefect owns "
@@ -751,6 +742,11 @@ def codex_argv(spec: ModelSpec, *, root: Path, vault: Path, cwd: Path, output: P
     ]
     if spec.adapter != "autoevo":
         argv += ["--add-dir", str(vault)]
+        if (profile["sandbox"] == "workspace-write" and "vault:read-write" in profile["permissions"]
+                and spec.schedule.name in os.environ.get("ATELIER_CACHE_WRITERS", "").split(",")):
+            cache = (vault / tier_segments().get("cache", "cache")).resolve()
+            if cache.is_dir() and not cache.is_relative_to(vault.resolve()):
+                argv += ["--add-dir", str(cache)]
     return argv
 
 
@@ -870,18 +866,16 @@ def screened_log(text: str) -> str:
     flagged: set[int] = set()
     for pattern in SECRET_PATTERNS:
         for match in pattern.finditer(text):
-            flagged.add(text.count("\n", 0, match.start()) + 1)
+            flagged.update(range(text.count("\n", 0, match.start()) + 1, text.count("\n", 0, match.end()) + 2))
     return "\n".join(
         "[line withheld: credential screening]" if number in flagged else line
         for number, line in enumerate(text.splitlines(), 1)
     )
 
 
-# CodexBar never refreshes an expired Claude OAuth token, and a sandboxed
-# refresh could rotate it without persisting it; Claude's own CLI does it here.
+# Refresh the Readwise cache outside the model sandbox so updates persist.
 PRE_SANDBOX_REFRESHES = {
     "readwise:read": ("readwise", "--refresh", "--version"),
-    "quota:read": ("claude", "auth", "status", "--json"),
 }
 
 
@@ -959,7 +953,7 @@ def _model_result(path: Path, spec: ModelSpec, *, vault: Path, started_at: str) 
     if not isinstance(value, dict) or value.get("routine") != spec.schedule.name:
         raise ExecutionError("model result routine does not match")
     if value.get("outcome") not in {"delivered", "noop"}:
-        raise ExecutionError("model did not report a successful domain outcome")
+        raise ExecutionError("model did not report a successful domain outcome: " + screened_log(str(value.get("summary", "")))[:500])
     if not isinstance(value.get("summary"), str):
         raise ExecutionError("model result summary is invalid")
     skipped = value.get("skipped_inputs")
@@ -978,8 +972,6 @@ def _model_result(path: Path, spec: ModelSpec, *, vault: Path, started_at: str) 
                 relative = output.resolve().relative_to(vault.resolve())
         else:
             relative = output
-        if ".." in relative.parts:
-            raise ValueError("reported output_file is unsafe")
         value["output_file"] = relative.as_posix()
         output = receipts.artifact_path(value["output_file"], vault=vault,
                                         output_dir=spec.output_dir, file_pattern=spec.file_pattern)

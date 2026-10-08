@@ -1307,7 +1307,7 @@ def _flat_tier_glob_findings() -> list[Finding]:
 # Frozen from the measured implementation total and largest file plus the
 # review allowance. Lower after verified cuts; raising requires user approval.
 SOURCE_GROWTH_REVIEW_LINES = 50
-SOURCE_LINE_CEILING = 32_652
+SOURCE_LINE_CEILING = 31_901
 SOURCE_FILE_LINE_CEILING = 1_654
 
 
@@ -1397,7 +1397,7 @@ PROSE_PLUMBING = frozenset({
     "skills/reflect/SKILL.md", "routines/_adapters/archived-prompt/PROCEDURE.md",
     "skills/triage/SKILL.md",
 })
-PROSE_PLUMBING_CEILING = 145_000   # frozen at the 2026-09-30 measurement, rounded up to the
+PROSE_PLUMBING_CEILING = 143_000   # frozen at the 2026-10-03 measurement, rounded up to the
                                    # next 1k; lower it after a cut, never raise it
 PROSE_NOTES_WARN = 390_000
 PROSE_NOTES_ERROR = 420_000

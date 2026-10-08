@@ -74,8 +74,9 @@ path.
 The validation command checks declarations and schedules, without contacting
 the Prefect API or running a routine. Model preparation separately checks
 archived prompts, required CLIs, and installed plugins. Neither check proves
-OAuth readiness; complete authentication before cutover. The digest command
-owns the optional CodexBar installation and quota-only permission smoke.
+OAuth readiness; complete authentication before cutover. The `daily-digest`
+process routine refreshes CodexBar quota on the runner's PATH; smoke
+`daily_context.py --refresh-quota --no-weather` there first.
 
 ## Cut over from the legacy scheduler
 
@@ -183,7 +184,12 @@ PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen python scripts/routi
 
 Only deterministic jobs explicitly declared `retry_safe = true` may retry.
 The safe preparation phase can retry because it performs no routine-domain
-effects.
+effects. `routine_prefect.py run` starts model routines only. A failed
+`daily-digest` run logs one JSON line naming its stage; the detail is in
+`$OV/_meta/digest_last_error.txt`. `unrecorded` means the day's note exists
+without a recorded write, so compare it before replacing. Recover with `/digest`,
+or rerun `routine_digest.py morning --refresh-quota --no-weather`, which never
+replaces an existing note.
 
 To restart a service without changing its installation:
 

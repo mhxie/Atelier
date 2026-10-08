@@ -3,6 +3,7 @@
   "hooks": {"enabled": false, "events": []},
   "providers": [
     {"id": "codex", "enabled": true, "source": "oauth", "cookieSource": "off"},
-    {"id": "claude", "enabled": true, "source": "oauth", "cookieSource": "off", "claudeSwapEnabled": false}
+    {"id": "claude", "enabled": true, "source": "cli", "cookieSource": "off", "claudeSwapEnabled": false},
+    {"id": "antigravity", "enabled": true, "source": "auto", "cookieSource": "off"}
   ]
 }
