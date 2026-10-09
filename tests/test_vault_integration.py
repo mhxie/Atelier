@@ -181,7 +181,7 @@ class KnowledgeCLITests(unittest.TestCase):
         path.write_text(text, encoding="utf-8")
         return path
 
-    def cli(self, script, *args, expected=0, paths=None):
+    def cli(self, script, *args, expected=0, paths=None, bin_dir=None):
         # Run the real entrypoint with only the public registry and fixture OV.
         bootstrap = (
             "import runpy,sys,tomllib; from pathlib import Path; "
@@ -191,7 +191,8 @@ class KnowledgeCLITests(unittest.TestCase):
         )
         result = subprocess.run(
             [sys.executable, "-B", "-c", bootstrap, script, *map(str, args)],
-            cwd=ROOT, env={**os.environ, "OV": str(self.vault)},
+            cwd=ROOT, env={**os.environ, "OV": str(self.vault),
+                           **({"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"} if bin_dir else {})},
             capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
@@ -416,6 +417,31 @@ class KnowledgeCLITests(unittest.TestCase):
         self.cli("wiki_trust.py", "--write")
         written = json.loads((self.vault / "_meta/wiki-trust.json").read_text())
         self.assertEqual({**written, "generated_at": None}, {**report, "generated_at": None})
+
+    def test_trust_report_leaves_out_reflects_local_only_folders(self):
+        (self.vault / ".reflect").mkdir()
+        self.put("wiki/Open.md", "# Open\n\nIntro <!-- claim:c1 -->Shared.<!-- /claim:c1 -->\n")
+        self.put("wiki/Secure/Bank.md", "# Bank\n\nIntro <!-- claim:c1 -->Account 1234.<!-- /claim:c1 -->\n\n## References\n\n"
+                 "```anchors c1\n@anchor: url:https://bank.example/x | valid_at: 2020-01-01\n```\n")
+        bin_dir = tempfile.TemporaryDirectory(prefix="atelier-fake-reflect-")
+        self.addCleanup(bin_dir.cleanup)
+        target = self.vault / ".harness/wiki-trust.json"
+
+        def fake_reflect(exit_code):
+            # Reflect's CLI as a harness sees it; exit 3 means local-only folders are unknown.
+            answer = json.dumps({"absolutePath": str(target), "localOnlyFolders": ["secure"]})
+            script = Path(bin_dir.name) / "reflect"
+            script.write_text(f"#!/bin/sh\nprintf '%s' '{answer}'\nexit {exit_code}\n")
+            script.chmod(0o755)
+
+        fake_reflect(0)
+        report = json.loads(self.cli("wiki_trust.py", bin_dir=bin_dir.name).stdout)
+        self.assertIn("wiki/Open.md", report["notes"])
+        self.assertNotIn("wiki/Secure/Bank.md", report["notes"])
+        self.assertNotIn("host:bank.example", report["sources"])
+        fake_reflect(3)
+        self.cli("wiki_trust.py", "--write", expected=1, bin_dir=bin_dir.name)
+        self.assertFalse(target.exists())
 
     def test_shadow_drift_matches_nested_domain_paths(self):
         note = "# Entry\n\n## Claims\n### [C1] Claim\nProse.\n```anchors\n@anchor: doi:fixture | valid_at: 2020-01-01\n```\n"

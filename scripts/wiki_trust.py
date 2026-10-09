@@ -176,34 +176,52 @@ def report(notes: list[trust.WikiNote], as_of: date) -> dict:
             "source_threshold": THRESHOLD, "notes": out, "sources": source_rows}
 
 
-def report_path() -> Path:
-    """Where Reflect reads the report. In a Reflect graph: the path `reflect trust-report`
-    prints (the user may move it in Reflect's Settings), else Reflect's default
-    `.harness/wiki-trust.json` when the CLI is missing or older. Elsewhere `<meta>/wiki-trust.json`."""
+def reflect_target() -> tuple[Path, frozenset[str]]:
+    """Where Reflect reads the report, and the folder names whose notes it must leave out.
+
+    In a Reflect graph: what `reflect trust-report --json` prints (the user may move the
+    report in Reflect's Settings; local-only folders never leave the device, but the report
+    syncs and is committed), else Reflect's default `.harness/wiki-trust.json` and no
+    folders when the CLI is missing or older. Exit 3 means Reflect cannot tell which
+    folders are local-only, or the path links out of the graph, so nothing is written.
+    Elsewhere `<meta>/wiki-trust.json`.
+    """
     root = vault_root()
     if not (root / ".reflect").is_dir():
-        return root / tier_segments().get("meta", "_meta") / "wiki-trust.json"
-    cli = shutil.which("reflect")
-    if cli is not None:
+        return root / tier_segments().get("meta", "_meta") / "wiki-trust.json", frozenset()
+    if cli := shutil.which("reflect"):
         try:
             done = subprocess.run([cli, "--graph", str(root), "trust-report", "--json"],
                                   capture_output=True, text=True, timeout=30, check=True)
-            return Path(json.loads(done.stdout)["absolutePath"])
+            answer = json.loads(done.stdout)
+            folders = frozenset(name.lower() for name in answer.get("localOnlyFolders", []))
+            return Path(answer["absolutePath"]), folders
+        except subprocess.CalledProcessError as err:
+            if err.returncode == 3:
+                raise SystemExit(f"reflect refused to name a safe report path: {err.stderr.strip()}") from err
         except (OSError, subprocess.SubprocessError, ValueError, KeyError):
             pass
-    return root / ".harness" / "wiki-trust.json"
+    return root / ".harness" / "wiki-trust.json", frozenset()
+
+
+def local_only(path: Path, folders: frozenset[str]) -> bool:
+    """Whether a note lies in a local-only folder: any folder in its graph path has one of
+    the names. Reflect compares ASCII case-insensitively; lowercasing all letters only
+    leaves out more."""
+    return any(part.lower() in folders for part in path.relative_to(vault_root()).parts[:-1])
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compute the wiki trust report Reflect reads.")
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today())
-    parser.add_argument("--write", action="store_true", help="write the report where Reflect reads it (see report_path) instead of stdout")
+    parser.add_argument("--write", action="store_true", help="write the report where Reflect reads it (see reflect_target) instead of stdout")
     args = parser.parse_args(argv)
-    payload = json.dumps(report(trust.load_wiki(args.as_of), args.as_of), ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+    path, folders = reflect_target()
+    notes = [note for note in trust.load_wiki(args.as_of) if not local_only(note.path, folders)]
+    payload = json.dumps(report(notes, args.as_of), ensure_ascii=False, indent=1, sort_keys=True) + "\n"
     if not args.write:
         sys.stdout.write(payload)
         return 0
-    path = report_path()
     atomic_write(path, payload)
     print(json.dumps({"output_file": path.relative_to(vault_root()).as_posix(), "bytes": len(payload.encode())}))
     return 0
