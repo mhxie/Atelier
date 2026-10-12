@@ -29,6 +29,7 @@ import autoevo_verify as evidence
 import decay_scan
 import decisions
 import precedent
+import wiki_evidence
 import wiki_review
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -355,7 +356,11 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
                 and pending._parse_date(row["default_at"]) <= today]
     peers = [peer for row in defaults for peer in row.get("peers", [])
              if isinstance(peer, str) and _norm_rel(peer) == peer and peer.startswith(_prefixes(WORKING_TIERS))]
-    wiki = wiki_review.candidates(vault, vault / _segment("wiki"), today)
+    head_wiki = tree_blobs(vault, _segment("wiki"))  # the wiki walk skips secure notes, so nothing below reads one
+    walk = [rel for p in wiki_review.notes(vault / _segment("wiki")) if os.access(p, os.R_OK) and (rel := p.relative_to(vault).as_posix()) in head_wiki]
+    settled = {rel for rel, blob in zip(walk, hash_objects(vault, walk))  # the same checks staging applies below
+               if blob == head_wiki[rel] and now - (vault / rel).stat().st_mtime >= RECENT_EDIT_SECONDS}
+    wiki = wiki_review.candidates(vault, vault / _segment("wiki"), today, eligible=settled.__contains__)
     head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers, *wiki)
     in_scope = {rel for rel in head if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
     files, protected, stamps, sources = {}, [], [], {}
@@ -389,7 +394,7 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
             "retrieval_mode": readiness.get("health", {}).get("semantic_mode", "unavailable"),
             "protected_paths": sorted(protected), "source_files": sources, "state_files": state_hashes, "defaults": defaults,
             "age_guard": age_guard, "notes": notes + [age_guard] if age_guard else notes, "wiki_review": {
-                "files": review, "claims": wiki_review.stage(vault, {rel: Path(row["snapshot"]) for rel, row in review.items()}, today)}}
+                "files": review, "claims": wiki_review.stage(vault, vault / _segment("wiki"), {rel: Path(row["snapshot"]) for rel, row in review.items()}, today)}}
 
 
 def _curator_problem(row: dict, plan: dict, vault: Path, band: str) -> str | None:
@@ -624,14 +629,18 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                         after = {sources[0]: None, target: _file(vault, sources[0]).read_bytes().decode("utf-8")}
                     _apply(vault, record, path, band, after,
                            {rel: plan["source_files"][rel]["before_sha256"] if rel in sources else None for rel in after})
+                rest = wiki_review.undecided(proposal, plan)
+                wiki_evidence.remember_undecided([wiki_review.rest_key(row["current"], row["evidence"]) for row in rest], today)
+                record["notes"] += [f"source check undecided: [[{row['title']}#^c{row['claim']}]]: {row['reason']}" for row in rest]
                 for rel, results in wiki_review.verdicts(proposal, plan).items():
                     current = _file(vault, rel).read_text(encoding="utf-8")
                     after = wiki_review.append(current, results, cycle, f"autoevo-applied-{cycle}")
                     if not wiki_review.safe(current, after, results, cycle):
                         record["notes"].append(f"skipped wiki-review: {rel} would not parse to the returned verdicts")
                     elif _apply(vault, record, path, "wiki-review", {rel: after}, {rel: plan["wiki_review"]["files"][rel]["before_sha256"]},
-                              claims=", ".join(f"c{n} {v}" for n, v in sorted(results.items()))):
-                        record.setdefault("wiki_reviews", []).extend({"path": rel, "claim": n, "verdict": v} for n, v in sorted(results.items()))
+                              claims=", ".join(f"c{n} {a} {v}" for n, (a, v, _) in sorted(results.items()))):
+                        record.setdefault("wiki_reviews", []).extend(
+                            {"path": rel, "claim": n, "agent": a, "verdict": v} for n, (a, v, _) in sorted(results.items()))
                 for entry in plan["defaults"]:
                     if entry.get("default_action") != "stale-banner":
                         continue

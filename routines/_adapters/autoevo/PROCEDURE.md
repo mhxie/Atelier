@@ -129,13 +129,15 @@ do not carry stale responses forward.
 Do not run `precedent.py` setters or queue/ledger commands yourself. Missing,
 incomplete or unsupported judgments leave entries human-only.
 
-## 5. Review staged wiki edits
+## 5. Review staged wiki claims
 
 When `plan.json` `wiki_review.claims` is non-empty, dispatch Reviewer in Claim
-Review mode once per note with each claim's `previous` and `current` text and
-the snapshot's evidence fence. Add one `wiki_reviews` row per judged claim:
-`path`, `claim`, `verdict` and a one-sentence `reason`. Never invent a claim
-or verdict; an unreturned claim stays pending.
+Review mode once per note for `mode: edit` rows, with each claim's `previous`
+and `current` text and the snapshot's evidence fence, and Scout in Source Check
+mode for `mode: support` rows, with `current` and `evidence`. Add one
+`wiki_reviews` row per judged claim: `path`, `claim`, `verdict` and a short
+`reason`. Never invent a claim or verdict. An unreturned edit claim stays pending; an unreturned source check
+rests like an undecided one when other source verdicts return.
 
 ## 6. Return the proposal
 

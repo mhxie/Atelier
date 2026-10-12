@@ -9,10 +9,11 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -158,7 +159,7 @@ def check_daily_digest_routine() -> None:
 def check_wiki_trust_routine() -> None:
     jobs = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))["routine"]
     row = next(row for row in jobs if row["name"] == "wiki-trust-report")
-    expect(row["cron"] == ["0 7 * * *"] and row["argv"] == ["{python}", "scripts/wiki_trust.py", "--write"]
+    expect(row["cron"] == ["0 7 * * *"] and row["argv"] == ["{python}", "scripts/wiki_trust.py", "--write", "--fetch-seconds", "200"]
            and row["retry_safe"] is True, "wiki trust report Prefect declaration drift")
 
 
@@ -174,6 +175,11 @@ class KnowledgeCLITests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="atelier-knowledge-cli-")
         self.addCleanup(temp.cleanup)
         self.vault = Path(temp.name).resolve()
+        cache = tempfile.TemporaryDirectory(prefix="atelier-evidence-cache-")
+        self.addCleanup(cache.cleanup)
+        environment = patch.dict(os.environ, {"XDG_CACHE_HOME": cache.name})
+        environment.start()
+        self.addCleanup(environment.stop)
 
     def put(self, relative, text):
         path = self.vault / relative
@@ -351,7 +357,6 @@ class KnowledgeCLITests(unittest.TestCase):
                 )
                 payload = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)
                 self.assertFalse(payload["notes"][0]["integrity_ok"])
-                self.assertEqual(payload["notes"][0]["note_score"], 0)
                 self.cli("lint.py", "--json", expected=1)
                 self.cli("trust.py", "--as-of", invalid, "--json", expected=2)
 
@@ -365,6 +370,165 @@ class KnowledgeCLITests(unittest.TestCase):
         self.put("wiki/Entry.md", "# Entry\n\nSee [[Cited]].\n")
         notes = json.loads(self.cli("staleness.py", "--json").stdout)["notes"]
         self.assertEqual([Path(n["path"]).name for n in notes if n["category"] == "promote"], ["Topic.md"])
+
+    def test_retracted_papers_weigh_nothing_and_only_gone_links_are_named(self):
+        import wiki_evidence
+
+        crossref = {"title": ["Retracted study"], "abstract": "<jats:p>Water &amp; ice.</jats:p>",
+                    "updated-by": [{"type": "retraction", "source": "retraction-watch"}]}
+        pages = {"https://api.crossref.org/v1/works/10.1/x": (200, json.dumps({"message": crossref})),
+                 "https://gone.example/a": (404, ""), "https://blocked.example/b": (503, ""),
+                 "https://raw.githubusercontent.com/o/r/main/f.py": (200, "<html> = '<div>'\ndef f(x):\n    return 0 < x and x > 10\n")}
+        fetched = []
+
+        def get(url):
+            fetched.append(url)
+            status, body = pages[url]
+            return status, url, body
+
+        anchors = "".join(f"@anchor: {a} | valid_at: 2020-01-01\n" for a in (
+            "doi:10.1/x", "url:https://gone.example/a", "url:https://blocked.example/b", "url:https://github.com/o/r/blob/main/f.py#L1"))
+        self.put("wiki/Entry.md", "# Entry\n\nIntro <!-- claim:c1 -->an assertion.<!-- /claim:c1 -->\n\n## References\n\n```anchors c1\n" + anchors + "```\n")
+        counts = wiki_evidence.refresh({"doi:10.1/x", "url:https://gone.example/a", "url:https://blocked.example/b",
+                                        "url:https://github.com/o/r/blob/main/f.py#L1"}, date.today(), 60, get=get)
+        self.assertEqual((counts["fetched"], counts["failed"], counts["retracted"]), (4, 2, 1))
+        self.assertIn("https://raw.githubusercontent.com/o/r/main/f.py", fetched)
+        self.assertIn("return 0 < x and x > 10", wiki_evidence.text("url:https://github.com/o/r/blob/main/f.py#L1"))
+        self.assertEqual(wiki_evidence.fetch("doi:10.48550/arxiv.1", get=lambda url: (404, url, ""))["status"], 0)  # DataCite DOI
+        raw = wiki_evidence.fetch("url:https://raw.githubusercontent.com/o/r/main/t.py",
+                                  get=lambda url: (200, url, "<html> = '<body>'\nreturn x < lo or x > hi\n"))
+        self.assertIn("x < lo or x > hi", raw["text"])
+        self.assertEqual(wiki_evidence.text("doi:10.1/x"), "Retracted study\nWater & ice.")
+        pages["https://api.crossref.org/v1/works/10.1/x"] = (503, "")  # an outage must not un-retract the paper
+        later = date.today() + timedelta(days=wiki_evidence.FRESH_DAYS + 1)
+        self.assertEqual(wiki_evidence.refresh({"doi:10.1/x", "url:https://gone.example/a"}, later, 60, get=get)["failed"], 2)
+        self.assertEqual((wiki_evidence.load("doi:10.1/x")["retracted"], wiki_evidence.load("url:https://gone.example/a")["gone"]), (True, 2))
+        self.put("wiki/Private.md", "---\nprivate: true\n---\n# Private\n\nIntro <!-- claim:c1 -->a claim.<!-- /claim:c1 -->\n\n"
+                 "## References\n\n```anchors c1\n@anchor: url:https://private.example/p | valid_at: 2020-01-01\n```\n")
+        report = json.loads(self.cli("wiki_trust.py").stdout)
+        self.assertNotIn("host:private.example", report["sources"])  # the report syncs; a private note's sources stay home
+        self.assertEqual((report["sources"]["doi:10.1/x"]["weight"], report["sources"]["doi:10.1/x"]["reasons"][-1]["kind"]), (0, "retracted"))
+        reasons = report["notes"]["wiki/Entry.md"]["claims"]["c1"]["reasons"]
+        self.assertEqual([r["data"]["source"] for r in reasons if r["kind"] == "unreachable"], ["url:https://gone.example/a"])
+        self.assertIn("doi:10.1/x", [r["data"].get("origin") for r in reasons if r["kind"] == "untrusted-source"])
+
+    def test_arxiv_evidence_stubs_withdrawals_versions_and_soft_404s(self):
+        import trust
+        import wiki_evidence
+        import wiki_review
+        import wiki_trust
+
+        summary = "Water boils at 100 C at sea level. " * 20
+        feed = (f"<feed><entry><title>Boiling</title><summary>{summary}</summary>"
+                "<arxiv:comment>This paper has been withdrawn by the author</arxiv:comment></entry></feed>")
+        cited = f"<feed><entry><title>Boiling</title><summary>{summary.replace('100 C', '99 C')}</summary></entry></feed>"
+        pages = {"https://export.arxiv.org/api/query?id_list=2501.00001": (200, feed),  # the latest version records withdrawal
+                 "https://export.arxiv.org/api/query?id_list=2501.00001v2": (200, cited),  # the cited version supplies the abstract
+                 "https://arxiv.org/html/2501.00001v2": (200, "<html><body><p>See pages 1-last of paper.pdf</p></body></html>")}
+        row = wiki_evidence.fetch("arxiv:2501.00001v2", get=lambda url: (*pages[url][:1], url, pages[url][1]))
+        self.assertEqual((row["text"], row["retracted"]), (summary.replace("100 C", "99 C").strip(), True))  # stub: cited abstract
+        pages["https://export.arxiv.org/api/query?id_list=2501.00001v2"] = (200, "<feed><entry><id>http://arxiv.org/api/errors#x</id></entry></feed>")
+        self.assertEqual(wiki_evidence.fetch("arxiv:2501.00001v2", get=lambda url: (*pages[url][:1], url, pages[url][1]))["status"], 404)
+        pages["https://export.arxiv.org/api/query?id_list=2501.00001v2"] = (503, "")
+        outage = {"https://export.arxiv.org/api/query?id_list=2501.00002": (503, ""), "https://arxiv.org/html/2501.00002": (404, "")}
+        self.assertEqual(wiki_evidence.fetch("arxiv:2501.00002", get=lambda url: (*outage[url][:1], url, outage[url][1]))["status"], 503)
+        self.assertEqual(wiki_evidence.fetch("arxiv:2501.00001v2", get=lambda url: (*pages[url][:1], url, pages[url][1]))["status"], 503)
+        anchor = trust.Marker("@anchor", {"_anchor_type": "url", "_anchor_id": "https://arxiv.org/pdf/2501.00001v2.pdf#page=8",
+                                          "_node_id": "url:https://arxiv.org/pdf/2501.00001v2.pdf#page=8"}, 1, "")
+        self.assertEqual((wiki_trust.origin("arxiv", "2501.00001v2"), wiki_trust.evidence_key(anchor)), ("arxiv:2501.00001", "arxiv:2501.00001v2"))
+        self.assertEqual(wiki_evidence.html_text('<p>x<math><annotation encoding="tex">\\frac{1}{2}</annotation></math>&#8203;y</p>'), "x [formula omitted] y")
+        self.assertEqual(wiki_evidence.html_text('<p>c = <math alttext="\\sqrt{l}"><msqrt><mi>l</mi></msqrt></math></p>'), "c = \\sqrt{l}")
+        self.assertEqual(wiki_evidence.html_text("<p>E = <math><msqrt><mi>x</mi></msqrt></math></p>"), "E = [formula omitted]")
+        self.assertEqual(wiki_evidence.html_text("<jats:p>E = <mml:math><mml:msqrt>x</mml:msqrt></mml:math></jats:p>"), "E = [formula omitted]")
+        pages["https://export.arxiv.org/api/query?id_list=2501.00001v2"] = (200, cited)
+        wiki_evidence.refresh({"arxiv:2501.00001v2"}, date.today(), 60, get=lambda url: (*pages[url][:1], url, pages[url][1]))
+        self.assertTrue(wiki_evidence.withdrawn("arxiv:2501.00001", date.today()))  # the work stays withdrawn whichever version is cited
+        withdrawn_feed = {**pages, "https://export.arxiv.org/api/query?id_list=2501.00001v2": (503, "")}  # cited text fails
+        wiki_evidence.atomic_write(wiki_evidence._path("arxiv:2501.00001v2", ".json"), json.dumps({"status": 200, "retracted": False}))
+        wiki_evidence.atomic_write(wiki_evidence._path("arxiv:2501.00001", ".retracted"), "false")
+        wiki_evidence.refresh({"arxiv:2501.00001v2"}, date.today(), 60, get=lambda url: (*withdrawn_feed[url][:1], url, withdrawn_feed[url][1]))
+        self.assertEqual((wiki_evidence.load("arxiv:2501.00001v2")["retracted"], wiki_evidence.withdrawn("arxiv:2501.00001", date.today())), (True, True))
+        self.assertFalse(wiki_evidence.withdrawn("arxiv:2501.00001", date(2020, 1, 1)))  # a past snapshot predates the finding
+        wiki_evidence.atomic_write(wiki_evidence._path("arxiv:2501.00001", ".retracted"), json.dumps("2020-06-01"))
+        v3 = {**withdrawn_feed, "https://export.arxiv.org/api/query?id_list=2501.00001v3": (503, ""), "https://arxiv.org/html/2501.00001v3": (404, "")}
+        wiki_evidence.refresh({"arxiv:2501.00001v3"}, date.today(), 60, get=lambda url: (*v3[url][:1], url, v3[url][1]))
+        self.assertTrue(wiki_evidence.withdrawn("arxiv:2501.00001", date(2020, 7, 1)))  # a newly fetched version keeps the earliest date
+        cleared = {**withdrawn_feed, "https://export.arxiv.org/api/query?id_list=2501.00001": (200, feed.replace("has been withdrawn", "was revised"))}
+        later = date.today() + timedelta(days=wiki_evidence.RETRY_DAYS + 1)  # only a completed withdrawal check clears the flag
+        wiki_evidence.refresh({"arxiv:2501.00001v2"}, later, 60, get=lambda url: (*cleared[url][:1], url, cleared[url][1]))
+        self.assertEqual((wiki_evidence.load("arxiv:2501.00001v2")["retracted"], wiki_evidence.withdrawn("arxiv:2501.00001", later)), (False, False))
+        wiki_evidence.atomic_write(wiki_evidence._path("arxiv:2501.00001v1", ".json"), json.dumps({"status": 200, "retracted": True}))
+        stale = self.put("wiki/Versions.md", "# Versions\n\nIntro <!-- claim:c1 -->a claim.<!-- /claim:c1 -->\n\n## References\n\n"
+                         "```anchors c1\n@anchor: arxiv:2501.00001v1 | valid_at: 2020-01-01\n```\n")
+        rows = wiki_trust.sources([trust.parse_wiki_note(stale, later)], later)  # a stale version record cannot outvote the work check
+        self.assertNotIn("retracted", [r["kind"] for r in rows["arxiv:2501.00001"]["reasons"]])
+        gist = wiki_evidence.fetch("url:https://gist.github.com/u/abc/raw", get=lambda url: (
+            200, "https://gist.githubusercontent.com/u/abc/raw/f.py", "<html> = 1\nreturn a < b > c\n"))
+        self.assertIn("a < b > c", gist["text"])
+        started = time.monotonic()  # unclosed tags must not make extraction quadratic
+        wiki_evidence.html_text('<p><math alttext="x"><nav><svg>' * 40_000)
+        self.assertLess(time.monotonic() - started, 5)
+        import http.server
+        import threading
+        server = http.server.HTTPServer(("127.0.0.1", 0), http.server.SimpleHTTPRequestHandler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.assertEqual(wiki_evidence._get(f"http://127.0.0.1:{server.server_port}/")[0], 0)  # never reaches a private address
+        self.assertTrue({"2023", "0.1", "4x"} <= wiki_evidence._tokens("In 2023. A 4x gain at 0.1."))
+        body = {"https://docs.example/page": "Long article text. " * 100}
+        get = lambda url: (200, url, body[url])  # noqa: E731
+        wiki_evidence.refresh({"url:https://docs.example/page"}, date.today(), 60, get=get)
+        body["https://docs.example/page"] = "<html><title>Not found</title><body>Gone</body></html>"
+        wiki_evidence.refresh({"url:https://docs.example/page"}, date.today() + timedelta(days=wiki_evidence.FRESH_DAYS + 1), 60, get=get)
+        self.assertIn("Long article text.", wiki_evidence.text("url:https://docs.example/page"))  # a soft 404 keeps the text
+        staged = [{"source": "doi:10.1/x", "title": "", "passages": ["Water boils."]}]
+        wiki_evidence.remember_undecided([wiki_review.rest_key("A claim.", staged)], date.today())
+        self.assertTrue(wiki_evidence.undecided(wiki_review.rest_key("A claim.", staged), date.today()))
+        self.assertFalse(wiki_evidence.undecided(wiki_review.rest_key("A claim.", [{**staged[0], "passages": ["New text."]}]), date.today()))
+
+    def test_nightly_review_leaves_doubts_to_the_user_and_needs_verbatim_quotes(self):
+        import trust
+        import wiki_review
+
+        def claim(*records):
+            source = self.put("wiki/Doubt.md", "# Doubt\n\nIntro <!-- claim:c1 -->a claim.<!-- /claim:c1 -->\n\n## References\n\n"
+                              "```anchors c1\n@anchor: doi:10.1/x | valid_at: 2020-01-01\n" + "".join(r + "\n" for r in records) + "```\n")
+            return trust.parse_wiki_note(source, date.today()).claims[0]
+
+        pending = "@pass: editor | status: pending | at: 2020-01-04"
+        doubted = claim("@pass: reader | status: flagged | at: 2020-01-02", "@pass: reviewer | status: verified | at: 2020-01-03", pending)
+        self.assertEqual((wiki_review.doubted(doubted, date.today()), wiki_review.edit_due(doubted, date.today())), (True, False))
+        self.assertEqual(wiki_review.attention(trust.parse_wiki_note(doubted.note_path, date.today()), date.today()),
+                         [(1, "doubt settled only by an edit review")])
+        redrafted = claim("@pass: reviewer | status: flagged | at: 2020-01-02", pending)  # a fidelity flag invites the fixed edit
+        self.assertTrue(wiki_review.edit_due(redrafted, date.today()))
+        import wiki_trust
+        human_then_auto = claim("@pass: reader | status: flagged | at: 2020-01-04",
+                                "@pass: reviewer | status: flagged | at: 2020-01-05 | ref: autoevo-applied-2020-01-05")
+        note = trust.parse_wiki_note(human_then_auto.note_path, date.today())  # a later automated record never hides a person's doubt
+        self.assertEqual(wiki_trust.sources([note], date.today())["doi:10.1/x"]["reasons"][2]["data"]["disputed"], 1)
+        for ref, disputed in (("autoevo-applied-2020-01-05", 0), ("a session", 1)):  # an automated flag waits for the user
+            note = trust.parse_wiki_note(claim(f"@pass: scout | status: flagged | at: 2020-01-05 | ref: {ref}").note_path, date.today())
+            self.assertEqual(wiki_trust.sources([note], date.today())["doi:10.1/x"]["reasons"][2]["data"]["disputed"], disputed)
+        staged = {"evidence": [{"source": "doi:10.1/x", "title": "A Study Of Boiling Water", "passages": ["Water boils at 100 C.", "Ice melts at 0 C."]}]}
+        for verdict, reason, counts in (("verified", 'It says "Water boils at 100 C."', True),
+                                        ("verified", 'The title is "A Study Of Boiling Water".', False),
+                                        ("flagged", 'The title is "A Study Of Boiling Water".', True),
+                                        ("verified", 'It says "boils at 100 C. Ice melts".', False),
+                                        ("verified", 'It says "              ".', False)):
+            with self.subTest(reason=reason):
+                self.assertEqual(wiki_review.decided({"verdict": verdict, "reason": reason}, staged), counts)
+        undecided = {"verdict": "inconclusive", "reason": "No passage states it."}
+        for minicheck, verdict, status in ((True, "inconclusive", "verified"), (True, "flagged", None), (None, "inconclusive", None)):
+            with self.subTest(minicheck=minicheck, verdict=verdict):  # MiniCheck support counts unless Scout flags the claim
+                self.assertEqual(wiki_review.support_status({**undecided, "verdict": verdict}, {**staged, "minicheck": minicheck}), status)
+        plan = {"wiki_review": {"claims": [{**staged, "path": "wiki/Doubt.md", "claim": 1, "mode": "support", "minicheck": True}]}}
+        self.assertEqual(wiki_review.verdicts({"wiki_reviews": [{**undecided, "path": "wiki/Doubt.md", "claim": 1}]}, plan),
+                         {"wiki/Doubt.md": {1: ("scout", "verified", "#minicheck")}})  # the record says MiniCheck decided
+        text = claim().note_path.read_text()
+        after = wiki_review.append(text, {1: ("scout", "verified", "#minicheck")}, "2020-01-05", "autoevo-applied-2020-01-05")
+        self.assertTrue(wiki_review.safe(text, after, {1: ("scout", "verified", "#minicheck")}, "2020-01-05"))
+        self.assertIn("| ref: autoevo-applied-2020-01-05#minicheck\n", after)
 
     def test_review_overlays_match_reflects_shared_claim_trust_cases(self):
         """The canonical claim-trust cases: Atelier computes tiers and overlays; Reflect renders them."""
@@ -538,6 +702,7 @@ class KnowledgeCLITests(unittest.TestCase):
 
     def test_article_ranges_preserve_evidence_graph_and_time_windows(self):
         import trust
+        import wiki_trust
 
         anchors = ("@anchor: doi:fixture | valid_at: 2020-01-01\n"
                    "@anchor: url:https://example.org/old | valid_at: 2020-01-01 | invalid_at: 2020-02-01 | readwise: fixture\n")
@@ -561,7 +726,7 @@ class KnowledgeCLITests(unittest.TestCase):
         self.assertTrue(all(n.integrity_ok() for n in new), [n.parse_errors for n in new])
         for day in (date(2019, 12, 31), date(2020, 1, 15), date(2020, 2, 1)):
             with self.subTest(day=day), patch.object(trust, "vault_root", return_value=self.vault):
-                self.assertEqual(trust.score_notes(new, day), trust.score_notes(old, day))
+                self.assertEqual(wiki_trust.tiers(new, day), wiki_trust.tiers(old, day))
 
     def test_article_ranges_own_same_line_references_and_report_original_utf8_offsets(self):
         import trust
@@ -687,7 +852,8 @@ class KnowledgeCLITests(unittest.TestCase):
             notes = {n["title"]: n for n in payload["notes"]}
             self.assertEqual(set(notes), {"Reader", "Source"})
             self.assertTrue(notes["Reader"]["integrity_ok"], notes["Reader"]["parse_errors"])
-            self.assertEqual(notes["Reader"]["note_score"], 0)
+            claim = json.loads(self.cli("wiki_trust.py").stdout)["notes"]["wiki/Reader.md"]["claims"]["c2"]
+            self.assertEqual((claim["tier"], [r["kind"] for r in claim["reasons"]]), ("needs-work", ["evidence"]))
             self.assertEqual(notes["Reader"]["claims"][0]["cites"], 1)
             self.assertEqual(len(notes["Reader"]["claims"][0]["range_utf8"]), 2)
         for target in ("Missing", "Ordinary#^c1", "Source#^c2", "Source#^c1٢"):
@@ -704,7 +870,6 @@ class KnowledgeCLITests(unittest.TestCase):
         note = json.loads(self.cli("trust.py", "--note", source, "--json").stdout)["notes"][0]
         self.assertFalse(note["integrity_ok"])
         self.assertIn("ambiguous", " ".join(note["parse_errors"]))
-        self.assertEqual(note["note_score"], 0)
 
     def test_unreadable_notes_do_not_abort_unrelated_trust_scores(self):
         import _reflect
@@ -727,16 +892,14 @@ class KnowledgeCLITests(unittest.TestCase):
                 payload = json.loads(self.cli("trust.py", "--json").stdout)
                 by_path = {Path(n["path"]): n for n in payload["notes"]}
                 self.assertTrue(by_path[source]["integrity_ok"])
-                self.assertGreater(by_path[source]["note_score"], 0)
                 self.assertIn("read error", " ".join(by_path[unavailable]["parse_errors"]))
-                self.assertEqual(by_path[unavailable]["note_score"], 0)
                 self.assertEqual(by_path[reader]["integrity_ok"], target == "Source#^c1")
                 if target != "Source#^c1":
-                    self.assertEqual(by_path[reader]["note_score"], 0)
                     self.assertIn("not found", " ".join(by_path[reader]["parse_errors"]))
 
-    def test_editor_pending_requires_its_own_pair_and_preserves_reviewer_floor(self):
+    def test_editor_pending_requires_its_own_pair_and_marks_the_claim_edited(self):
         import trust
+        import wiki_trust
 
         prefix = "# Reader\n\n<!-- claim:c1 -->\n\nAn assertion.<!-- /claim:c1 -->\n\n## Evidence\n```anchors c1\n"
         reviewer = "@pass: reviewer | status: verified | at: 2020-01-01\n"
@@ -745,11 +908,11 @@ class KnowledgeCLITests(unittest.TestCase):
         source.write_text(prefix + reviewer + "@pass: editor | status: pending | at: 2020-02-01\n```\n")
         after = trust.parse_wiki_note(source, date.today())
         self.assertTrue(after.integrity_ok(), after.parse_errors)
-        self.assertEqual(trust.score_notes([before], date.today()), trust.score_notes([after], date.today()))
-        self.assertEqual(trust.score_notes([after], date.today())[0][after.claims[0].key], 0.1)
+        tier = {n: wiki_trust.tiers([n], date.today())[0][n.claims[0].key] for n in (before, after)}
+        self.assertEqual((tier[before]["tier"], tier[after]["tier"], tier[after]["overlays"]), ("needs-work", "needs-work", ["edited"]))
         source.write_text(prefix + "@pass: editor | status: pending | at: 2020-02-01\n```\n")
         pending_only = trust.parse_wiki_note(source, date.today())
-        self.assertEqual(trust.score_notes([pending_only], date.today())[0][pending_only.claims[0].key], 0)
+        self.assertEqual(pending_only.claims[0].review(date.today()), "pending")
         for marker in ("@pass: editor | status: verified | at: 2020-01-01",
                        "@pass: reviewer | status: pending | at: 2020-01-01",
                        "@pass: editor | status: pending | valid_at: 2020-01-01",

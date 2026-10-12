@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Compute deterministic TrustRank with dated evidence and reviewer floors.
+"""Parse wiki entries into claims, dated evidence and review records, and validate them.
 
-Anchors seed PageRank; citations propagate it; passes add no graph mass.
+Tiers and source reputation live in wiki_trust.py.
 """
 
 from __future__ import annotations
@@ -22,10 +22,6 @@ from _claim_ranges import LEDGER_HEADINGS, MarkdownSource, REFERENCE_RE, byte_ra
 from _reflect import TitleIndex, read_head  # noqa: E402
 
 WIKI_DIR = tier("wiki")
-DAMPING = 0.85
-FLOOR = 0.1
-MAX_ITER = 200
-TOL = 1e-9
 
 ANCHOR_TYPES = {"s2", "arxiv", "doi", "isbn", "url", "gist"}
 PASS_AGENTS = {"reviewer", "challenger", "thinker", "scout", "curator", "editor", "reader"}
@@ -50,23 +46,15 @@ class Marker:
 
     @property
     def valid_at(self) -> date | None:
-        v = self.fields.get("valid_at")
-        return _parse_iso(v) if v else None
+        return _parse_iso(self.fields["valid_at"]) if self.fields.get("valid_at") else None
 
     @property
     def invalid_at(self) -> date | None:
-        v = self.fields.get("invalid_at")
-        return _parse_iso(v) if v else None
+        return _parse_iso(self.fields["invalid_at"]) if self.fields.get("invalid_at") else None
 
     def active_on(self, as_of: date) -> bool:
-        # Evidence validity is half-open: [valid_at, invalid_at).
-        va = self.valid_at
-        if va is None or va > as_of:
-            return False
-        ia = self.invalid_at
-        if ia is not None and ia <= as_of:
-            return False
-        return True
+        """Evidence validity is half-open: [valid_at, invalid_at)."""
+        return self.valid_at is not None and self.valid_at <= as_of and (self.invalid_at is None or as_of < self.invalid_at)
 
 
 class Claim:
@@ -122,18 +110,6 @@ class WikiNote:
 
     def integrity_ok(self) -> bool:
         return not self.parse_errors
-
-    def has_reviewer_pass(self, as_of: date) -> bool:
-        for claim in self.claims:
-            for p in claim.passes:
-                if not p.active_on(as_of):
-                    continue
-                if (
-                    p.fields.get("_agent") == "reviewer"
-                    and p.fields.get("status") == "verified"
-                ):
-                    return True
-        return False
 
 
 # Parser
@@ -376,11 +352,11 @@ def parse_wiki_note(path: Path, today: date) -> WikiNote:
     return note
 
 
-# Graph construction + PageRank
+# Citations
 
 
 def _resolve_cites(notes: list[WikiNote]) -> None:
-    """Resolve before graph construction; ordinary notes provide provenance only."""
+    """Resolve citation targets; ordinary notes provide provenance only."""
     wiki = {note.path: note for note in notes}
     visible = None
     ordinary = {}
@@ -408,354 +384,71 @@ def _resolve_cites(notes: list[WikiNote]) -> None:
                 note.parse_errors.append(f"line {c.line_no}: @cite target `[[{target_title}]] #C{target_cn}` does not exist or has invalid ownership")
 
 
-def build_graph(
-    notes: list[WikiNote], as_of: date
-) -> tuple[list[str], dict[str, list[str]], dict[str, float], set[str]]:
-    """Build anchor -> claim and cited -> citing edges after citation validation.
-
-    Only valid notes participate; active anchors receive uniform personalization.
-    """
-    notes_by_path: dict[Path, WikiNote] = {n.path: n for n in notes}
-
-    anchor_nodes: set[str] = set()
-    claim_nodes: set[str] = set()
-    edges: list[tuple[str, str]] = []
-
-    for note in notes:
-        if not note.integrity_ok():
-            # A note that fails structural integrity contributes neither
-            # seed mass nor propagation edges. Its claims still become
-            # nodes so they appear in the report with score 0.
-            for claim in note.claims:
-                claim_nodes.add(claim.key)
-            continue
-
-        for claim in note.claims:
-            claim_nodes.add(claim.key)
-
-            for a in claim.anchors:
-                if not a.active_on(as_of):
-                    continue
-                node_id = a.fields["_node_id"]
-                anchor_nodes.add(node_id)
-                edges.append((node_id, claim.key))
-
-            for c in claim.cites:
-                if not c.active_on(as_of) or c.fields.get("_provenance_only"):
-                    continue
-                target_path = Path(c.fields["_cite_path"])  # Resolved by _resolve_cites.
-                target_note = notes_by_path[target_path]
-                # A cite edge only propagates trust from a source note that
-                # itself passed integrity. If the target failed pass 1, we
-                # silently drop the edge (the target's score is zero anyway).
-                if not target_note.integrity_ok():
-                    continue
-                target_cn = c.fields.get("_cite_claim_number") or ""
-                if target_cn:
-                    target_key = f"{target_path.as_posix()}#C{target_cn}"
-                    edges.append((target_key, claim.key))
-                else:
-                    # No specific claim: edge from every claim in the
-                    # target note to this claim, each with equal share
-                    # via PageRank's natural split by out-degree.
-                    for other in target_note.claims:
-                        edges.append((other.key, claim.key))
-
-    nodes = sorted(anchor_nodes | claim_nodes)
-    out_edges: dict[str, list[str]] = {v: [] for v in nodes}
-    for src, dst in edges:
-        out_edges[src].append(dst)
-
-    personalization: dict[str, float] = {}
-    if anchor_nodes:
-        share = 1.0 / len(anchor_nodes)
-        for a in anchor_nodes:
-            personalization[a] = share
-
-    return nodes, out_edges, personalization, claim_nodes
-
-
-def pagerank(
-    nodes: list[str],
-    out_edges: dict[str, list[str]],
-    personalization: dict[str, float],
-    alpha: float = DAMPING,
-    max_iter: int = MAX_ITER,
-    tol: float = TOL,
-) -> dict[str, float]:
-    """Iterate personalized PageRank; dangling and teleport mass follow personalization."""
-    n = len(nodes)
-    if n == 0:
-        return {}
-    idx = {v: i for i, v in enumerate(nodes)}
-
-    total_p = sum(personalization.values())
-    if total_p <= 0:
-        # No seeds means zero trust; uniform personalization would invent intrinsic trust.
-        return {v: 0.0 for v in nodes}
-    p = [personalization.get(v, 0.0) / total_p for v in nodes]
-
-    r = [1.0 / n] * n
-    dangling = [1 if not out_edges.get(v) else 0 for v in nodes]
-
-    for _ in range(max_iter):
-        dangling_mass = alpha * sum(r[i] for i in range(n) if dangling[i])
-        r_new = [(1.0 - alpha) * p[i] + dangling_mass * p[i] for i in range(n)]
-        for v in nodes:
-            targets = out_edges.get(v) or []
-            if not targets:
-                continue
-            i = idx[v]
-            share = alpha * r[i] / len(targets)
-            for t in targets:
-                r_new[idx[t]] += share
-        delta = sum(abs(r_new[i] - r[i]) for i in range(n))
-        r = r_new
-        if delta < tol:
-            break
-
-    return {nodes[i]: r[i] for i in range(n)}
-
-
-# Scoring
-
-
-def score_notes(
-    notes: list[WikiNote], as_of: date
-) -> tuple[dict[str, float], dict[Path, float]]:
-    """Return (claim_scores, note_scores) after PageRank + floor trust."""
-    _resolve_cites(notes)
-    nodes, out_edges, personalization, claim_nodes = build_graph(notes, as_of)
-    raw = pagerank(nodes, out_edges, personalization)
-
-    claim_scores: dict[str, float] = {
-        k: raw.get(k, 0.0) for k in claim_nodes
-    }
-
-    # Apply claim-level floor trust.
-    for note in notes:
-        if not note.integrity_ok():
-            continue
-        if not note.has_reviewer_pass(as_of):
-            continue
-        for claim in note.claims:
-            if claim_scores.get(claim.key, 0.0) < FLOOR:
-                claim_scores[claim.key] = FLOOR
-
-    note_scores: dict[Path, float] = {}
-    for note in notes:
-        if not note.claims:
-            note_scores[note.path] = 0.0
-            continue
-        vals = [claim_scores.get(c.key, 0.0) for c in note.claims]
-        note_scores[note.path] = sum(vals) / len(vals)
-
-    return claim_scores, note_scores
-
-
 # CLI
 
 
+def wiki_paths(root: Path) -> list[Path]:
+    """Wiki entries in path order, without folder indexes, secure notes or symlinks."""
+    return [path for path in sorted(root.rglob("*.md"))
+            if path.name != "index.md" and "secure" not in path.relative_to(root).parts and not path.is_symlink()]
+
+
+def _fail(message: str):
+    sys.stderr.write(f"trust.py: {message}\n")
+    sys.exit(2)
+
+
 def load_wiki(as_of: date, only: Path | None = None) -> list[WikiNote]:
-    if only is not None:
-        if not only.exists():
-            sys.stderr.write(f"trust.py: no such file: {only}\n")
-            sys.exit(2)
-        # Resolve relative --note paths before comparing against the absolute wiki root.
-        only_abs = only.resolve()
-        if WIKI_DIR not in only_abs.parents or "secure" in only_abs.relative_to(WIKI_DIR).parts:
-            sys.stderr.write(
-                f"trust.py: {only} is not under {WIKI_DIR} (structural integrity item 1)\n"
-            )
-            sys.exit(2)
-        return [parse_wiki_note(only_abs, as_of)]
-
+    if only is not None and not only.exists():
+        _fail(f"no such file: {only}")
+    if only is not None:  # resolve a relative --note path before comparing against the absolute wiki root
+        if WIKI_DIR not in only.resolve().parents or "secure" in only.resolve().relative_to(WIKI_DIR).parts:
+            _fail(f"{only} is not under {WIKI_DIR} (structural integrity item 1)")
+        return [parse_wiki_note(only.resolve(), as_of)]
     if not WIKI_DIR.exists():
-        sys.stderr.write(f"trust.py: {WIKI_DIR} does not exist\n")
-        sys.exit(2)
-
-    # Exclude auto-generated files that don't follow wiki schema.
-    excluded = {"index.md"}
-
-    notes: list[WikiNote] = []
-    # Recurse into domain buckets; exclusions also apply to their index basenames.
-    for path in sorted(WIKI_DIR.rglob("*.md")):
-        if path.name in excluded or "secure" in path.relative_to(WIKI_DIR).parts or path.is_symlink():
-            continue
-        notes.append(parse_wiki_note(path, as_of))
-    return notes
+        _fail(f"{WIKI_DIR} does not exist")
+    return [parse_wiki_note(path, as_of) for path in wiki_paths(WIKI_DIR)]
 
 
-def format_table(
-    notes: list[WikiNote],
-    claim_scores: dict[str, float],
-    note_scores: dict[Path, float],
-    as_of: date,
-) -> str:
-    lines = []
-    lines.append(f"TrustRank report  (as-of {as_of.isoformat()})")
-    lines.append(f"Scanned {len(notes)} wiki entries under {WIKI_DIR}/")
-    lines.append("")
-    header = f"{'score':>7}  {'claims':>6}  {'status':<10}  note"
-    lines.append(header)
-    lines.append("-" * len(header))
-
-    ranked = sorted(
-        notes,
-        key=lambda n: (-note_scores.get(n.path, 0.0), n.path.as_posix()),
-    )
-    for note in ranked:
-        score = note_scores.get(note.path, 0.0)
-        status = "ok" if note.integrity_ok() else "fail"
-        lines.append(
-            f"{score:7.4f}  {len(note.claims):6d}  {status:<10}  {note.path.as_posix()}"
-        )
-
-    broken = [n for n in notes if not n.integrity_ok()]
-    if broken:
-        lines.append("")
-        lines.append("Structural integrity failures:")
-        for n in broken:
-            lines.append(f"  {n.path.as_posix()}")
-            for err in n.parse_errors:
-                lines.append(f"    - {err}")
+def format_table(notes: list[WikiNote], as_of: date) -> str:
+    lines = [f"Wiki integrity  (as-of {as_of.isoformat()}; tiers: scripts/wiki_trust.py)",
+             f"Scanned {len(notes)} wiki entries under {WIKI_DIR}/", ""]
+    for note in sorted(notes, key=lambda n: (n.integrity_ok(), n.path.as_posix())):
+        pending = sum(c.review(as_of) == "pending" for c in note.claims)
+        lines.append(f"{'ok' if note.integrity_ok() else 'FAIL':<4}  {len(note.claims):4d} claims  {pending:3d} pending  {note.path.as_posix()}")
+        lines += [f"    - {err}" for err in note.parse_errors]
     return "\n".join(lines) + "\n"
 
 
-def format_note_detail(
-    note: WikiNote,
-    claim_scores: dict[str, float],
-    note_scores: dict[Path, float],
-    as_of: date,
-) -> str:
-    lines = []
-    lines.append(f"TrustRank note detail  (as-of {as_of.isoformat()})")
-    lines.append(f"Note: {note.path.as_posix()}")
-    lines.append(f"Title: {note.title or '(missing)'}")
-    status = "ok" if note.integrity_ok() else "FAIL"
-    lines.append(f"Structural integrity: {status}")
-    lines.append(f"Note score (mean of claims): {note_scores.get(note.path, 0.0):.4f}")
-    lines.append("")
-    if note.parse_errors:
-        lines.append("Parse errors:")
-        for err in note.parse_errors:
-            lines.append(f"  - {err}")
-        lines.append("")
-    lines.append(f"{'claim':<6}  {'score':>7}  {'anchors':>7}  {'cites':>5}  {'passes':>6}  title")
-    lines.append("-" * 70)
-    for claim in note.claims:
-        n_anchors = sum(1 for a in claim.anchors if a.active_on(as_of))
-        n_cites = sum(1 for c in claim.cites if c.active_on(as_of))
-        n_passes = sum(1 for p in claim.passes if p.active_on(as_of))
-        score = claim_scores.get(claim.key, 0.0)
-        title = claim.title
-        if len(title) > 60:
-            title = title[:57] + "..."
-        lines.append(
-            f"[C{claim.number}]".ljust(6)
-            + f"  {score:7.4f}  {n_anchors:7d}  {n_cites:5d}  {n_passes:6d}  {title}"
-        )
-    return "\n".join(lines) + "\n"
-
-
-def format_json(
-    notes: list[WikiNote],
-    claim_scores: dict[str, float],
-    note_scores: dict[Path, float],
-    as_of: date,
-) -> str:
-    payload = {
-        "as_of": as_of.isoformat(),
-        "wiki_dir": WIKI_DIR.as_posix(),
-        "damping": DAMPING,
-        "floor": FLOOR,
-        "notes": [],
-    }
-    for note in sorted(notes, key=lambda n: n.path.as_posix()):
-        payload["notes"].append(
-            {
-                "path": note.path.as_posix(),
-                "title": note.title,
-                "integrity_ok": note.integrity_ok(),
-                "parse_errors": list(note.parse_errors),
-                "note_score": round(note_scores.get(note.path, 0.0), 6),
-                "claims": [
-                    {
-                        "number": c.number,
-                        "title": c.title,
-                        "score": round(claim_scores.get(c.key, 0.0), 6),
-                        "anchors": sum(1 for a in c.anchors if a.active_on(as_of)),
-                        "cites": sum(1 for ct in c.cites if ct.active_on(as_of)),
-                        "passes": sum(1 for p in c.passes if p.active_on(as_of)),
-                        "review": c.review(as_of),
-                        **({"range_utf8": c.range_utf8} if c.range_utf8 is not None else {}),
-                    }
-                    for c in note.claims
-                ],
-            }
-        )
+def format_json(notes: list[WikiNote], as_of: date) -> str:
+    payload = {"as_of": as_of.isoformat(), "wiki_dir": WIKI_DIR.as_posix(), "notes": [{
+        "path": note.path.as_posix(), "title": note.title, "integrity_ok": note.integrity_ok(),
+        "parse_errors": list(note.parse_errors), "claims": [{
+            "number": c.number, "title": c.title,
+            **{kind: sum(m.active_on(as_of) for m in getattr(c, kind)) for kind in ("anchors", "cites", "passes")},
+            "review": c.review(as_of), **({"range_utf8": c.range_utf8} if c.range_utf8 is not None else {}),
+        } for c in note.claims]} for note in sorted(notes, key=lambda n: n.path.as_posix())]}
     return json.dumps(payload, indent=2) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        prog="scripts/trust.py",
-        description="TrustRank over the configured wiki (deterministic Personalized PageRank).",
-    )
-    parser.add_argument(
-        "--note",
-        type=Path,
-        default=None,
-        help="Show per-claim breakdown for a single wiki entry.",
-    )
-    parser.add_argument(
-        "--as-of",
-        default=None,
-        help="Bi-temporal snapshot date (YYYY-MM-DD). Default: today.",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit JSON for /lint consumption.",
-    )
+    parser = argparse.ArgumentParser(prog="scripts/trust.py", description="Validate wiki structure and citations.")
+    parser.add_argument("--note", type=Path, default=None, help="Check one wiki entry, resolving citations against the whole wiki.")
+    parser.add_argument("--as-of", default=None, help="Bi-temporal snapshot date (YYYY-MM-DD). Default: today.")
+    parser.add_argument("--json", action="store_true", help="Emit JSON for /lint consumption.")
     args = parser.parse_args(argv)
-
-    if args.as_of:
-        as_of = _parse_iso(args.as_of)
-        if as_of is None:
-            sys.stderr.write(f"trust.py: invalid --as-of date `{args.as_of}`\n")
-            return 2
-    else:
-        as_of = date.today()
-
-    target = None
-    if args.note is not None:
-        # Score the full corpus so --note can resolve its citation targets.
-        candidate = load_wiki(as_of, only=args.note)[0]
-        notes = load_wiki(as_of)
-        target = next(
-            (n for n in notes if n.path.resolve() == candidate.path.resolve()),
-            None,
-        )
-        if target is None:
-            # Not in the corpus walk (e.g. an excluded basename): fall back
-            # to single-note scoring.
-            notes = [candidate]
-            target = candidate
-    else:
-        notes = load_wiki(as_of)
-    claim_scores, note_scores = score_notes(notes, as_of)
-
-    if args.json:
-        json_notes = [target] if target is not None else notes
-        sys.stdout.write(format_json(json_notes, claim_scores, note_scores, as_of))
-        return 0
-
+    as_of = _parse_iso(args.as_of) if args.as_of else date.today()
+    if as_of is None:
+        sys.stderr.write(f"trust.py: invalid --as-of date `{args.as_of}`\n")
+        return 2
+    notes = load_wiki(as_of)
+    target = load_wiki(as_of, only=args.note)[0] if args.note is not None else None
+    if target is not None and not any(n.path.resolve() == target.path for n in notes):
+        notes.append(target)  # an excluded basename is still checked on request
+    _resolve_cites(notes)
     if target is not None:
-        sys.stdout.write(format_note_detail(target, claim_scores, note_scores, as_of))
-        return 0
-
-    sys.stdout.write(format_table(notes, claim_scores, note_scores, as_of))
+        notes = [n for n in notes if n.path.resolve() == target.path]
+    sys.stdout.write((format_json if args.json else format_table)(notes, as_of))
     return 0
 
 

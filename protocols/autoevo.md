@@ -152,23 +152,44 @@ the plan lists the rest as `protected_paths`. Right before each write the
 parent rechecks bytes, blob and markers, and skips an operation whose source
 changed. Retrieval context is not source authorization.
 
-## Wiki edit review
+## Wiki claim review
 
 Preparation stages whole primary-wiki notes with pending claims
-(`protocols/wiki-schema.md`) up to `wiki_review.CAP` claims, under the same
-settled-source checks. Each staged claim carries its current text and its
-newest committed non-pending text from Git. Reviewer in Claim Review mode
-returns `verified`, `flagged` or `inconclusive`; a claim without previous text
-is never verified.
+(`protocols/wiki-schema.md`) up to `wiki_review.CAP` claims, then notes without
+pending claims that hold claims due a source check, up to
+`wiki_review.SUPPORT_CAP`, under the same settled-source checks. Neither
+review touches a claim whose latest record from an agent other than `editor`
+or `reviewer` doubts it: an edit review judges fidelity, not truth, so that doubt waits for
+the user.
+
+A pending claim carries its current text and its newest committed non-pending
+text from Git. Reviewer in Claim Review mode returns `verified`, `flagged` or
+`inconclusive`; a claim without previous text is never verified.
+
+An undisputed, non-pending claim with no `challenger` or `scout` record since
+its last edit is due a source check. It carries the section-sized passages that
+best match each of its sentences and clauses from each cited source above the trust threshold in the
+evidence cache (`scripts/wiki_evidence.py`). The network-enabled
+`wiki-trust-report` routine refreshes that cache, so the model never fetches.
+A check those passages leave undecided returns later with its sources' full
+text (`wiki_evidence.FULL_CHARS` per claim), within the nightly `wiki_review.STAGE_CHARS` budget. Scout in Source
+Check mode judges only the staged text.
 
 When the cycle has no coverage errors, the parent rechecks the note bytes and
-appends only `@pass: reviewer | status: <verdict> | at: <cycle> | ref:
-autoevo-applied-<cycle>` after the claim's last pass line. It never edits
-prose or removes records. Flagged claims wait for the user, and rewrites keep
-their approval gate. The report lists each written verdict, reason and
-before/after excerpt for spot checks in Reflect; a later Reflect edit marks the
-claim pending again. Checking prose against external sources needs network
-and is out of scope.
+appends only `@pass: <reviewer|scout> | status: <verdict> | at: <cycle> | ref:
+autoevo-applied-<cycle>` after the claim's last record. It never edits prose
+or removes records. A source verdict counts when its reason quotes one staged
+passage verbatim (a `flagged` may quote a title instead); the quote shows the
+words exist, not that they support the claim. After Scout answers, the parent
+asks a local MiniCheck model (Ollama `bespoke-minicheck`) about checks Scout
+left undecided; its support counts as `verified` with `ref` suffix
+`#minicheck`, Scout's `flagged` vetoes it, and without Ollama Scout decides alone. An uncounted or
+`inconclusive` source check writes nothing, and its claim text rests for
+`wiki_evidence.UNDECIDED_DAYS` in the machine-local cache until its text or
+staged evidence changes; a dispatch that returns no source verdict rests nothing.
+Flagged claims wait for the user, and rewrites keep their approval gate. The
+report lists each verdict, reason and before/after text or cited sources for
+spot checks in Reflect, and each undecided check under Notes.
 
 ## Pending queue and decision history
 

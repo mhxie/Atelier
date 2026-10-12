@@ -2,7 +2,8 @@
 
 Atelier owns these rules; Reflect only reads the report. Tier rules are pinned
 by tests/fixtures/wiki-claim-trust.json. Source weights use a fixed scale, so a
-threshold means the same thing however large the wiki grows.
+threshold means the same thing however large the wiki grows. Retracted papers
+weigh nothing, and unreachable evidence is named, from wiki_evidence's cache.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from urllib.parse import unquote, urlsplit
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _paths import atomic_write, tier_segments, vault_root  # noqa: E402
 import trust  # noqa: E402
+import wiki_evidence  # noqa: E402
 
 VERSION = 1
 ORDER = ("needs-work", "supported", "solid")
@@ -40,8 +42,8 @@ SCALE = 1 + math.log1p(BREADTH_CAP)
 
 def origin(atype: str, aid: str) -> str:
     """The independent origin a source counts toward: paper by id, code host by owner, page by host."""
-    if atype not in {"url", "gist"}:
-        return f"{atype}:{aid.lower()}"
+    if atype not in {"url", "gist"}:  # arXiv versions are one work
+        return f"{atype}:{re.sub(r'v[0-9]+$', '', aid.lower()) if atype == 'arxiv' else aid.lower()}"
     parts = urlsplit(aid)
     host = (parts.hostname or "").lower().removeprefix("www.")
     if not parts.scheme or not host:
@@ -59,6 +61,16 @@ def _origin(anchor: trust.Marker) -> str:
     return origin(anchor.fields["_anchor_type"], anchor.fields["_anchor_id"])
 
 
+def evidence_key(anchor: trust.Marker) -> str:
+    """The cached evidence record: a paper by its identifier (an arXiv one at the cited version,
+    which origins fold away), any other source by its own URL."""
+    aid = anchor.fields["_anchor_id"].lower()
+    key, version = _origin(anchor), re.search(r"\d(v[0-9]+)(?:\.pdf)?/?$", urlsplit(aid).path if "://" in aid else aid)
+    if key.startswith("arxiv:"):
+        return key + (version[1] if version else "")
+    return key if key.startswith("doi:") else anchor.fields["_node_id"].split("#")[0]
+
+
 def prior(anchor: trust.Marker) -> str:
     """The writer's `kind` when stated, else papers and books are primary; docs, code, .edu and Apache sites are reference."""
     if kind := anchor.fields.get("kind"):
@@ -67,6 +79,11 @@ def prior(anchor: trust.Marker) -> str:
     if key.split(":", 1)[0] in PRIMARY_TYPES:
         return "primary"
     return "reference" if REFERENCE_RE.match(key) else "web"
+
+
+def automated(record: trust.Marker) -> bool:
+    """Whether nightly Autoevo, not a human-directed session, wrote the record."""
+    return record.fields.get("ref", "").startswith("autoevo-applied-")
 
 
 def claim_trust(claim: trust.Claim, as_of: date, cited: list[str], weights: dict[str, float] | None = None) -> dict:
@@ -94,15 +111,17 @@ def claim_trust(claim: trust.Claim, as_of: date, cited: list[str], weights: dict
     review = max((x for x in passes if x[1].fields["_agent"] in ADVERSARIAL and x[1].fields["status"] == "verified"
                   and (edit is None or x[0] > edit[0])), default=None, key=lambda x: x[0])
     overlays = []
-    if strong and review:
-        tier = "solid"
-        reasons.append({"kind": "adversarial-review", "text": f"verified by {review[1].fields['_agent']}",
-                        "data": {"agent": review[1].fields["_agent"], "at": review[1].fields["valid_at"]}})
+    if review:  # a check confirms only a claim its anchors already make strong
+        tier = "solid" if strong else tier
+        reasons.append({"kind": "adversarial-review", "text": f"verified by {review[1].fields['_agent']}" + (" via MiniCheck" if review[1].fields.get("ref", "").endswith("#minicheck") else "") + ("" if strong else
+                        "; Solid also needs two sources, one primary"), "data": {"agent": review[1].fields["_agent"],
+                        "at": review[1].fields["valid_at"], "automated": automated(review[1])}})
     if dispute := claim.dispute(as_of):
         tier = "needs-work"
         overlays.append("disputed")
         reasons.append({"kind": "disputed", "text": f"{dispute.fields['status']} by {dispute.fields['_agent']}",
-                        "data": {"agent": dispute.fields["_agent"], "status": dispute.fields["status"], "at": dispute.fields["valid_at"]}})
+                        "data": {"agent": dispute.fields["_agent"], "status": dispute.fields["status"], "at": dispute.fields["valid_at"],
+                                 "automated": automated(dispute)}})
     if last is not None and last is edit:
         overlays.append("edited")
         reasons.append({"kind": "edited", "text": "text changed after its last review", "data": {"at": edit[1].fields["valid_at"]}})
@@ -115,15 +134,18 @@ def sources(notes: list[trust.WikiNote], as_of: date) -> dict[str, dict]:
     for note in notes:
         for claim in note.claims:
             for anchor in (a for a in claim.anchors if a.active_on(as_of)):
-                row = uses.setdefault(_origin(anchor), {"prior": "web", "notes": set(), "claims": {}, "url": None})
+                row = uses.setdefault(_origin(anchor), {"prior": "web", "notes": set(), "claims": {}, "url": None, "retracted": False})
+                row["retracted"] |= wiki_evidence.withdrawn(_origin(anchor), as_of) if _origin(anchor).startswith("arxiv:") else bool((record := wiki_evidence.load(evidence_key(anchor)) or {}).get("retracted")) and (record.get("retracted_since") or "") <= as_of.isoformat()  # arXiv: the latest work-level check rules
                 row["url"] = row["url"] or (anchor.fields["_anchor_id"] if anchor.fields["_anchor_type"] in {"url", "gist"} else None)
                 row["prior"] = max(row["prior"], prior(anchor), key=lambda name: PRIORS[name])
                 row["notes"].add(note.path)
-                row["claims"][claim.key] = claim.dispute(as_of) is not None
+                people = [(p.valid_at, i, p) for i, p in enumerate(claim.passes) if p.active_on(as_of) and p.fields["_agent"] != "editor" and not automated(p)]
+                row["claims"][claim.key] = bool(people) and max(people, key=lambda x: x[:2])[2].fields["status"] in {"flagged", "inconclusive"}  # people only
     result = {}
     for key, row in sorted(uses.items()):
         notes_n, disputed = len(row["notes"]), sum(row["claims"].values())
-        weight = PRIORS[row["prior"]] * (1 + math.log1p(min(notes_n, BREADTH_CAP))) * (1 - disputed / len(row["claims"])) / SCALE
+        weight = (PRIORS[row["prior"]] * (1 + math.log1p(min(notes_n, BREADTH_CAP))) * (1 - disputed / len(row["claims"]))
+                  * (not row["retracted"]) / SCALE)
         kind, ident = key.split(":", 1)
         url = row["url"] or {"arxiv": f"https://arxiv.org/abs/{ident}", "doi": f"https://doi.org/{ident}"}.get(kind)
         result[key] = {"label": ident if kind in {"host", "code"} else key, **({"url": url} if url else {}),
@@ -131,8 +153,13 @@ def sources(notes: list[trust.WikiNote], as_of: date) -> dict[str, dict]:
             {"kind": "prior", "text": f"{row['prior']} source", "data": {"prior": row["prior"], "value": PRIORS[row["prior"]]}},
             {"kind": "breadth", "text": f"cited by {notes_n} wiki entries", "data": {"entries": notes_n}},
             {"kind": "disputes", "text": f"{disputed} of {len(row['claims'])} supported claims disputed",
-             "data": {"disputed": disputed, "claims": len(row["claims"])}}]}
+             "data": {"disputed": disputed, "claims": len(row["claims"])}},
+            *[{"kind": "retracted", "text": "retracted or withdrawn", "data": {}}] * row["retracted"]]}
     return result
+
+
+def private(note: trust.WikiNote) -> bool:
+    return bool(PRIVATE_RE.match(note.path.read_text(encoding="utf-8")))
 
 
 def claim_hash(data: bytes, claim: trust.Claim) -> str | None:
@@ -143,9 +170,18 @@ def claim_hash(data: bytes, claim: trust.Claim) -> str | None:
     return hashlib.sha256(text).hexdigest()
 
 
-def report(notes: list[trust.WikiNote], as_of: date) -> dict:
+def unreachable(claim: trust.Claim, as_of: date) -> list[dict]:
+    """Reasons for active evidence gone on two checks in a row; link rot alone never changes a tier."""
+    rows = {evidence_key(a): wiki_evidence.load(evidence_key(a)) for a in claim.anchors if a.active_on(as_of)}
+    return [{"kind": "unreachable", "text": f"{key} returned {row['status'] or 'no response'} on {row['checked_at']}",
+             "data": {"source": key, "status": row["status"], "at": row["checked_at"]}}
+            for key, row in sorted(rows.items()) if row and row.get("gone", 0) >= 2]
+
+
+def tiers(notes: list[trust.WikiNote], as_of: date) -> tuple[dict[str, dict], dict[str, dict]]:
+    """(claim key -> tier result, origin -> source row) after citations settle."""
     trust._resolve_cites(notes)
-    source_rows = sources([n for n in notes if n.integrity_ok()], as_of)
+    source_rows = sources([n for n in notes if n.integrity_ok() and not private(n)], as_of)  # the report syncs; private notes add nothing
     weights = {key: row["weight"] for key, row in source_rows.items()}
     claims = {c.key: (n, c) for n in notes for c in n.claims}
     cited = {key: [f"{c.fields['_cite_path']}#C{c.fields['_cite_claim_number']}" if c.fields.get("_cite_claim_number")
@@ -162,11 +198,18 @@ def report(notes: list[trust.WikiNote], as_of: date) -> dict:
                 "tier": "needs-work", "overlays": [], "reasons": [{"kind": "integrity", "text": note.parse_errors[0]}]}
         if {key: row["tier"] for key, row in results.items()} == previous:
             break
+    for key, (_note, claim) in claims.items():
+        results[key]["reasons"] = results[key]["reasons"] + unreachable(claim, as_of)
+    return results, source_rows
+
+
+def report(notes: list[trust.WikiNote], as_of: date) -> dict:
+    results, source_rows = tiers(notes, as_of)
     out = {}
     for note in notes:
-        data = note.path.read_bytes()
-        if PRIVATE_RE.match(data.decode("utf-8")):
+        if private(note):
             continue  # the report syncs wherever the graph does
+        data = note.path.read_bytes()
         entries = {f"c{c.number}": {key: value for key, value in {
             **results[c.key], "evaluated_at": as_of.isoformat(), "text_sha256": claim_hash(data, c)}.items() if value != []}
             for c in note.claims if c.range_utf8}
@@ -215,15 +258,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compute the wiki trust report Reflect reads.")
     parser.add_argument("--as-of", type=date.fromisoformat, default=date.today())
     parser.add_argument("--write", action="store_true", help="write the report where Reflect reads it (see reflect_target) instead of stdout")
+    parser.add_argument("--fetch-seconds", type=float, default=0, help="first refresh stale cached evidence for up to this long")
     args = parser.parse_args(argv)
     path, folders = reflect_target()
-    notes = [note for note in trust.load_wiki(args.as_of) if not local_only(note.path, folders)]
-    payload = json.dumps(report(notes, args.as_of), ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+
+    def build() -> tuple[list[trust.WikiNote], str]:
+        notes = [note for note in trust.load_wiki(args.as_of) if not local_only(note.path, folders)]
+        return notes, json.dumps(report(notes, args.as_of), ensure_ascii=False, indent=1, sort_keys=True) + "\n"
+    (notes, payload), fetched = build(), {}
+    if args.fetch_seconds:
+        if args.write:
+            atomic_write(path, payload)  # today's report never waits on the network
+        fetched = wiki_evidence.refresh({evidence_key(a) for n in notes if not private(n)  # a fetch tells the site what we cite
+                                         for c in n.claims for a in c.anchors if a.active_on(args.as_of)}, date.today(), args.fetch_seconds)
+        notes, payload = build()
     if not args.write:
         sys.stdout.write(payload)
         return 0
     atomic_write(path, payload)
-    print(json.dumps({"output_file": path.relative_to(vault_root()).as_posix(), "bytes": len(payload.encode())}))
+    print(json.dumps({"output_file": path.relative_to(vault_root()).as_posix(), "bytes": len(payload.encode()), "evidence": fetched}))
     return 0
 
 

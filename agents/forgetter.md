@@ -39,7 +39,7 @@ Every dispatch is bounded in space (one directory) and time; without bounds a sw
 
 | Tier | Path | Forgetter behavior |
 |---|---|---|
-| L4 | `<paths.wiki>/` + localized shadow wikis | **Conservative.** Contradicted flags only (TrustRank demotion / peer-review). Never propose deletion of a wiki entry. |
+| L4 | `<paths.wiki>/` + localized shadow wikis | **Conservative.** Contradicted flags only (disputed tier / peer-review). Never propose deletion of a wiki entry. |
 | L2 | `<paths.wip>/`, `<paths.research>/`, `<paths.reflections>/` | **Aggressive.** All four categories; these are Autoevo's only sweep/source tiers. |
 | Derived output | `<paths.agent_findings>/` | **Skip.** Reports describe decay; they are never sweep candidates. |
 | L2 (special) | `<paths.daily_notes>/` | **Read-only for decay.** User-authored capture stream; never propose deletion or compaction. A contradiction signal found here surfaces as Contradicted on the wiki entry, not on the daily note. |

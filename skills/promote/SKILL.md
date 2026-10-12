@@ -94,7 +94,7 @@ Instructions:
 2. On user approval, **write the file** to `<paths.wiki>/<Title>.md` (title-case with spaces, matching the H1).
 3. Run `uv run scripts/trust.py --note "<paths.wiki>/<Title>.md"` to verify structural integrity.
    - If errors: show them, ask the user if they want to fix or abort.
-   - If clean: report the initial trust score (will be raw PageRank, no floor until a reviewer pass).
+   - If clean: report the new claims' tiers from the note's entry in `uv run scripts/wiki_trust.py` output (most start as Needs work or Supported).
 4. Run `uv run scripts/lint.py` to check for corpus-level issues (shared anchors, etc.).
 5. Every `index.md` is curated; never regenerate one. If a route should reach the entry, propose that edit to its nearest index for approval (`protocols/wiki-schema.md` § Index Hierarchy).
 
@@ -119,7 +119,7 @@ For each `(language_code, shadow_dir)` entry:
 After successful creation, suggest next steps:
 
 1. **Add citation references:** For `shared-anchor-no-cite` findings, suggest references using `protocols/wiki-schema.md`.
-2. **Request reviewer pass:** "Run a review session to add `@pass: reviewer | status: verified` markers, which unlocks the 0.1 trust floor."
+2. **Request reviewer pass:** "Nightly Autoevo source-checks the new claims; a `challenger` or `scout` `verified` pass makes a well-sourced claim Solid."
 3. **Route from `index.md`:** Propose a curated route edit under Phase 3 step 5 if useful.
 4. **Snapshot anchors to Readwise:** Save all `url:` anchors to Readwise with `anchor-evidence` + category tag, backfill `readwise:` document IDs.
 

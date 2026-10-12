@@ -20,9 +20,9 @@ Applies to: anything written collaboratively with the system, anything the syste
 
 ### Wiki entry (location-based)
 
-A note under `<paths.wiki>/` that follows `protocols/wiki-schema.md`: explicit claims, per-claim anchors and citation references, reviewer records, temporal validity, and lint-verified structural integrity. **Location is the certification.** Every entry in that directory participates in the trust graph; tags do not change eligibility.
+A note under `<paths.wiki>/` that follows `protocols/wiki-schema.md`: explicit claims, per-claim anchors and citation references, reviewer records, temporal validity, and lint-verified structural integrity. **Location is the certification.** Every entry in that directory carries claim tiers; tags do not change eligibility.
 
-Applies to: notes the user wants the system to treat as authoritative in the local-first knowledge layer. These are the only notes that participate in TrustRank propagation.
+Applies to: notes the user wants the system to treat as authoritative in the local-first knowledge layer. These are the only notes that carry claim tiers.
 
 This design choice (location over tag) has a reason: `$OV/` is the user's pre-existing markdown vault with hundreds of notes and an established tagging convention. Adding a structural sub-tier by tag would conflict with that convention and force the trust engine to filter every note in the vault. A dedicated subdirectory (`<paths.wiki>/`) is cleaner — the trust engine walks one directory; the user's other tags stay free.
 
@@ -39,8 +39,8 @@ Applies to: periodic (monthly or quarterly) free-writes the user does deliberate
 Search includes notes regardless of `#ai-reflection` or `#ai-generated` tags. These tags are alloy markers, not exclusion criteria. Reflection write-backs are alloy by default and are citable like any other note.
 
 QMD ranks search results; `sources/semantic.md` owns that retrieval contract.
-Readers weigh evidence using validation depth and `scripts/trust.py` scores
-when available. Trust scores do not modify retrieval ranking or hide alloy notes.
+Readers weigh evidence using validation depth and `scripts/wiki_trust.py` tiers
+when available. Tiers do not modify retrieval ranking or hide alloy notes.
 
 ## The Failure Modes the Design is Bounded By
 
@@ -50,7 +50,7 @@ Two failure modes anchor the design at opposite ends.
 
 In the LLM Knowledge Bases gist, Andrej Karpathy treats everything in his second brain as acceptable for LLM ingestion and synthesis. There is no zone where the human writer's unmediated voice is preserved as load-bearing. The risk: the second brain becomes a closed loop where the LLM's prior outputs feed the LLM's next outputs, with no external friction to break the cycle. Trust propagates from nothing.
 
-atelier's structural answer: external anchors are the only seeds of trust. Internal agent passes (Reviewer, Challenger, Thinker) can floor or invalidate trust but never accumulate it. The propagation rule lives in `protocols/wiki-schema.md` → "The Trust Propagation Rule."
+atelier's structural answer: external anchors are the only grounds of trust. Internal agent passes (Reviewer, Challenger, Thinker) can confirm or dispute a claim but never add evidence. The rule lives in `protocols/wiki-schema.md` → "The Trust Rule."
 
 ### Appleton's failure mode (human centipede epistemology)
 

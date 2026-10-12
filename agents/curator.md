@@ -42,10 +42,10 @@ Turn a session insight into a standalone local note under the appropriate tier (
 
 ### Wiki Entry Creation (L4)
 
-Wiki entries are L4 knowledge: schema-structured, anchored, scored by `scripts/trust.py`. They live as files under `<paths.wiki>/*.md`.
+Wiki entries are L4 knowledge: schema-structured, anchored, validated by `scripts/trust.py` and tiered by `scripts/wiki_trust.py`. They live as files under `<paths.wiki>/*.md`.
 
 **Process:**
-1. **Gather anchor sources.** Confirm the user has the external receipts the note will cite (arxiv/s2/doi/isbn/url/gist IDs). A wiki entry with zero `@anchor` markers parses but scores 0.0; allowed, but tell the user.
+1. **Gather anchor sources.** Confirm the user has the external receipts the note will cite (arxiv/s2/doi/isbn/url/gist IDs). A wiki entry with zero `@anchor` markers parses but every claim needs work; allowed, but tell the user.
 2. **Draft the full markdown** following `protocols/wiki-schema.md`:
    - H1 title, concise introduction, natural article headings and paragraphs
    - Explicit paired claim ranges independent of headings or paragraph boundaries; preserve stable IDs and qualifications
@@ -53,7 +53,7 @@ Wiki entries are L4 knowledge: schema-structured, anchored, scored by `scripts/t
    - Inline `ref` citations inside their supported ranges; reference numbers are generated, never authored
    - `## Revision Log` at the bottom
 3. Present the full content with `target_path: <paths.wiki>/<Title>.md` (title-case with spaces, matching the H1). The orchestrator writes the file after user approval.
-4. After the orchestrator writes the file, it will run `Bash: uv run scripts/trust.py --note "<paths.wiki>/<Title>.md"` and report structural-integrity result plus initial claim scores. If parse errors appear, fix the draft and loop.
+4. After the orchestrator writes the file, it will run `Bash: uv run scripts/trust.py --note "<paths.wiki>/<Title>.md"` and report the structural-integrity result plus the claims' tiers from `scripts/wiki_trust.py`. If parse errors appear, fix the draft and loop.
 
 **When NOT to create a wiki entry:** if the content is exploratory, unsourced, or a session insight, propose a regular note via Create Note from Session instead. Wiki entries are for claims with external receipts and reuse value.
 

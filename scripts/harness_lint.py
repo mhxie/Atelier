@@ -1352,7 +1352,7 @@ def check_prose_budget(roots: tuple[str, ...] | None = None) -> list[Finding]:
 # recurrently. Ceilings hold the compression wins; raising one requires
 # subtracting elsewhere on the same hot path.
 HOT_PATH_CEILINGS = {
-    "protocols/wiki-schema.md": 25600,
+    "protocols/wiki-schema.md": 23552,
     "routines/_adapters/autoevo/PROCEDURE.md": 24576,
     "agents/forgetter.md": 15360,
     "agents/curator.md": 20480,

@@ -24,8 +24,9 @@ let both runtimes share the same workflows; bounded retrieval loads task-relevan
 context; **le cercle** adds specialist perspectives. Certification tiers keep
 provisional working notes separate from locally certified wiki knowledge.
 At the wiki layer, `[C1]` claim identifiers, bi-temporal evidence anchors, and a
-deterministic PageRank trust engine make support inspectable at claim level.
-External evidence seeds the trust graph; repeated agent agreement does not.
+deterministic tier engine make support inspectable at claim level. External
+evidence grounds trust, nightly checks test claims against their cited sources,
+and repeated agent agreement adds nothing.
 The result is a knowledge base designed to be revisited, challenged, and revised.
 
 [What you can do](#what-you-can-do) · [Get started](#get-started) ·
@@ -182,9 +183,9 @@ The architecture rests on five principles:
   reserved for foundations. Tiers describe validation depth, not authorship;
   most thinking stays provisional.
 - **Claim-level trust.** The wiki uses `[C1]` claim markers, bi-temporal anchors,
-  and evidence-seeded PageRank in a deterministic [trust engine](scripts/trust.py).
+  and evidence-grounded tiers from a deterministic [trust engine](scripts/wiki_trust.py).
   The [claim schema](protocols/wiki-schema.md) makes support and validity periods
-  explicit; trust scores are not a substitute for checking the evidence.
+  explicit; tiers are not a substitute for checking the evidence.
 
 [Knowledge architecture](protocols/local-first-architecture.md) ·
 [Registries](harness/README.md) · [Runtime setup](protocols/runtime-adapters.md) ·

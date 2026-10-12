@@ -2,7 +2,7 @@
 
 The knowledge layer is plain-text Markdown under the user's `$OV` vault root.
 Agents read and write it directly; there is no remote note-store mirror.
-Deterministic file access supports the wiki schema, trust graph, and lint.
+Deterministic file access supports the wiki schema, claim tiers, and lint.
 
 ## The Layers
 
@@ -15,12 +15,12 @@ in `protocols/epistemic-hygiene.md`.
 | L1: Raw capture | Readwise inbox, `<paths.inbox>/`, `<domain>/raw/`, `<paths.cache>/` | Unstructured input. Raw source artifacts are durable; cache is disposable. Readwise is cloud-only, queried explicitly through its connector or CLI. |
 | L2: Working | `<paths.daily_notes>/`, `<paths.reflections>/`, `<paths.research>/`, `<paths.agent_findings>/`, `<paths.wip>/`, `<paths.gtd>/`, Reflect-created `<paths.notes>/`, domain notes | Most active thinking: searchable and citable, alloy by default, not certified. Inactive topic notes stay in `<paths.archive>/`. |
 | L3: External receipts | `<paths.papers>/`, `<paths.preprints>/`, curated reading artifacts | Papers, local PDFs, and externally anchored structured paper reviews. Preprints belong here, not among L2 free-writes. Receipts support L4 `@anchor` markers. |
-| L4: Locally certified | `<paths.wiki>/` | Location, not `#wiki` or `#compiled-truth`, identifies wiki entries. Only this subtree participates in trust propagation, bi-temporal anchoring, and wiki structural lint. |
+| L4: Locally certified | `<paths.wiki>/` | Location, not `#wiki` or `#compiled-truth`, identifies wiki entries. Only this subtree carries claim tiers, bi-temporal anchoring, and wiki structural lint. |
 | L5: Foundation | Reserved for settled, textbook-level knowledge | No folder or active workflow yet. |
 
 `protocols/wiki-schema.md` owns L4 claims, anchors, citation graph edges, and
-validation. `scripts/trust.py` walks only the wiki subtree and reports per-note
-scores; everything outside stays working knowledge or receipts. Paper IDs use
+validation. `scripts/trust.py` validates only the wiki subtree and
+`scripts/wiki_trust.py` tiers its claims; everything outside stays working knowledge or receipts. Paper IDs use
 `s2:`, `arxiv:`, or `doi:`; articles use `url:` or a Readwise document ID.
 `sources/local-papers.md` owns paper retrieval.
 
@@ -166,7 +166,7 @@ retain an `upstream: <path>#<anchor>` reference and are backfilled together.
 Role briefs in `agents/` own retrieval, proposals, and review, with
 `protocols/agent-handoff.md` owning responsibilities and dispatch gates.
 After an approved wiki write, run `scripts/trust.py --note <path>` for structural
-verification and initial scores. Only Reviewer signoff warrants a
+verification; `scripts/wiki_trust.py` shows tiers. Only Reviewer signoff warrants a
 `@pass: reviewer | status: verified` marker; `skills/lint/SKILL.md` owns
 corpus checks. Promoted briefs belong in `<paths.agent_findings>/`, not cache,
 and follow the same orchestrator write boundary.

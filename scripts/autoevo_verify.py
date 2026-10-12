@@ -190,8 +190,11 @@ def render_report(record: dict) -> str:
     for row in record.get("wiki_reviews", []):
         claim, reason = staged[(row["path"], row["claim"])], next(
             r["reason"] for r in proposal["wiki_reviews"] if (r["path"], r["claim"]) == (row["path"], row["claim"]))
-        lines += ["", f"### Wiki review {row['verdict']}: [[{claim['title']}#^c{row['claim']}]]", f"- Reason: {reason}",
-                  *(f"- {label}: {' '.join((claim[key] or '(unavailable)').split())[:300]}" for label, key in (("Before", "previous"), ("After", "current")))]
+        shown = (("Before", "previous"), ("After", "current")) if "previous" in claim else (("Claim", "current"),)
+        lines += ["", f"### Wiki {'source check' if row.get('agent') == 'scout' else 'review'} {row['verdict']}: [[{claim['title']}#^c{row['claim']}]]", f"- Reason: {reason}",
+                  *(f"- {label}: {' '.join((claim[key] or '(unavailable)').split())[:300]}" for label, key in shown),
+                  *(f"- Source: {e['source']} {e['title']}".rstrip() for e in claim.get("evidence", [])),
+                  *([f"- MiniCheck: {claim['minicheck']}"] if "minicheck" in claim else [])]
     for entry in record.get("triage", []):
         lines += ["", f"### Review {entry['category']}: {entry['id']}",
                   f"- Sources: {', '.join(entry['peers'])}",

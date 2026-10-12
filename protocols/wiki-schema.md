@@ -1,6 +1,6 @@
 # Wiki Schema
 
-The structural format for a note that lives under `<paths.wiki>/`. Location is the certification: a note is a wiki entry by virtue of being in `<paths.wiki>/`, not by carrying any tag. Wiki entries are parseable by `scripts/trust.py` and have claim-level granularity in the trust graph. Notes outside `<paths.wiki>/` are alloy by default (see `epistemic-hygiene.md`).
+The structural format for a note that lives under `<paths.wiki>/`. Location is the certification: a note is a wiki entry by virtue of being in `<paths.wiki>/`, not by carrying any tag. Wiki entries are parseable by `scripts/trust.py` and carry claim-level trust. Notes outside `<paths.wiki>/` are alloy by default (see `epistemic-hygiene.md`).
 
 Design rationale for location-based certification and claim-level trust lives in the architecture review ledger under `$OV/research/`, not here; this file carries only the operative schema. The `#solo-flight` tag lives orthogonally to the schema and marks unstructured pure-human capture, which is location-independent (see `epistemic-hygiene.md`).
 
@@ -8,7 +8,7 @@ Design rationale for location-based certification and claim-level trust lives in
 
 Session output identifies wiki entries by path (`<paths.wiki>/<title>.md`); other notes use `[[Note Title]]`. Inside notes, use title wikilinks so Reflect preserves backlinks and renames. Reflect's L1–L4 labels come from the path registry projection described in `protocols/local-first-architecture.md`; L4 identifies the layer, while review status belongs to individual claims. Never combine path prefixes with wikilink titles (`[[<paths.wiki>/foo]]`).
 
-Wiki entries read as articles. Each explicitly bounded claim has its own evidence and trust score; headings, paragraphs, and display numbers do not define identity. Note-level aggregation is a derived view.
+Wiki entries read as articles. Each explicitly bounded claim has its own evidence and tier; headings, paragraphs, and display numbers do not define identity.
 
 ## Note Structure
 
@@ -47,7 +47,7 @@ One `anchors cN` fence under the references section owns that range's structured
 
 Legacy `## Claims` with `### [Cn] <claim>` headings and local `anchors` fences remains readable. Its IDs also remain stable across reordering and may have gaps. A note may contain both representations with distinct, non-overlapping ownership; never define one ID twice. Legacy `@cite` records remain readable, while new writing keeps citation links beside their supported prose.
 
-Revision Log entries are latest first and outside claim scope. The trust graph ignores log prose. Topic tags do not affect certification or scores.
+Revision Log entries are latest first and outside claim scope. Tiers ignore log prose. Topic tags do not affect certification or tiers.
 
 ## Index Hierarchy
 
@@ -67,7 +67,7 @@ Internal citations are inline wikilinks with attached metadata, outside fences s
 
 ### `@anchor`
 
-An external source. This is a **seed** in the trust graph: only `@anchor` markers contribute initial trust mass to the personalized PageRank.
+An external source. Only `@anchor` markers ground trust; citations carry it and records never create it.
 
 ```
 @anchor: <type>:<id> | valid_at: <YYYY-MM-DD> [| invalid_at: <YYYY-MM-DD>] [| weight: <float>] [| readwise: <document_id>] [| kind: primary|secondary]
@@ -86,7 +86,7 @@ Anchor types and id formats:
 
 **URL escaping rule.** Marker fields are pipe-separated, so URLs (in `url` and `gist` anchors and in `ref:` fields) must not contain literal pipe characters. If a URL contains `|`, encode it as `%7C` before storing it in the marker. The parser will not try to be clever about pipe placement; it splits on the first occurrence of ` | ` (space-pipe-space) per line, then on `:` for each field's key. Multi-line values are not supported; each marker is exactly one line.
 
-`kind` is the writer's judgment of the source's fit to its claim; without it, papers and books are primary. `weight` is optional and defaults to `1.0` (see Open v2 Items).
+`kind` is the writer's judgment of the source's fit to its claim; without it, papers and books are primary. `weight` is parsed but unused.
 
 ### Anchor Evidence Resolution
 
@@ -123,7 +123,7 @@ Supported statement. [[Note Title#^c3|ref]]<!-- {"metadata":{"citation":{"valid_
 
 Keep the JSON comment immediately adjacent on the same line. `metadata.citation` accepts only string `valid_at` and optional `invalid_at`, with the same date rules as anchors. Malformed metadata fails structural integrity; never invent a date. Keep the wikilink outside the comment. Code examples, escaped links, and comments do not create edges. References alone do not satisfy the body-prose requirement.
 
-Targets resolve to existing wiki or ordinary notes; missing, ambiguous, or nonexistent claim targets fail integrity. Ordinary-note citations provide provenance without changing their layer, creating graph nodes, or adding trust. An ordinary-note claim target must expose a valid range or legacy claim. Citations outside claim ranges provide note-level provenance only. A missing claim never widens to the whole note. Existing `@cite: [[Note Title#^c3]] | valid_at: ...` records remain valid. Conversions preserve target, date window, and history.
+Targets resolve to existing wiki or ordinary notes; missing, ambiguous, or nonexistent claim targets fail integrity. Ordinary-note citations provide provenance without changing their layer or adding trust. An ordinary-note claim target must expose a valid range or legacy claim. Citations outside claim ranges provide note-level provenance only. A missing claim never widens to the whole note. Existing `@cite: [[Note Title#^c3]] | valid_at: ...` records remain valid. Conversions preserve target, date window, and history.
 
 External references use `[ref][source-key]` with `[source-key]: URL "Author or study, locator"` definitions at the bottom. Preserve any API name, subject or assertion carried by the original link label as ordinary prose beside the compact citation. These links do not seed trust themselves; the owning range's `@anchor` records do. Definitions with the same URL can retain different locators. Numbering is presentation, independent of anchor URL matching or review status; unknown records remain available. Copies carry their definitions; rename conflicting keys and occurrences together, never rebind them silently.
 
@@ -132,7 +132,7 @@ External references use `[ref][source-key]` with `[source-key]: URL "Author or s
 A record of an agent pass or an editor's review-needed event. **`@pass` markers never accumulate trust.** They serve two purposes:
 
 1. **Audit trail.** They show what scrutiny the claim has survived.
-2. **Floor trust eligibility.** A wiki entry that has at least one `@pass: reviewer | status: verified` and passes structural integrity becomes eligible for the claim-level floor trust of 0.1 on its unanchored claims.
+2. **Gates.** A disputing record lowers a claim's tier, and a `challenger` or `scout` `verified` after the last edit can raise it (see Claim Tiers).
 
 ```
 @pass: <agent> | status: <verified|flagged|inconclusive> | at: <YYYY-MM-DD> [| ref: <session-id-or-note>]
@@ -144,7 +144,7 @@ A record of an agent pass or an editor's review-needed event. **`@pass` markers 
 
 A `reader` records the user's doubt from Reflect and may record only `flagged`, as editor may record only `pending`. A claim is disputed while its latest active non-editor record, ordered as below, is `flagged` or `inconclusive`; a later record by another agent resolves it. `/lint` reports disputed claims and claims whose evidence has all expired as `claim-attention`.
 
-The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass, renewing evidence, or revoking the existing note-level verified floor. Preserve earlier records. A claim is pending while its latest active editor or reviewer record, ordered by `at` with a later line winning a tie, is `editor/pending`; Reflect and `scripts/trust.py` share this rule. Nightly Autoevo appends only reviewer records.
+The editor appends `editor/pending` for substantive text edits. This constrained pair requires an ISO `at` date: editor cannot claim another status, and an agent cannot claim pending. It flags review work without inventing a reviewer pass or renewing evidence. Preserve earlier records. A claim is pending while its latest active editor or reviewer record, ordered by `at` with a later line winning a tie, is `editor/pending`; Reflect and `scripts/trust.py` share this rule. Nightly Autoevo appends only reviewer and source-check `scout` records, never to a disputed claim's source check.
 
 ## Bi-temporal Anchors
 
@@ -162,54 +162,17 @@ Later, after the paper is retracted:
 @anchor: arxiv:2501.13956 | valid_at: 2026-04-06 | invalid_at: 2026-04-12
 ```
 
-The `Revision Log` records the change with an ordinary wikilink to its explanation. It is outside the scored claim body. An editorial rewrite preserves claim meaning or explicitly disposes of affected evidence and review records; a pending label alone cannot cancel the note's verified floor. `--as-of` filters evidence windows against current prose, not a historical text snapshot.
+The `Revision Log` records the change with an ordinary wikilink to its explanation. It is outside every claim body. An editorial rewrite preserves claim meaning or explicitly disposes of affected evidence and review records; a pending label alone never removes evidence or review history. `--as-of` filters evidence windows against current prose, not a historical text snapshot.
 
-`scripts/trust.py` filters markers by `invalid_at` when computing current trust: a marker with `invalid_at <= today` is excluded from the graph. The original record is preserved on disk forever. This is the Graphiti-style append-only-but-mutable contract.
+Tiers skip a marker whose `invalid_at <= today`. The original record is preserved on disk forever. This is the Graphiti-style append-only-but-mutable contract.
 
-The trust engine treats all valid markers as equal weight regardless of age. Temporal decay (β = 0.9 per month from Temporal PageRank, Rozenshtein & Gionis 2016) is tracked under § Open v2 Items.
+Active markers count alike regardless of age; decay is an open item.
 
-## The Trust Propagation Rule
+## The Trust Rule
 
-This is the rule that makes the design work. State it bluntly so it never drifts.
+> **External anchors are the only grounds of trust. Citations to wiki claims carry it; ordinary notes provide provenance. `@pass` records never add evidence: an adversarial check can only confirm a claim its anchors already make strong, or dispute it.**
 
-> **External anchors are the only seeds of trust. Citations to wiki claims propagate trust; ordinary notes provide provenance. Internal `@pass` markers never accumulate trust; verified reviewer passes enable the floor.**
-
-In TrustRank terms: `personalization` is the dict of anchor-bearing claim nodes. Non-anchored claims get `0` initial mass. Personalized PageRank then propagates that mass through `@cite` edges. The damping factor (typically `0.85`) handles cycles natively.
-
-`@pass` markers do not become nodes in the graph. They are metadata on existing claim nodes. Their only effect is gating the structural-integrity check that gates the claim-level floor.
-
-This rule is the structural answer to Karpathy's failure mode (`epistemic-hygiene.md` → "Karpathy's failure mode"). Internal agent re-review, no matter how thorough, can never make a claim more trusted than its anchors warrant. It can only hold the line.
-
-## Claim-Level Floor Trust
-
-Once the personalized PageRank has run, apply the floor. **For this check, "passes structural integrity" means items 1-10 of the structural-integrity check below pass.** Item 11 (the `@pass: reviewer | status: verified` requirement) is the second condition in the pseudocode and is not folded into "structural integrity" itself.
-
-```
-for each claim Ci in note N:
-    if N lives under <paths.wiki>/
-       and N passes structural integrity (items 1-10)
-       and N has at least one @pass: reviewer | status: verified
-    then:
-        Ci.score = max(Ci.score, 0.1)
-```
-
-The floor is **claim-level**, not note-level. Every claim in a structurally-valid, reviewer-passed wiki entry gets a baseline 0.1 even if it has zero anchors and zero internal cites. This biases the system to trust well-formed wiki entries more strongly than alloy notes — the structural-integrity work is its own kind of friction, and the floor recognizes it.
-
-A claim with anchors above 0.1 is unaffected by the floor. A claim with anchors below 0.1 (rare but possible after dampening) is raised to 0.1. A claim with no anchors gets exactly 0.1.
-
-If the note loses its structural integrity (a marker becomes unparseable, a `@cite` goes dangling), the floor is removed and unanchored claims drop back to 0.
-
-## Note-Level Aggregation
-
-For v1:
-
-```
-N.score = mean(Ci.score for Ci in N.claims)
-```
-
-Mean across claims. Weighted aggregation (by claim length, anchor count, or claim age) is tracked under § Open v2 Items.
-
-The note-level score is a derived view shown in the trust report and used for ranking in search results. Citation references to a whole note (no `#^cn` suffix) read this aggregate as the upstream signal; references to a specific claim read its claim-level score directly.
+This is the structural answer to Karpathy's failure mode (`epistemic-hygiene.md`): internal re-review can never make a claim more trusted than its anchors warrant.
 
 ## Structural Integrity Check
 
@@ -228,23 +191,19 @@ A note **passes structural integrity** if all of the following hold. `scripts/tr
 9. `valid_at` is a valid ISO date <= today.
 10. If `invalid_at` is present, it is a valid ISO date > the corresponding `valid_at`.
 
-**Required for floor eligibility (in addition to the above):**
-
-11. At least one claim in the note has a `@pass: reviewer | status: verified` marker.
-
 **Authoring checks:**
 
-12. The introduction, narrative order, examples, and qualifications make the article useful without claim IDs.
-13. Revision Log records substantive changes; evidence and audit details stay outside the article's prose.
-14. Claims have retrievable support, and source locators refer to the correct occurrence. `/lint` owns its deterministic checks; it does not establish scientific validity or poll every URL.
+11. The introduction, narrative order, examples, and qualifications make the article useful without claim IDs.
+12. Revision Log records substantive changes; evidence and audit details stay outside the article's prose.
+13. Claims have retrievable support, and source locators refer to the correct occurrence. `/lint` owns its deterministic checks; it does not establish scientific validity or poll every URL.
 
 ## Claim Tiers and the Trust Report
 
 Atelier owns tiers and source reputation; Reflect only renders the trust report, which `scripts/wiki_trust.py --write` atomically refreshes nightly where `reflect trust-report` points (default `.harness/wiki-trust.json`; `<paths.meta>/` outside Reflect). `tests/fixtures/wiki-claim-trust.json` is the canonical conformance corpus.
 
-A claim's sources count by independent origin: a paper or book by identifier (an arXiv or DOI link names its paper), a code host by owner, any other page by host. One primary origin, or two origins, make a claim **Supported**; a Supported or Solid cited claim also lifts it to Supported. Two origins including a primary one plus a `challenger` or `scout` `verified` pass after the last edit make it **Solid**. Otherwise it **Needs work**. A disputed claim always needs work; overlays `disputed` and `edited` (pending) accompany the tier. Reflect ignores an editor record other than `pending` and a reader record other than `flagged`; this parser rejects them.
+A claim's sources count by independent origin: a paper or book by identifier (an arXiv or DOI link names its paper), a code host by owner, any other page by host. One primary origin, or two origins, make a claim **Supported**; a Supported or Solid cited claim also lifts it to Supported. Two origins including a primary one plus a `challenger` or `scout` `verified` pass after the last edit make it **Solid**. Otherwise it **Needs work**. A disputed claim always needs work; overlays `disputed` and `edited` (pending) accompany the tier. Nightly Autoevo source-checks claims against cached passages from their trusted cited sources (`protocols/autoevo.md`); its `verified` means those passages jointly state the claim, not that each source, or the primary one, does, and it binds to no evidence version; evidence answering 404 or 410 on two checks in a row is named in the reasons but never lowers a tier, since link rot is not falsity. Reflect ignores an editor record other than `pending` and a reader record other than `flagged`; this parser rejects them.
 
-Source reputation is per origin: prior (primary 1.0; documentation, code host, `.edu` or Apache site 0.6; other 0.3; `kind` overrides) times `1 + ln(1 + min(entries, cap))` times the undisputed share of claims it supports, divided by the cap's maximum so the scale never drifts with corpus size. Only origins at or above the threshold count toward tiers. The report's `thresholds` block records the formula and constants in force.
+Source reputation is per origin: prior (primary 1.0; documentation, code host, `.edu` or Apache site 0.6; other 0.3; `kind` overrides) times `1 + ln(1 + min(entries, cap))` times the share of claims it supports that no person-directed record disputes, divided by the cap's maximum so the scale never drifts with corpus size. Only origins at or above the threshold count toward tiers. A paper weighs nothing once Crossref (with Retraction Watch data) records it retracted or arXiv marks it withdrawn.
 
 The report follows Reflect's contract (`reflect-wiki-trust` v1; schema in `tests/fixtures/wiki-trust-report.schema.json`). Notes are keyed by NFC vault-relative path and claims by `cN`. `text_sha256` is the SHA-256 of the UTF-8 bytes between a claim's markers after CRLF and CR become LF, pinned by `tests/fixtures/wiki-claim-text-hashes.json`; legacy claims and `private: true` notes are omitted. `sources` maps origins to `label`, `weight`, `trusted` and reasons under `source_threshold`.
 
@@ -252,10 +211,11 @@ The report follows Reflect's contract (`reflect-wiki-trust` v1; schema in `tests
 
 Documented here so they do not get lost between sessions.
 
-- **Temporal decay.** β = 0.9 per month from Temporal PageRank. Older anchors carry less weight. Requires per-marker age computation.
-- **Signed edges (`contradicts`).** A claim that contradicts another claim is not a positive edge. The literature recommends a separate post-processing penalty rather than a signed PageRank, since signed PageRank breaks the stochastic matrix assumption. Defer until contradictions are common enough to matter.
-- **Anchor weight from S2 / OpenAlex.** Use `influentialCitationCount` or FWCI as the seed weight for paper anchors. v1 treats all weights as 1.0. The schema field `weight` already exists for forward compatibility.
-- **Note-level aggregation alternatives.** Weighted mean by claim length, anchor count, or claim age. v1 is unweighted mean.
+- **Temporal decay.** Older anchors could carry less weight.
+- **Contradictions.** A check across claims that cite the same source could flag claims that disagree.
+- **Domain priors.** Curated reliability lists could seed web priors beyond source type.
+- **Calibration.** Reader flags and spot checks could measure how often each tier is wrong.
+- **Check coverage.** Retrieval is lexical; arXiv papers without full HTML are checked against the abstract, and PDF-only or very short pages never; undecided checks live only in the machine-local cache, so the report cannot tell them from unchecked claims.
 - **Claim retirement.** Markers can be invalidated; claim retirement has no dedicated syntax. Preserve the ID and evidence history, disposition its support, and record the change in Revision Log. Never recycle an old ID for a different assertion.
 
 ## Localized Shadow Wikis
@@ -270,7 +230,7 @@ Translation rules:
 - Keep the source filename for native language switching. Preserve a distinct canonical frontmatter `title` for backlinks, set BCP 47 `lang`, and use a simple H1 without a language suffix. Reflect derives its display title from the H1; `display_title` is only for an explicit override. Display names never become citation keys.
 - Omit in-body language-switch links and translation boilerplate. Reflect supplies the language buttons and title superscript from metadata.
 
-Localized shadows are not part of the trust graph: `scripts/trust.py` only scans `<paths.wiki>/`. The shadow copy is for reading convenience. It does not need its own anchors or reviewer passes.
+Localized shadows have no tiers: `scripts/trust.py` only scans `<paths.wiki>/`. The shadow copy is for reading convenience. It does not need its own anchors or reviewer passes.
 
 **Sync requirement:** When the English source is updated, the localized shadow must be regenerated. `scripts/lint.py` enforces this with two checks, run for every shadow directory in `[paths.wiki_localized]`:
 - `shadow-missing` (WARN): English entry exists but no localized shadow
@@ -282,5 +242,5 @@ Edit the English source first, then regenerate the localized shadow in the same 
 
 - Tag taxonomy and the validation-depth principle: `epistemic-hygiene.md`
 - Where wiki entries live: `local-first-architecture.md`
-- Trust engine implementation: `scripts/trust.py`
+- Parser and validator: `scripts/trust.py`; tiers, sources and the report: `scripts/wiki_trust.py`; evidence cache: `scripts/wiki_evidence.py`
 - Lint integration: `skills/lint/SKILL.md`

@@ -57,10 +57,11 @@ class AutoevoTest(unittest.TestCase):
             self.old(f"reflections/r{days}.md", days)
         paths = tomllib.loads((ROOT / "harness/paths.toml").read_text())["paths"]
         for patch in (
-            mock.patch.dict(os.environ, {"OV": str(self.vault), "PYTHONDONTWRITEBYTECODE": "1"}),
+            mock.patch.dict(os.environ, {"OV": str(self.vault), "PYTHONDONTWRITEBYTECODE": "1", "XDG_CACHE_HOME": str(self.root / "xdg")}),
             mock.patch.object(_paths, "_registry", return_value=paths),
             mock.patch.object(preflight, "_default_privacy_probe", return_value={"hit_count": 0}),
             mock.patch.object(preflight, "_default_semantic_probe", return_value={"ready": True, "mode": "qmd"}),
+            mock.patch.object(run.wiki_review.wiki_evidence, "minicheck", return_value=None),  # no local model in tests
         ):
             patch.start()
             self.addCleanup(patch.stop)
@@ -166,6 +167,77 @@ class AutoevoTest(unittest.TestCase):
         report = (self.vault / f"agent-findings/autoevo-applied-{cycle}.md").read_text()
         self.assertIn("### Wiki review verified: [[Entry#^c1]]", report)
         self.assertIn(f"@pass: reviewer | status: inconclusive | at: {cycle}", fresh.read_text())
+
+    def test_reviewed_claim_gets_a_source_check_from_cached_evidence(self):
+        import wiki_evidence
+
+        cycle, rel = date.today().isoformat(), "wiki/topic/Boiling.md"
+        note = self.vault / rel
+        note.parent.mkdir(parents=True)
+        fence = "```anchors c{n}\n@anchor: doi:10.1/{n} | valid_at: 2020-01-01\n{records}```\n"
+        reviewed = "@pass: reviewer | status: verified | at: 2020-01-02\n"
+        article = ("# Boiling\n\nFirst, <!-- claim:c1 -->water boils at 100 C at sea level.<!-- /claim:c1 -->\n\n"
+                   "Then <!-- claim:c2 -->water freezes at 0 C.<!-- /claim:c2 -->\n\n"
+                   "Also <!-- claim:c3 -->water boils at 100 C at sea level.<!-- /claim:c3 -->\n\n## References\n\n"
+                   + fence.format(n=1, records="") + fence.format(n=2, records=reviewed)  # c1 has no record yet
+                   + fence.format(n=3, records=reviewed + "@pass: reader | status: flagged | at: 2020-01-03\n"))  # c3 waits for the user
+        note.write_text(article)
+        self.old(rel)
+        self.reflect()
+        work = {"title": ["Phase changes"], "abstract": "<p>Pure water boils at 100 C at sea level pressure.</p>"
+                + "<p>Unrelated background on vapor tables.</p>" * 15}
+        counts = wiki_evidence.refresh({"doi:10.1/1", "doi:10.1/2", "doi:10.1/3", "isbn:0"}, date.today(), 60,
+                                       get=lambda url: (200, url, json.dumps({"message": work})))
+        self.assertEqual((counts["fetched"], counts["failed"]), (3, 0))
+        plan, proposal = self.prepare(cycle)
+        first, second = plan["wiki_review"]["claims"]  # c3 is disputed, so never source-checked
+        self.assertEqual((first["mode"], first["current"], first["evidence"][0]["source"]),
+                         ("support", "water boils at 100 C at sea level.", "doi:10.1/1"))
+        self.assertTrue(any("boils at 100 C" in passage for passage in first["evidence"][0]["passages"]))
+        forged = deepcopy(proposal)
+        forged["wiki_reviews"] = [{"path": rel, "claim": 1, "verdict": "verified", "reason": 'It says "water boils at 99 C at sea level".'}]
+        self.assertEqual(run.wiki_review.verdicts(forged, plan), {})  # a quote absent from the passages decides nothing
+        proposal["wiki_reviews"] = [{"path": rel, "claim": 1, "verdict": "verified", "reason": 'The source says "Pure water boils at 100 C at sea level pressure."'},
+                                    {"path": rel, "claim": 2, "verdict": "inconclusive", "reason": "The passages do not cover freezing."}]
+        with mock.patch.object(run.wiki_review.wiki_evidence, "minicheck", return_value=False):  # MiniCheck answers no
+            self.assertEqual(self.accept(plan, proposal)["status"], "complete")
+        record = f"@pass: scout | status: verified | at: {cycle} | ref: autoevo-applied-{cycle}\n"
+        self.assertEqual(note.read_text(), article.replace("doi:10.1/1 | valid_at: 2020-01-01\n", "doi:10.1/1 | valid_at: 2020-01-01\n" + record))
+        report = (self.vault / f"agent-findings/autoevo-applied-{cycle}.md").read_text()
+        self.assertIn("### Wiki source check verified: [[Boiling#^c1]]", report)
+        self.assertIn("- Source: doi:10.1/1 Phase changes", report)
+        self.assertIn("source check undecided: [[Boiling#^c2]]: The passages do not cover freezing.", report)
+        review, today = run.wiki_review, date.today()
+        note_obj = review.parse(note.read_text())
+        c2 = next(c for c in note_obj.claims if c.number == 2)
+        full = review.support_due(note_obj, note.read_text(), c2, today, review.trusted(self.vault / "wiki", today))
+        self.assertEqual(full[0]["passages"], [wiki_evidence.text("doi:10.1/2")])  # undecided passages escalate to the full text
+        wiki_evidence.remember_undecided([review.rest_key(review.claim_text(note_obj, note.read_text(), 2), full)], today)
+        self.assertEqual(review.candidates(self.vault, self.vault / "wiki", today), [])  # c2 rests until edited
+        note.write_text(note.read_text().replace("freezes at 0 C", "freezes at 0 C at sea level"))
+        self.assertEqual(review.candidates(self.vault, self.vault / "wiki", today, eligible=lambda rel: False), [])
+        self.assertEqual(run.wiki_review.candidates(self.vault, self.vault / "wiki", date.today()), [rel])
+
+    def test_wiki_prescan_skips_deleted_unreadable_and_secure_notes(self):
+        gone = self.vault / "wiki/topic/Gone.md"
+        gone.parent.mkdir(parents=True)
+        gone.write_text("# Gone\n\nIntro <!-- claim:c1 -->text.<!-- /claim:c1 -->\n")
+        self.reflect()
+        secret = self.vault / "wiki/secure/Private.md"
+        secret.parent.mkdir(parents=True)
+        secret.write_text("# Private\n")
+        locked = self.vault / "wiki/topic/Locked.md"
+        locked.write_text("# Locked\n")
+        self.reflect()
+        gone.unlink()
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o644)
+        hashed = []
+        real = run.hash_objects
+        with mock.patch.object(run, "hash_objects", side_effect=lambda vault, paths, **kw: hashed.extend(paths) or real(vault, paths, **kw)):
+            plan, _ = self.prepare()
+        self.assertEqual(plan["wiki_review"]["claims"], [])
+        self.assertFalse([rel for rel in hashed if "secure" in rel or rel.endswith("Locked.md")])  # never read
 
     def test_empty_cycle_keeps_a_verified_receipt_without_visible_notes(self):
         plan, proposal = self.prepare()

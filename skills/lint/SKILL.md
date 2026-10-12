@@ -133,5 +133,5 @@ If any user-driven fixes were made, suggest rerunning `/lint` manually to confir
 
 1. **Never hand-check structure.** Always call `scripts/lint.py`. If the script is missing or errors, fix the script — do not re-derive the checks in the LLM.
 2. **Ask before fixing.** All fixes route back to the user; `scripts/lint.py` is advisory-only.
-3. **ERROR findings block further wiki work.** If a wiki entry has a parse error, do not cite it from new entries, do not score it — fix it first.
+3. **ERROR findings block further wiki work.** If a wiki entry has a parse error, do not cite it from new entries; its claims need work until it is fixed.
 4. **WARN findings are advisory.** The system keeps working; the user decides whether to act.
