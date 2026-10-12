@@ -108,10 +108,10 @@ def claim_trust(claim: trust.Claim, as_of: date, cited: list[str], weights: dict
     passes = [((p.valid_at, i), p) for i, p in enumerate(claim.passes) if p.active_on(as_of)]
     edit = max((x for x in passes if x[1].fields["_agent"] == "editor"), default=None, key=lambda x: x[0])
     last = max((x for x in passes if x[1].fields["_agent"] in {"editor", "reviewer"}), default=None, key=lambda x: x[0])
-    review = max((x for x in passes if x[1].fields["_agent"] in ADVERSARIAL and x[1].fields["status"] == "verified"
-                  and (edit is None or x[0] > edit[0])), default=None, key=lambda x: x[0])
+    review = max((x for x in passes if x[1].fields["_agent"] in ADVERSARIAL and (edit is None or x[0] > edit[0])),
+                 default=None, key=lambda x: x[0])  # the latest check since the edit: a later doubt voids an earlier pass
     overlays = []
-    if review:  # a check confirms only a claim its anchors already make strong
+    if review and review[1].fields["status"] == "verified":  # a check confirms only a claim its anchors already make strong
         tier = "solid" if strong else tier
         reasons.append({"kind": "adversarial-review", "text": f"verified by {review[1].fields['_agent']}" + (" via MiniCheck" if review[1].fields.get("ref", "").endswith("#minicheck") else "") + ("" if strong else
                         "; Solid also needs two sources, one primary"), "data": {"agent": review[1].fields["_agent"],

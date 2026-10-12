@@ -1,5 +1,5 @@
 {
-  "description": "Claim trust tiers (Plan 30). Each case is one claim: its anchors-fence lines, the tiers of the claims it cites, and the day it is judged. A `reader` pass may only be `flagged` and an `editor` pass only `pending`; other statuses from those agents are ignored. Implementations of the tier rules (Reflect's packages/core/src/wiki/trust.ts, atelier's trust engine) must agree on every case.",
+  "description": "Claim trust tiers (Plan 30). Each case is one claim: its anchors-fence lines, the tiers of the claims it cites, and the day it is judged. A `reader` pass may only be `flagged` (a doubt) or `verified` (a dismissal, which resolves a dispute but never raises a tier) and an `editor` pass only `pending`; other statuses from those agents are ignored. Implementations of the tier rules (Reflect's packages/core/src/wiki/trust.ts, atelier's trust engine) must agree on every case.",
   "cases": [
     {
       "name": "no evidence",
@@ -290,12 +290,51 @@
       "overlays": []
     },
     {
-      "name": "a reader cannot verify",
+      "name": "a reader's dismissal resolves a dispute",
       "asOf": "2026-10-07",
       "ledger": [
         "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
         "@pass: reviewer | status: flagged | at: 2026-02-01",
         "@pass: reader | status: verified | at: 2026-03-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "a reader's dismissal never makes a claim solid",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: scout | status: flagged | at: 2026-02-01",
+        "@pass: reader | status: verified | at: 2026-02-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "a dismissed flag still voids the check it contradicted",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@anchor: url:https://docs.example.org/a | valid_at: 2026-01-01",
+        "@pass: scout | status: verified | at: 2026-02-01",
+        "@pass: challenger | status: flagged | at: 2026-03-01",
+        "@pass: reader | status: verified | at: 2026-04-01"
+      ],
+      "citedTiers": [],
+      "tier": "supported",
+      "overlays": []
+    },
+    {
+      "name": "a reader cannot record inconclusive",
+      "asOf": "2026-10-07",
+      "ledger": [
+        "@anchor: arxiv:2409.19256 | valid_at: 2026-01-01",
+        "@pass: reviewer | status: flagged | at: 2026-02-01",
+        "@pass: reader | status: inconclusive | at: 2026-03-01"
       ],
       "citedTiers": [],
       "tier": "needs-work",

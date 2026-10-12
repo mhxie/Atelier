@@ -188,8 +188,8 @@ def _parse_marker(kind: str, first: str, extras: list[str], line_no: int, raw: s
         status = fields.get("status", "")
         if status not in PASS_STATUSES:
             return None, f"line {line_no}: unrecognized @pass status `{status}`"
-        if (fields["_agent"] == "editor") != (status == "pending") or fields["_agent"] == "reader" and status != "flagged":
-            return None, f"line {line_no}: editor may only record pending, and reader only flagged"
+        if (fields["_agent"] == "editor") != (status == "pending") or fields["_agent"] == "reader" and (status not in {"flagged", "verified"} or fields.get("ref", "").startswith("autoevo-")):
+            return None, f"line {line_no}: editor may only record pending, and reader only the user's flagged or verified"
         if fields["_agent"] == "editor" and fields.get("at") != fields["valid_at"]:
             return None, f"line {line_no}: editor/pending requires an ISO at date matching valid_at"
 

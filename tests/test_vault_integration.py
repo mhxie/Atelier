@@ -510,6 +510,15 @@ class KnowledgeCLITests(unittest.TestCase):
         for ref, disputed in (("autoevo-applied-2020-01-05", 0), ("a session", 1)):  # an automated flag waits for the user
             note = trust.parse_wiki_note(claim(f"@pass: scout | status: flagged | at: 2020-01-05 | ref: {ref}").note_path, date.today())
             self.assertEqual(wiki_trust.sources([note], date.today())["doi:10.1/x"]["reasons"][2]["data"]["disputed"], disputed)
+        dismissed = claim("@pass: reader | status: flagged | at: 2020-01-04", "@pass: scout | status: flagged | at: 2020-01-05 | ref: a session",
+                          "@pass: reader | status: verified | at: 2020-01-05")  # the user's dismissal settles every doubt
+        note = trust.parse_wiki_note(dismissed.note_path, date.today())
+        self.assertEqual((note.parse_errors, dismissed.dispute(date.today()), wiki_review.doubted(dismissed, date.today())), ([], None, False))
+        self.assertEqual(wiki_trust.sources([note], date.today())["doi:10.1/x"]["reasons"][2]["data"]["disputed"], 0)
+        self.assertEqual(dismissed.latest(date.today(), {"editor", *wiki_trust.ADVERSARIAL}).fields["_agent"], "scout")  # so no new source check
+        self.assertEqual(wiki_review.support_due(note, dismissed.note_path.read_text(), dismissed, date.today(), {"doi:10.1/x"}), [])
+        forged = trust.parse_wiki_note(claim("@pass: reader | status: verified | at: 2020-01-05 | ref: autoevo-applied-2020-01-05").note_path, date.today())
+        self.assertIn("reader only the user's", " ".join(map(str, forged.parse_errors)))  # the nightly never speaks for the user
         staged = {"evidence": [{"source": "doi:10.1/x", "title": "A Study Of Boiling Water", "passages": ["Water boils at 100 C.", "Ice melts at 0 C."]}]}
         for verdict, reason, counts in (("verified", 'It says "Water boils at 100 C."', True),
                                         ("verified", 'The title is "A Study Of Boiling Water".', False),
