@@ -40,7 +40,7 @@ The result is a knowledge base designed to be revisited, challenged, and revised
 | Decision journals | Make assumptions, trade-offs, and review triggers explicit. | `$decision` |
 | Deep reading | Read a paper or article in the context of your questions. | `$read` |
 | Goal tracking | Review progress, commitments, and direction. | `$weekly`, `$review` |
-| Knowledge crystallization | Develop working notes into evidence-anchored wiki claims. | `$promote` |
+| Knowledge crystallization | Grow linked working notes into evidence-anchored wiki claims each night. | Autoevo |
 
 Start with a question in your agent's chat:
 

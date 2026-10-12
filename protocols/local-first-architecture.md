@@ -109,7 +109,7 @@ boundaries and declared capture/session exceptions.
 
 ## Migration Strategy: Opportunistic, Not Big-Bang
 
-New wiki entries use Curator drafts and approved orchestrator writes. Existing
+Nightly Autoevo grows new wiki entries from linked working notes. Existing
 L1/L2 or archived notes are structured into L4 only when their claims are about
 to anchor a new wiki claim; preserve the original capture untouched. There is
 no bulk migration or goal to hoist the vault. Most thinking remains L1/L2.

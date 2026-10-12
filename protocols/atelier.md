@@ -20,7 +20,7 @@ The system's narrative register draws from the impressionist atelier (master + s
 | Readwise inbox | **rough drawer** | cloud-only; `readwise` CLI |
 | session | **sitting** | (a `/hi` invocation) |
 | session log | **bench notes** | `<paths.sessions>/*.md` |
-| promote (L2 → L4) | **exhibit** / **mount** on the cimaise | `/promote` |
+| wiki growth (L2 → L4) | **exhibit** / **mount** on the cimaise | nightly Autoevo |
 
 ## Le cercle — 15 specialist operators
 

@@ -48,7 +48,7 @@ Two failure modes anchor the design at opposite ends.
 
 ### Karpathy's failure mode (the "pure-LLM-OK" drift)
 
-In the LLM Knowledge Bases gist, Andrej Karpathy treats everything in his second brain as acceptable for LLM ingestion and synthesis. There is no zone where the human writer's unmediated voice is preserved as load-bearing. The risk: the second brain becomes a closed loop where the LLM's prior outputs feed the LLM's next outputs, with no external friction to break the cycle. Trust propagates from nothing.
+In the LLM Wiki gist, Andrej Karpathy keeps raw sources immutable but lets the LLM own the wiki and file good answers back into it, and nothing mechanically checks wiki claims against their sources. The risk: the second brain becomes a closed loop where the LLM's prior outputs feed the LLM's next outputs, with no external friction to break the cycle.
 
 atelier's structural answer: external anchors are the only grounds of trust. Internal agent passes (Reviewer, Challenger, Thinker) can confirm or dispute a claim but never add evidence. The rule lives in `protocols/wiki-schema.md` → "The Trust Rule."
 

@@ -275,7 +275,9 @@ def _recent_operations(vault: Path, today: date) -> list[tuple[dict, str]]:
 
 
 def _cluster(operation: dict) -> str:
-    """The cluster an operation changed: its pre-existing note paths, never state files."""
+    """The cluster an operation changed: its pre-existing note paths, never state files; a new entry's source note."""
+    if operation.get("source"):  # kept apart from decay clusters over the same note
+        return cluster_hash(["grow:" + operation["source"]])
     meta = _segment("meta") + "/"
     return cluster_hash([rel for rel, (before, _) in evidence.operation_paths(operation).items()
                          if before is not None and not rel.startswith(meta)])
@@ -283,7 +285,8 @@ def _cluster(operation: dict) -> str:
 
 def tombstone_reason(vault: Path, sources: list[str], today: date) -> str | None:
     cluster = cluster_hash(sources)
-    if any(state == "reverted" and _cluster(op) == cluster for op, state in _recent_operations(vault, today)):
+    if any((state == "reverted" or op.get("article") and not (vault / op["article"]).exists()) and _cluster(op) == cluster
+           for op, state in _recent_operations(vault, today)):  # deleting a grown entry vetoes its source note
         return f"user reverted cluster {cluster}"
     path = _file(vault, f"{_segment('meta')}/autoevo_tombstones.toml")
     if path.is_file():
@@ -361,10 +364,11 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
     settled = {rel for rel, blob in zip(walk, hash_objects(vault, walk))  # the same checks staging applies below
                if blob == head_wiki[rel] and now - (vault / rel).stat().st_mtime >= RECENT_EDIT_SECONDS}
     wiki = wiki_review.candidates(vault, vault / _segment("wiki"), today, eligible=settled.__contains__)
-    head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers, *wiki)
+    grow = [rel for rel in wiki_review.grow_candidates(vault, today) if not tombstone_reason(vault, ["grow:" + rel], today)][:2 * wiki_review.GROW_CAP]
+    head = tree_blobs(vault, *(row["scope"] for row in dispatches), *peers, *wiki, *grow)
     in_scope = {rel for rel in head if rel.endswith(".md") and any(rel.startswith(row["scope"] + "/") for row in dispatches)}
     files, protected, stamps, sources = {}, [], [], {}
-    for rel in sorted(in_scope.union(peer for peer in [*peers, *wiki] if peer in head)):
+    for rel in sorted(in_scope.union(peer for peer in [*peers, *wiki, *grow] if peer in head)):
         try:
             source = _file(vault, rel)
         except evidence.VerificationError:
@@ -394,7 +398,8 @@ def prepare_workspace(vault: Path, workspace: Path, cycle: str, readiness: dict,
             "retrieval_mode": readiness.get("health", {}).get("semantic_mode", "unavailable"),
             "protected_paths": sorted(protected), "source_files": sources, "state_files": state_hashes, "defaults": defaults,
             "age_guard": age_guard, "notes": notes + [age_guard] if age_guard else notes, "wiki_review": {
-                "files": review, "claims": wiki_review.stage(vault, vault / _segment("wiki"), {rel: Path(row["snapshot"]) for rel, row in review.items()}, today)}}
+                "files": review, "claims": wiki_review.stage(vault, vault / _segment("wiki"), {rel: Path(row["snapshot"]) for rel, row in review.items()}, today)},
+            "wiki_growth": wiki_review.stage_growth(vault, {rel: Path(sources[rel]["snapshot"]) for rel in grow if rel in sources})}
 
 
 def _curator_problem(row: dict, plan: dict, vault: Path, band: str) -> str | None:
@@ -541,7 +546,8 @@ def _apply(vault: Path, record: dict, path: Path, kind: str, after: dict[str, st
     """Receipt atomic file writes; skip changed sources before their first write."""
     note, plan = kind in NOTE_KINDS, record["plan"]
     scope = {"queue": [*plan["state_files"]], "audit": [f"{_segment('agent_findings')}/"],
-             "wiki-review": [*plan.get("wiki_review", {}).get("files", {})]}.get(
+             "wiki-review": [*plan.get("wiki_review", {}).get("files", {})],
+             "wiki-growth": [f"{s}/" for s in [plan.get("wiki_growth", {}).get("wiki"), *plan.get("wiki_growth", {}).get("shadows", {}).values()] if s]}.get(
         kind, [*plan["source_files"], f"{_segment('archive')}/decayed/"])
     if stray := [rel for rel in after if not _protected(_norm_rel(rel), scope)]:
         raise evidence.VerificationError(f"{kind} may not write {stray}")
@@ -641,6 +647,18 @@ def accept_proposal(vault: Path, proposal: dict, plan: dict, *, flow_run_id: str
                               claims=", ".join(f"c{n} {a} {v}" for n, (a, v, _) in sorted(results.items()))):
                         record.setdefault("wiki_reviews", []).extend(
                             {"path": rel, "claim": n, "agent": a, "verdict": v} for n, (a, v, _) in sorted(results.items()))
+                growth, drafts = plan.get("wiki_growth", {"candidates": []}), {row["source"]: row for row in proposal.get("wiki_growth", [])}
+                for staged in growth["candidates"]:  # every staged note rests, drafted or skipped, unless MiniCheck was down
+                    row = drafts.get(staged["source"], {"path": ""})
+                    problem, files = wiki_review.grown(row, plan, vault, today) if row["path"] else ("not drafted", {})
+                    problem = problem or ("its source note is vetoed" if tombstone_reason(vault, ["grow:" + staged["source"]], today) else None)
+                    result = problem or growth["mode"]
+                    if not problem and growth["mode"] == "write" and not _apply(vault, record, path, "wiki-growth", files, dict.fromkeys(files),
+                                                                                 source=staged["source"], article=row["path"]):
+                        result = "skipped: a target appeared before the write"
+                    record.setdefault("wiki_growth", []).append({"source": staged["source"], "path": row["path"], "result": result})
+                    if not result.endswith(("unavailable", "write")):
+                        wiki_evidence.remember_undecided([staged["rest"]], today)
                 for entry in plan["defaults"]:
                     if entry.get("default_action") != "stale-banner":
                         continue

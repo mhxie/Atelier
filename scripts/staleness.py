@@ -255,7 +255,7 @@ def format_table(scores: list[NoteScore]) -> str:
         lines.append(f"  dormant ({counts['dormant']}): review or compact")
     if counts["promote"]:
         lines.append(
-            f"  promote ({counts['promote']}): your thinking keeps linking here, no wiki cites it; run /promote"
+            f"  promote ({counts['promote']}): your thinking keeps linking here, no wiki cites it; nightly Autoevo grows it into the wiki"
         )
     return "\n".join(lines) + "\n"
 

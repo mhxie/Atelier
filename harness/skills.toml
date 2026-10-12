@@ -88,15 +88,6 @@ category = "knowledge"
 status = "canonical"
 description = "Daily and weekly digest: JSON collection, capped overdue TODO reminders, status updates, and routine intel; one Reflect-native note per day in $OV."
 
-[skills.promote]
-source = "skills/promote/SKILL.md"
-category = "knowledge"
-status = "canonical"
-description = "Promote L2 notes into L4 articles with bounded claims, owned evidence, automatic references and metadata-driven localized titles."
-# Reflection workflows default to fresh sessions (a reused session pollutes
-# the new reflection); resume_friendly marks the continuation-safe exceptions.
-resume_friendly = true
-
 [skills.lint]
 # Public field validation is owned by harness/registry.schema.json;
 # scripts/harness_lint.py retains cross-file and workflow checks.

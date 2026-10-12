@@ -16,7 +16,7 @@ from _paths import atomic_write, retry_transient, tier_segments, vault_root
 VERSION = 1
 CATEGORIES = ("redundant", "time-stale-A", "time-stale-B", "contradicted", "low-signal")
 BLOCKING_STATES = ("half-applied", "malformed")
-NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner", "wiki-review")
+NOTE_KINDS = ("redundant-high", "low-signal-high", "stale-banner", "wiki-review", "wiki-growth")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
@@ -118,6 +118,12 @@ def proposal_schema(plan: dict) -> dict:
                 "properties": {"path": {"type": "string"}, "claim": {"type": "integer"},
                                "verdict": {"enum": ["verified", "flagged", "inconclusive"]}, "reason": {"type": "string"}},
             }},
+            "wiki_growth": {"type": "array", "items": {
+                "type": "object", "additionalProperties": False, "required": ["source", "path", "content", "translations", "quotes"],
+                "properties": {"source": {"enum": [row["source"] for row in plan.get("wiki_growth", {}).get("candidates", [])]},
+                               "path": {"type": "string"}, "content": {"type": "string"}, "quotes": {"type": "object"},
+                               "translations": {"type": "object", "additionalProperties": {"type": "string"}}},
+            }},
         },
     }
 
@@ -136,6 +142,9 @@ def validate_proposal(value: object, plan: dict) -> dict:
     reviewed = [(row["path"], row["claim"]) for row in value.get("wiki_reviews", [])]
     if len(set(reviewed)) != len(reviewed) or not set(reviewed) <= set(staged):
         raise VerificationError("wiki review repeated or invented a claim")
+    grown = [row["source"] for row in value.get("wiki_growth", [])]
+    if len(set(grown)) != len(grown):
+        raise VerificationError("wiki growth drafted one source twice")
     for sweep in value["sweeps"]:
         if sweep["outcome"] == "envelope_returned":
             if (sweep["mode"], sweep["completion_status"]) not in {("full", "complete"), ("partial", "partial")}:
@@ -195,6 +204,7 @@ def render_report(record: dict) -> str:
                   *(f"- {label}: {' '.join((claim[key] or '(unavailable)').split())[:300]}" for label, key in shown),
                   *(f"- Source: {e['source']} {e['title']}".rstrip() for e in claim.get("evidence", [])),
                   *([f"- MiniCheck: {claim['minicheck']}"] if "minicheck" in claim else [])]
+    lines += [line for row in record.get("wiki_growth", []) for line in ("", f"### Wiki growth {row['result']}: {row['path']}", f"- Source: {row['source']}")]
     for entry in record.get("triage", []):
         lines += ["", f"### Review {entry['category']}: {entry['id']}",
                   f"- Sources: {', '.join(entry['peers'])}",

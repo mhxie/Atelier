@@ -239,6 +239,95 @@ class AutoevoTest(unittest.TestCase):
         self.assertEqual(plan["wiki_review"]["claims"], [])
         self.assertFalse([rel for rel in hashed if "secure" in rel or rel.endswith("Locked.md")])  # never read
 
+    def grow_fixture(self):
+        """A working note two reflections link, its cached source, and an existing wiki folder to join."""
+        import staleness
+        import wiki_evidence
+
+        _paths.vault_root.cache_clear()
+        self.addCleanup(_paths.vault_root.cache_clear)
+        patch = mock.patch.object(staleness, "WIKI_DIR", self.vault / "wiki")  # resolved when first imported
+        patch.start()
+        self.addCleanup(patch.stop)
+        (self.vault / "wiki/topic").mkdir(parents=True)
+        (self.vault / "wiki/topic/Existing.md").write_text("# Existing\n\nIntro <!-- claim:c1 -->text.<!-- /claim:c1 -->\n")
+        (self.vault / "wip/Phase Notes.md").write_text("# Phase Notes\n\nSee https://doi.org/10.1/w.\n")
+        (self.vault / "wip/Hub.md").write_text("# Hub\n\nNo external sources, so nothing to grow from.\n")
+        for name in ("r100", "r200"):
+            (self.vault / f"reflections/{name}.md").write_text("Thinking about [[Phase Notes]] and [[Hub]].\n")
+        self.reflect()
+        work = {"title": ["Phase changes"], "abstract": "<p>Pure water boils at 100 C at sea level pressure. Pure water freezes at 0 C.</p>"
+                + "<p>Dissolved salt raises the boiling point of water.</p>" + "<p>Background on vapor tables.</p>" * 15}
+        wiki_evidence.refresh({"doi:10.1/w"}, date.today(), 60, get=lambda url: (200, url, json.dumps({"message": work})))
+        today = date.today().isoformat()
+        claims = ["Pure water boils at 100 C at sea level pressure.", "Pure water freezes at 0 C.", "Dissolved salt raises the boiling point of water."]
+        content = ("# Phase Changes\n\nWater changes phase. " + " ".join(f"<!-- claim:c{n} -->{c}<!-- /claim:c{n} -->" for n, c in enumerate(claims, 1))
+                   + "\n\n## References\n\n" + "".join(f"```anchors c{n}\n@anchor: doi:10.1/w | valid_at: {today}\n```\n\n" for n in (1, 2, 3))
+                   + f"## Revision Log\n\n- {today}: Drafted by Autoevo from [[Phase Notes]].\n")
+        return {"source": "wip/Phase Notes.md", "path": "wiki/topic/Phase Changes.md", "content": content, "translations": {},
+                "quotes": {f"c{n}": c for n, c in enumerate(claims, 1)}}
+
+    def test_wiki_growth_writes_only_a_gated_new_entry_and_deleting_it_vetoes_its_source(self):
+        row = self.grow_fixture()
+        with mock.patch.object(run.wiki_review, "GROW_MODE", "write"):
+            plan, proposal = self.prepare()
+        staged, = plan["wiki_growth"]["candidates"]
+        self.assertEqual((staged["source"], staged["title"], [e["source"] for e in staged["evidence"]], plan["wiki_growth"]["folders"]),
+                         ("wip/Phase Notes.md", "Phase Notes", ["doi:10.1/w"], ["wiki/topic"]))
+        review = run.wiki_review
+        for change, problem in ((lambda r: r.update(path="wiki/Phase Changes.md"), "existing wiki folder"),
+                                (lambda r: r["quotes"].update(c2="Pure water freezes at 1 C."), "c2 does not quote"),
+                                (lambda r: r.update(content=r["content"].replace("Water changes phase.", "Water changes phase. " * 30)), "cover less"),
+                                (lambda r: r.update(content=r["content"].replace("[[Phase Notes]]", "the notes")), "Revision Log"),
+                                (lambda r: r.update(content=r["content"].replace("## Revision Log", "## Background\n\n" + "Unchecked prose. " * 40 + "\n\n## Revision Log")), "cover less"),
+                                (lambda r: r.update(content=r["content"] + "- More unchecked history.\n"), "Revision Log"),
+                                (lambda r: r.update(content=r["content"].replace("valid_at", "kind: primary | valid_at")), "plain anchors"),
+                                (lambda r: r.update(content='---\ntitle: "Existing"\n---\n' + r["content"]), "without frontmatter")):
+            bad = deepcopy(row)
+            change(bad)
+            self.assertIn(problem, review.grown(bad, plan, self.vault, date.today())[0])
+        self.assertIn("MiniCheck is unavailable", review.grown(row, plan, self.vault, date.today())[0])  # no local model: nothing is written
+        plan["wiki_growth"]["shadows"] = {"zh": "wiki-cn"}
+        self.assertIn("zh copy", review.grown(row, plan, self.vault, date.today())[0])
+        row["translations"]["zh"] = '---\ntitle: "Existing"\nlang: "zh-CN"\n---\n' + row["content"]  # a copy may not take another note's title
+        self.assertIn("zh copy", review.grown(row, plan, self.vault, date.today())[0])
+        row["translations"]["zh"] = '---\ntitle: "Phase Changes (中文)"\nlang: "zh-CN"\n---\n' + row["content"].replace("Water changes phase.", "水会相变。")
+        proposal["wiki_growth"] = [row]
+        with mock.patch.object(review.wiki_evidence, "minicheck", return_value=True):
+            self.assertEqual(review.grown(row, plan, self.vault, date.today()),
+                             (None, {row["path"]: row["content"], "wiki-cn/topic/Phase Changes.md": row["translations"]["zh"]}))
+            record = self.accept(plan, proposal)
+        self.assertEqual((self.vault / "wiki-cn/topic/Phase Changes.md").read_text(), row["translations"]["zh"])
+        self.assertEqual((record["status"], record["wiki_growth"]), ("complete", [{"source": row["source"], "path": row["path"], "result": "write"}]))
+        self.assertEqual((self.vault / row["path"]).read_text(), row["content"])
+        self.assertEqual([op["kind"] for op in record["operations"] if op["kind"] != "queue"], ["wiki-growth", "audit"])
+        self.assertIn("### Wiki growth write: wiki/topic/Phase Changes.md", (self.vault / f"agent-findings/autoevo-applied-{CYCLE}.md").read_text())
+        self.reflect()
+        self.assertIsNone(run.tombstone_reason(self.vault, ["grow:" + row["source"]], date.fromisoformat(NEXT)))
+        (self.vault / row["path"]).unlink()  # the user deletes the entry in Reflect
+        self.assertIn("user reverted", run.tombstone_reason(self.vault, ["grow:" + row["source"]], date.fromisoformat(NEXT)))
+        self.assertIsNone(run.tombstone_reason(self.vault, [row["source"]], date.fromisoformat(NEXT)))  # decay operations on it stay open
+        self.assertIsNone(run.tombstone_reason(self.vault, ["grow:wip/seed.md"], date.fromisoformat(NEXT)))  # other sources stay open
+
+    def test_wiki_growth_dry_run_records_its_verdict_and_writes_no_entry(self):
+        row = self.grow_fixture()
+        plan, proposal = self.prepare()
+        self.assertEqual(plan["wiki_growth"]["mode"], "dry-run")
+        proposal["wiki_growth"] = [row, row]
+        with self.assertRaises(evidence.VerificationError):
+            evidence.validate_proposal(proposal, plan)
+        proposal["wiki_growth"] = [row]
+        self.assertTrue(self.accept(plan, deepcopy(proposal))["wiki_growth"][0]["result"].endswith("MiniCheck is unavailable"))
+        self.assertEqual(run.wiki_review.grow_candidates(self.vault, date.fromisoformat(NEXT)), [row["source"]])  # an outage rests nothing
+        self.reflect()
+        plan, proposal = self.prepare(NEXT)
+        proposal["wiki_growth"] = [row]
+        with mock.patch.object(run.wiki_review.wiki_evidence, "minicheck", return_value=True):
+            record = self.accept(plan, proposal)
+        self.assertEqual(record["wiki_growth"][0]["result"], "dry-run")
+        self.assertFalse((self.vault / row["path"]).exists())
+        self.assertEqual(run.wiki_review.grow_candidates(self.vault, date.fromisoformat(NEXT)), [])  # a judged draft rests until the note changes
+
     def test_empty_cycle_keeps_a_verified_receipt_without_visible_notes(self):
         plan, proposal = self.prepare()
         head = self.git("rev-parse", "HEAD")

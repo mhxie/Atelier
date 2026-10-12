@@ -269,8 +269,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.fetch_seconds:
         if args.write:
             atomic_write(path, payload)  # today's report never waits on the network
+        import wiki_review  # it imports this module
+
         fetched = wiki_evidence.refresh({evidence_key(a) for n in notes if not private(n)  # a fetch tells the site what we cite
-                                         for c in n.claims for a in c.anchors if a.active_on(args.as_of)}, date.today(), args.fetch_seconds)
+                                         for c in n.claims for a in c.anchors if a.active_on(args.as_of)}
+                                        | wiki_review.grow_sources(args.as_of), date.today(), args.fetch_seconds)
         notes, payload = build()
     if not args.write:
         sys.stdout.write(payload)

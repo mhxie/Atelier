@@ -136,7 +136,7 @@ Vault-side lint for the conventions in this doc (folder fission, image placement
 
 Conventions:
 
-- **Push cadence**: at the user's discretion. Reasonable triggers include after a `/promote` that lands a new wiki entry, or at end-of-session if anything material changed.
+- **Push cadence**: at the user's discretion. A reasonable trigger is end-of-session if anything material changed.
 - **Scope**: whatever the vault's `.gitignore` permits. `cache/` (L1 ephemera) and nested `assets/` (auto-paste hash-named imports) are typically excluded. `_meta/` (routine config, drive aliases) is typically pushed because it holds load-bearing user-private config; users with sensitive content in `_meta/<backend>.toml` may prefer to gitignore it and re-derive per device. The atelier does not dictate the vault's gitignore.
 - **Threat model**: the private remote is one credential away from disclosing the entire knowledge base. Treat it like a password vault. On suspected compromise: rotate the GitHub token, audit recent pushes, and consider a fresh repo with selectively replayed history (the rewrite path is destructive; document the recipe before needing it).
 - **Staleness**: no atelier cue surfaces "remote is N commits behind." Users who want that signal wire it as a local cron or shell prompt indicator. Acceptable trade-off because the local $OV is the authoritative copy and Drive sync provides the device-level redundancy.

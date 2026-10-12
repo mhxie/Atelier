@@ -3,11 +3,11 @@
 Autoevo is a Prefect-owned decay sweep over the working tiers. Forgetter
 supplies findings; trusted policy selects eligible operations, preserves
 uncertain findings in the pending queue, and writes each operation as plain
-files. It produces derived decay/audit reports, not synthesis or reflection.
+files. It produces derived decay/audit reports and gated new wiki entries, not reflection.
 
 Autoevo writes files; Reflect commits and pushes them. Autoevo never runs a
 Git write. Wiki, localized wiki shadows, daily notes, and user edits remain
-protected, except the append-only wiki edit review below. The model proposes; only the trusted parent writes the live vault.
+protected, except the append-only wiki claim review and wiki growth below. The model proposes; only the trusted parent writes the live vault.
 
 ## Execution boundary
 
@@ -145,7 +145,7 @@ bundle and rejects stale or unknown judgments before setting a default.
 Only `<paths.wip>/`, `<paths.research>/`, and `<paths.reflections>/` are
 sweep/source tiers. `<paths.agent_findings>/` is report output, never a sweep
 target. Wiki, localized wiki shadows and daily notes never auto-apply
-beyond the wiki edit review.
+beyond the wiki claim review and wiki growth.
 A source is eligible only when it is tracked at HEAD, its bytes are that
 blob, it has no conflict-marker lines, and its mtime is over two hours old;
 the plan lists the rest as `protected_paths`. Right before each write the
@@ -190,6 +190,31 @@ staged evidence changes; a dispatch that returns no source verdict rests nothing
 Flagged claims wait for the user, and rewrites keep their approval gate. The
 report lists each verdict, reason and before/after text or cited sources for
 spot checks in Reflect, and each undecided check under Notes.
+
+## Wiki growth
+
+`scripts/wiki_review.py` owns growth. Candidates are `GROW_TIERS` notes your
+thinking links at least twice that no wiki entry cites
+(`staleness.promotion_candidates`) and that link an external source, minus
+`private: true` and local-only notes and tombstoned sources. The
+`wiki-trust-report` routine fetches the sources they link, skipping links with
+query strings; preparation stages up to `GROW_CAP` with cached sources, and
+the model drafts each entry and its localized copies.
+
+The parent writes a draft only as new files in an existing wiki folder, never
+touching an existing note or `index.md`, and only when `wiki_review.grown`
+passes: a clean parse without frontmatter, records, citations or anchor fields
+beyond `valid_at`; claims covering `GROW_COVERAGE` of the prose; a one-line
+Revision Log linking the source note; every claim anchoring a staged source
+above the trust threshold, quoting it verbatim and having MiniCheck support
+from it; and copies mirroring its claims and fences under titles no note uses.
+The checks gate the write and leave no record, so the ordinary source check
+verifies new claims independently on later nights. Each staged note then rests
+until it changes, for up to `UNDECIDED_DAYS`, unless MiniCheck was down.
+`GROW_MODE` is `off`, `dry-run` (verdicts land only in the receipt) or
+`write`. Deleting or moving a grown entry vetoes its source note for
+`TOMBSTONE_DAYS`, apart from decay operations on it; editing the entry hands
+it to the user.
 
 ## Pending queue and decision history
 

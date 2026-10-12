@@ -25,7 +25,7 @@ Deterministic Python pass. The LLM never hand-checks structure — `scripts/lint
 | Shared anchor without a citation edge between entries | INFO | `scripts/lint.py` graph topology |
 | `url:` or `gist:` anchor missing `readwise:` field (`readwise-missing`) | WARN | `scripts/lint.py` — save to Readwise with `anchor-evidence` tag and backfill the document ID; fix via `uv run scripts/snapshot_anchors.py --apply --note "<paths.wiki>/<Title>.md"` |
 | Technical term in claim body not in vocabulary allowlist and not matching any wiki entry title (`unfounded-term`) | INFO | `scripts/lint.py` — add term to `scripts/wiki_vocabulary.txt` if common knowledge, or add a wiki entry, or add a parenthetical definition inline |
-| Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — run /promote Phase 4 or regenerate the shadow manually. |
+| Localized shadow missing for a configured language (`shadow-missing`) | WARN | `scripts/lint.py` — regenerate the shadow from the English entry. |
 | Localized shadow older than English source (`shadow-stale`) | WARN | `scripts/lint.py` — re-translate the localized shadow to match the updated English source |
 | Public configuration schema and Claude/Codex harness alignment (`registry-schema`, `registry-read`, `registry-validator`, source/reference/edge findings) | ERROR/WARN/INFO | `harness/registry.schema.json` + `scripts/harness_lint.py` |
 | `$OV` ingestion hygiene (missing READMEs, raw-without-digest, archive↔working-tier overlap, root-level orphans, empty .md files, suspicious top-level dirs, vault layout, duplicate Reflect titles) | INFO (advisory) | `scripts/zk_audit.py` — see `protocols/drive-zk-ingestion.md` § Post-ingestion verification |
@@ -110,7 +110,7 @@ Summarize INFO findings (e.g., "4 entries lack outbound citations") unless the u
 **Staleness section** (from Phase 1b): present after the structural findings, under a separate heading. Group by category:
 - **stale** notes: list paths, suggest archiving to `<paths.archive>/`
 - **dormant** notes: list paths, suggest review or compaction
-- **promote** candidates: list paths, suggest `/promote` to create L4 wiki entries
+- **promote** candidates: list paths; nightly Autoevo grows wiki entries from them
 - If all notes are active, say so in one line and move on.
 
 ### Phase 3: Offer fixes

@@ -15,7 +15,6 @@
     {"input": "explore what am I missing lately", "expected": "explore"},
     {"input": "triage inbox please", "expected": "curate"},
     {"input": "browse saves from readwise", "expected": "curate"},
-    {"input": "promote this to wiki", "expected": "promote"},
     {"input": "run lint on the wiki", "expected": "lint"},
     {"input": "rebuild profile from my notes", "expected": "introspect"},
     {"input": "每日复盘 走起", "expected": "reflection"},

@@ -249,7 +249,7 @@ def check_shadow_drift(notes: list[WikiNote]) -> list[Finding]:
             if not sh_path.exists():
                 findings.append(Finding("WARN", "shadow-missing", note.path.as_posix(),
                                         f"no {lang_tag} shadow at `{sh_path.as_posix()}` — "
-                                        f"re-run /promote Phase 4 or regenerate manually"))
+                                        f"regenerate it from the English entry"))
                 continue
             if note.path.stat().st_mtime > sh_path.stat().st_mtime + GRACE_SECONDS:
                 findings.append(Finding("WARN", "shadow-stale", note.path.as_posix(),

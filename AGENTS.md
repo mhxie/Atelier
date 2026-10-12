@@ -23,9 +23,9 @@ keys, paths, command names, and data fields stay literal.
 
 ## Knowledge and retrieval
 
-- `$OV/` is canonical. Wiki is validated knowledge; papers and preprints are
-  evidence; working notes and reflections are provisional; capture and cache
-  are raw. Validation depth outranks origin.
+- `$OV/` is canonical. Wiki is anchored knowledge, tiered per claim; papers and
+  preprints are evidence; working notes and reflections are provisional;
+  capture and cache are raw. Validation depth outranks origin.
 - Content queries start with bounded `scripts/semantic.py` results. Use `rg`
   for structure, exact titles, and paths. Read source files before quoting.
   `semantic.py query` tries Reflect's lexical index before QMD; the Reflect
@@ -48,8 +48,8 @@ keys, paths, command names, and data fields stay literal.
 - Daily notes are user-authored and read-only to the system. The sole write
   path is Scribe `daily_note` recording user-dictated text verbatim.
 - Scribe capture operations may record text the user already authored. Bounded
-  session logs follow their protocol. All other `$OV` writes require explicit
-  approval and are performed by the orchestrator.
+  session logs and Autoevo follow their protocols. All other `$OV` writes need
+  explicit approval and are performed by the orchestrator.
 - Cite notes with `[[Title]]` (frontmatter or H1 title) or `[[Title|text]]`,
   the only form Reflect backlinks and renames; attachments keep relative
   paths, never `<...>`. Never attribute a statement to the user without its

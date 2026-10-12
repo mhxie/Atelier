@@ -277,23 +277,6 @@ profile_reads = ["identity.md", "directions.md"]
 expected_subagent_count = 0
 parallel = false
 
-# Promote: Researcher (candidate gather) then Curator (draft); sequential.
-[intents.promote]
-description = "Promote L2 notes into a schema-compliant L4 wiki entry: canonize, create or promote a wiki entry."
-examples = [
-    "promote to wiki",
-    "canonize this",
-    "create wiki entry",
-    "L4 entry",
-]
-mode = "promote"
-procedure = "skills/promote/SKILL.md"
-context_budget_tokens = 2048
-agents = ["researcher", "curator"]
-profile_reads = []
-expected_subagent_count = 2
-parallel = false
-
 # Lint is purely script-driven; no subagent dispatch.
 [intents.lint]
 description = "Run the wiki and harness lint suite: orphans, structural checks, privacy and staleness audits."
