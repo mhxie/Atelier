@@ -40,6 +40,21 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual(rows[0]["features"], {"tier": "wip"})
             self.assertEqual(rows[0]["by"], "human")
 
+    def test_record_never_files_a_verdict_behind_the_ledger_clock(self) -> None:
+        # A replayed --today midnight sorted a human verdict before the nightly's precedent lines, so it
+        # neither refilled the budget nor counted as a veto; a future stamp is kept as given.
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "decisions.jsonl"
+            before = decisions._now()
+            backdated = decisions.record(cls="t/x", subject="s", verdict="dismiss", reason="still active",
+                                         ts="2000-01-01T00:00:00", path=ledger)
+            self.assertGreaterEqual(backdated["ts"], before)
+            ahead = decisions.record(cls="t/x", subject="s", verdict="apply", reason="do it now",
+                                     ts="2099-01-01T00:00:00", path=ledger)
+            self.assertEqual(ahead["ts"], "2099-01-01T00:00:00")
+            rows = _run(ledger, "list", "--class", "t/x")["rows"]
+            self.assertEqual([row["ts"] for row in rows], [backdated["ts"], "2099-01-01T00:00:00"])
+
     def test_stats_count_vetoes_against_precedent_lines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ledger = Path(tmp) / "decisions.jsonl"

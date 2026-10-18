@@ -157,8 +157,11 @@ def record(
     reading_actor = str(cls).strip() == reading.CLASS and by in {"agent", "observed"}
     if by not in BY_VALUES and not reading_actor:
         raise ValueError(f"by must be one of {BY_VALUES}")
+    now = _now()
+    # The ledger ranks by ts: a human line refills the budget and vetoes precedent lines only when it sorts
+    # after them, so a replayed --today midnight must not file today's verdict behind this morning's nightly.
     line = {
-        "ts": ts or _now(),
+        "ts": max(ts, now) if ts else now,
         "class": str(cls).strip(),
         "subject": str(subject).strip(),
         "verdict": str(verdict).strip(),
