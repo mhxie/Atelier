@@ -172,6 +172,27 @@ class AutoevoCueTest(unittest.TestCase):
         recent.assert_not_called()
 
 
+class WeeklyCueTest(unittest.TestCase):
+    def test_each_branch_keeps_its_exact_message_and_reason(self) -> None:
+        nudge = ". 这周已经积累了 Apple Health / 信号 / 健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?"
+        sunday, wednesday = date(2099, 1, 4), date(2099, 1, 7)
+        cases = (
+            ([], sunday, ("hard", "还没跑过 weekly" + nudge), "no weekly found; hard floor"),
+            (["2098-12-24-weekly.md"], sunday, ("hard", "上次 weekly 是 11 天前" + nudge), "days_since=11 > 10; hard floor"),
+            (["2098-12-27-weekly.md"], sunday, ("soft", "提示: 上次 weekly 是 8 天前. 想现在跑 `/weekly` 把这周补齐吗?"),
+             "days_since=8, weekday=6; soft cue"),
+            (["2098-12-30-weekly.md"], wednesday, None, "days_since=8, weekday=2; fresh"),
+            (["notes-weekly.md"], sunday, None, "could not parse date from notes-weekly.md; skip"),
+        )
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            for files, today, expected, reason in cases:
+                with self.subTest(files=files), mock.patch.object(cues, "tier", return_value=Path(tmp)), \
+                        mock.patch.object(cues, "tier_files", return_value=[Path(tmp) / name for name in files]):
+                    cue, debug = cues.check_weekly(Path(tmp), today)
+                self.assertEqual((cue.severity, cue.message) if cue else None, expected)
+                self.assertEqual(debug, reason)
+
+
 class ReflectIntakeCueTest(unittest.TestCase):
     def _check(self, vault: Path) -> dict:
         return _run_py(
@@ -455,6 +476,15 @@ class RoutineFailureCueTests(unittest.TestCase):
         self.assertIn("codex exited", cue.message)
         self.assertIn("failed=1", debug)
 
+    def test_failure_detail_survives_prefect_boilerplate(self):
+        message = ("Flow run encountered an exception: ExecutionError: model did not report a successful "
+                   "domain outcome: Sweep completed, but artifact creation failed with a SyntaxError.\nNo retry.")
+        runs = [{"routine": "sweep", "state": "FAILED", "state_name": "Failed", "message": message}]
+        with mock.patch.object(cues.routine_status, "recent_runs", return_value=runs):
+            cue, _ = cues.check_routine_failures(self.root, date(2026, 8, 31))
+        self.assertIn("artifact creation failed with a SyntaxError. No retry.", cue.message)
+        self.assertNotIn("encountered an exception", cue.message)
+
     def test_a_newer_success_supersedes_an_older_failure(self):
         runs = [
             {"routine": "sample", "state": "COMPLETED", "state_name": "Completed", "message": ""},
@@ -564,6 +594,40 @@ class LocalRoutineMissedTests(unittest.TestCase):
             self.assertIn("session_active", cue.message)
             self.assertIn("blocked", debug)
 
+    def test_night_session_still_reports_yesterdays_missing_receipt(self):
+        # A wall-clock 06:00 gate used to silence every miss for sessions opened after midnight.
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            now = datetime(2026, 9, 1, 1, 15).astimezone()
+            cue, debug = cues.check_local_routine_missed(vault, now.date(), now=now)
+            self.assertIsNotNone(cue, debug)
+            self.assertIn("no verified receipt for 2026-08-31", cue.message)
+            _write_receipt(vault, "r", "2026-08-31")
+            self.assertIsNone(cues.check_local_routine_missed(vault, now.date(), now=now)[0])
+
+    def test_running_cycle_is_not_missed_until_its_grace_expires(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            _write_receipt(vault, "r", "2026-08-30")
+            _write_receipt(vault, "r", "2026-08-31", verification="pending")  # the adapter's start record
+            running = datetime(2026, 8, 31, 7, 0).astimezone()
+            cue, debug = cues.check_local_routine_missed(vault, running.date(), now=running)
+            self.assertIsNone(cue, debug)
+            self.assertIn("2026-08-30 verified", debug)
+            stuck = running + cues.RECEIPT_GRACE
+            cue, _ = cues.check_local_routine_missed(vault, stuck.date(), now=stuck)
+            self.assertIn("receipt verification pending on 2026-08-31", cue.message)
+
+    def test_a_later_named_backfill_does_not_hide_the_newest_artifact(self):
+        # "backfill-…08-30" sorts after "2026-08-31" by name; staleness used to read that as the latest output.
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            _write_receipt(vault, "r", "2026-08-31", contract_version=4)
+            (vault / "x/backfill-2026-08-30.md").write_text("older backfill\n", encoding="utf-8")
+            cue, debug = cues.check_routine_staleness(vault, date(2026, 8, 31))
+            self.assertIsNone(cue, debug)
+            self.assertIn("age=0d", debug)
+
     def test_cron_array_uses_one_cycle_date(self):
         with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
             vault = self._vault(tmp)
@@ -586,7 +650,8 @@ class LocalRoutineMissedTests(unittest.TestCase):
             watch.write_text(self.WATCH.replace(
                 'cron = "0 6 * * *"', 'cron = ["0 0 * * *", "0 12 * * *"]\ntimezone = "UTC"'
             ), encoding="utf-8")
-            now = datetime(2026, 8, 31, 17, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
+            # 03:30 UTC: the 00:00 UTC cycle of 2026-09-01 is past its receipt grace.
+            now = datetime(2026, 8, 31, 20, 30, tzinfo=ZoneInfo("America/Los_Angeles"))
             _write_receipt(vault, "r", "2026-08-31")
             cue, _ = cues.check_local_routine_missed(vault, now.date(), now=now)
             self.assertIn("2026-09-01", cue.message)

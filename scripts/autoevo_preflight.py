@@ -173,9 +173,11 @@ def inspect_preflight(
                 "detail": f"{lock_path} has no parent directory or is a symlink",
             }
         )
-    elif lock_path.exists():
+    else:
         try:
-            age = max(0, int(now - lock_path.stat().st_mtime))
+            st = lock_path.stat()
+        except FileNotFoundError:
+            pass
         except OSError as exc:
             blockers.append(
                 {
@@ -184,6 +186,7 @@ def inspect_preflight(
                 }
             )
         else:
+            age = max(0, int(now - st.st_mtime))
             health["session_lock_age_seconds"] = age
 
     if not _inside_worktree(vault):

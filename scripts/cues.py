@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 # Allow running as `uv run scripts/cues.py` from atelier root.
 sys.path.insert(0, str(Path(__file__).parent))
-from _paths import date_in_text, raw_store, tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
+from _paths import PathsError, date_in_text, raw_store, tier, tier_files, tier_segments, vault_root  # type: ignore[import-not-found]  # noqa: E402
 import cron_spec  # noqa: E402
 import intent_coverage  # noqa: E402
 import autoevo_preflight  # noqa: E402
@@ -36,6 +36,11 @@ class Cue:
     message: str  # user-facing Chinese prompt
     count: int | None = None  # queue size, when the cue backs a /triage lane
     items: list[str] | None = None  # that queue's entries, for the lane's batch
+
+
+def _first_three(items: list[str], separator: str = "; ") -> str:
+    """Bound a cue listing to three entries plus an overflow count."""
+    return separator.join(items[:3]) + (f", +{len(items) - 3} more" if len(items) > 3 else "")
 
 
 def _resolve_output_runtime(requested: str) -> str:
@@ -115,40 +120,24 @@ def check_weekly(ov: Path, today: date) -> tuple[Cue | None, str]:
         return None, "reflections dir missing; skip weekly cue"
 
     weeklies = tier_files("reflections", "*-weekly.md")
-    if not weeklies:
+    days_since = None
+    if weeklies:
+        try:
+            latest_date = datetime.strptime(weeklies[-1].name[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None, f"could not parse date from {weeklies[-1].name}; skip"
+        days_since = (today - latest_date).days
+
+    if days_since is None or days_since > 10:
+        last = "还没跑过 weekly" if days_since is None else f"上次 weekly 是 {days_since} 天前"
         return (
             Cue(
                 key="weekly",
                 severity="hard",
                 command_path="skills/weekly/SKILL.md",
-                message=(
-                    "还没跑过 weekly. 这周已经积累了 Apple Health / 信号 / "
-                    "健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?"
-                ),
+                message=f"{last}. 这周已经积累了 Apple Health / 信号 / 健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?",
             ),
-            "no weekly found; hard floor",
-        )
-
-    latest = weeklies[-1]
-    try:
-        latest_date = datetime.strptime(latest.name[:10], "%Y-%m-%d").date()
-    except ValueError:
-        return None, f"could not parse date from {latest.name}; skip"
-
-    days_since = (today - latest_date).days
-
-    if days_since > 10:
-        return (
-            Cue(
-                key="weekly",
-                severity="hard",
-                command_path="skills/weekly/SKILL.md",
-                message=(
-                    f"上次 weekly 是 {days_since} 天前. 这周已经积累了 Apple Health / "
-                    f"信号 / 健康 cadence checks 没补齐. 建议先跑 `/weekly`. 现在跑吗?"
-                ),
-            ),
-            f"days_since={days_since} > 10; hard floor",
+            "no weekly found; hard floor" if days_since is None else f"days_since={days_since} > 10; hard floor",
         )
 
     weekday = today.weekday()  # Mon=0, Sun=6
@@ -258,9 +247,7 @@ def check_aggregate_freshness(ov: Path, today: date) -> tuple[Cue | None, str]:
         for a in g["aggregates"]:
             p = a["path"].rsplit("/", 1)[-1]
             names.append(f"{p} (-{a['days_behind']}d)")
-    listing = ", ".join(names[:3])
-    if len(names) > 3:
-        listing += f", +{len(names) - 3} more"
+    listing = _first_three(names, ", ")
     return (
         Cue(
             key="aggregate_freshness",
@@ -300,8 +287,6 @@ def _routine_files(ov: Path, row: dict[str, Any]) -> list[Path] | None:
 
 def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
     """Surface outputs newer than the registry directory's acknowledged filename."""
-    import json
-
     routines, skip = _routine_rows(ov)
     if skip:
         return None, skip
@@ -344,9 +329,7 @@ def check_routine_outputs(ov: Path, today: date) -> tuple[Cue | None, str]:
     # Show the oldest review debt first so early registry rows cannot pin the
     # three visible slots and hide later routines indefinitely.
     new_findings.sort(key=lambda finding: finding[0])
-    listing = "; ".join(finding[1] for finding in new_findings[:3])
-    if len(new_findings) > 3:
-        listing += f", +{len(new_findings) - 3} more"
+    listing = _first_three([finding[1] for finding in new_findings])
 
     return (
         Cue(
@@ -381,9 +364,7 @@ def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
         violators.append(str(r.get("name", "?")))
     if not violators:
         return None, f"all {len(routines)} routines compliant"
-    listing = ", ".join(violators[:3])
-    if len(violators) > 3:
-        listing += f", +{len(violators) - 3} more"
+    listing = _first_three(violators, ", ")
     return (
         Cue(
             key="routine_policy",
@@ -401,8 +382,9 @@ def check_routine_policy(ov: Path, today: date) -> tuple[Cue | None, str]:
     )
 
 
-def _latest_local_receipt(ov: Path, routine: str, declaration: dict | None = None) -> tuple[date, dict, Path] | None:
-    """Load the latest compact domain receipt for one local routine."""
+def _latest_local_receipt(ov: Path, routine: str, declaration: dict | None = None,
+                          through: date | None = None) -> tuple[date, dict, Path] | None:
+    """Load the latest compact domain receipt for one local routine, optionally no newer than `through`."""
     routine_dir = _meta_dir(ov) / "routine_receipts" / routine
     if not routine_dir.is_dir():
         return None
@@ -413,7 +395,8 @@ def _latest_local_receipt(ov: Path, routine: str, declaration: dict | None = Non
             receipt_date = date.fromisoformat(receipt_path.stem)
         except ValueError:
             continue
-        candidates.append((receipt_date, receipt_path))
+        if through is None or receipt_date <= through:
+            candidates.append((receipt_date, receipt_path))
     for receipt_date, receipt_path in sorted(candidates, reverse=True):
         try:
             if is_autoevo:
@@ -500,10 +483,10 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
             debug_parts.append(f"{label}: no files; cadence={cadence_days}d")
             continue
 
-        latest_name = files[-1].name
-        latest_date = date_in_text(latest_name)
+        # Name order is not date order: a later-named backfill must not hide a newer artifact.
+        latest_date = max(filter(None, (date_in_text(f.name) for f in files)), default=None)
         if latest_date is None:
-            debug_parts.append(f"{label}: can't parse date from {latest_name}")
+            debug_parts.append(f"{label}: can't parse date from {files[-1].name}")
             continue
 
         if latest_receipt is not None:
@@ -530,9 +513,7 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
     if not stale:
         return None, debug
 
-    listing = "; ".join(stale[:3])
-    if len(stale) > 3:
-        listing += f", +{len(stale) - 3} more"
+    listing = _first_three(stale)
 
     return (
         Cue(
@@ -632,9 +613,7 @@ def check_routine_hitrate(
     if not degraded:
         return None, debug
 
-    listing = "; ".join(degraded[:3])
-    if len(degraded) > 3:
-        listing += f", +{len(degraded) - 3} more"
+    listing = _first_three(degraded)
 
     return (
         Cue(
@@ -917,6 +896,10 @@ def _recap_local_runs(ov: Path, today: date, verbose: bool = False) -> list[str]
     return recaps
 
 
+# Exceeds the longest model profile timeout (7200s), so a cycle still running is not due yet.
+RECEIPT_GRACE = timedelta(hours=3)
+
+
 def check_local_routine_missed(
     ov: Path,
     today: date,
@@ -925,16 +908,10 @@ def check_local_routine_missed(
 ) -> tuple[Cue | None, str]:
     """Detect missing verified artifact receipts; Prefect remains authoritative for run state."""
     now = now or datetime.now().astimezone()
-    if now.hour < 6:
-        return None, "before 06:00 local; skip"
-    config_path = _routine_registry(ov)
-    try:
-        config = tomllib.loads(config_path.read_text())
-    except FileNotFoundError:
-        return None, "private routine registry missing; skip"
-    except (tomllib.TOMLDecodeError, OSError) as exc:
-        return None, f"private routine registry parse failed: {exc!r}"
-    routines = [r for r in config.get("routine", []) if r.get("execution") == "local" and r.get("runner") == "model"]
+    rows, skip = _routine_rows(ov)
+    if skip:
+        return None, skip
+    routines = [r for r in rows if r.get("execution") == "local" and r.get("runner") == "model"]
     receipts = _meta_dir(ov) / "routine_receipts"
     if not routines or not receipts.is_dir():
         return None, "no local model receipts; skip"
@@ -948,12 +925,14 @@ def check_local_routine_missed(
         if cadence is None:
             debug_parts.append(f"{label}: health cron unavailable")
             continue
-        start = today - timedelta(days=max(366, 3 * cadence))
-        due = _scheduled_dates(cron, start, now, row.get("timezone"))
+        start = today - timedelta(days=max(14, 3 * cadence))
+        due = _scheduled_dates(cron, start, now - RECEIPT_GRACE, row.get("timezone"))
         if not due:
             continue
         expected = due[-1]
         latest = _latest_local_receipt(ov, name, row)
+        if latest is not None and latest[0] > expected and latest[1].get("verification") != "passed":
+            latest = _latest_local_receipt(ov, name, row, through=expected)  # newer cycle is within its grace
         if latest is None or latest[0] < expected:
             missed.append(f"{label} (no verified receipt for {expected})")
             debug_parts.append(f"{label}: expected={expected}; receipt absent or old")
@@ -971,7 +950,7 @@ def check_local_routine_missed(
             debug_parts.append(f"{label}: {cycle} verification={verification}")
     if not missed:
         return None, "; ".join(debug_parts)
-    listing = "; ".join(missed[:3]) + (f", +{len(missed) - 3} more" if len(missed) > 3 else "")
+    listing = _first_three(missed)
     return (
         Cue(
             key="local_routine_missed",
@@ -1080,10 +1059,11 @@ def check_intent_misses(ov: Path, today: date) -> tuple[Cue | None, str]:
 
 
 def check_vault_layout(ov: Path, today: date) -> tuple[Cue | None, str]:
-    """Split-layout health: a Git vault outside sync folders, raw_store links intact."""
-    from zk_audit import check_layout  # type: ignore[import-not-found]
+    """Split-layout health: a Git vault outside sync folders, raw_store links intact, no absolute links into it."""
+    from zk_audit import check_absolute_links, check_layout  # type: ignore[import-not-found]
 
-    findings = check_layout(ov, raw_store())
+    store = raw_store()
+    findings = check_layout(ov, store) + check_absolute_links(ov, store)
     if not findings:
         return None, "layout ok"
     first = findings[0]
@@ -1155,11 +1135,12 @@ def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
               and run.get("state_name") != "Deferred"]
     if not failed:
         return None, f"queried={len(runs)} latest={len(latest)} failed=0"
-    listing = "; ".join(
-        f"{run['routine']} ({run['state_name']}: {str(run.get('message') or '')[:100]})" for run in failed[:3]
-    )
-    if len(failed) > 3:
-        listing += f", +{len(failed) - 3} more"
+    def detail(run: dict) -> str:
+        # Prefect's exception boilerplate would otherwise consume the bounded detail.
+        message = re.sub(r"^(?:Flow|Task) run encountered an exception:? (?:\w+: )?", "", str(run.get("message") or ""))
+        return " ".join(message.split())[:160]
+
+    listing = _first_three([f"{run['routine']} ({run['state_name']}: {detail(run)})" for run in failed])
     return (
         Cue(
             key="routine_failures",
@@ -1336,7 +1317,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if not os.environ.get("OV"):
         return 0
-    ov = vault_root()
+    try:
+        ov = vault_root()
+    except PathsError as exc:
+        print(f"Atelier cues skipped: {exc}")
+        return 0
     today = date.today()
 
     snoozes = _load_snoozes(ov)

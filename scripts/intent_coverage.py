@@ -336,7 +336,7 @@ def load_route_events(
             if since and file_date < since:
                 continue
             try:
-                lines = path.read_text(encoding="utf-8").splitlines()
+                lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             except OSError:
                 continue
             for line in lines:
@@ -426,7 +426,11 @@ def cmd_intent_misses(args: argparse.Namespace) -> int:
     log_dir = resolve_route_log_dir()
     if not log_dir.is_dir():
         if args.json:
-            print(json.dumps({"events": [], "since": args.since, "log_dir": str(log_dir)}))
+            print(json.dumps({"since": args.since, "log_dir": str(log_dir),
+                              "total_events": 0, "routed_events": 0, "miss_events": 0,
+                              "by_kind": {}, "events_with_empty_phrase": 0,
+                              "proposal_threshold_days": INTENT_MISS_DISTINCT_DAYS_THRESHOLD,
+                              "proposals": [], "repeaters": []}))
         else:
             print(f"intent-misses: no route log at {log_dir}")
             print("Nothing logged yet. The directory is created on the first `/hi` route.")

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, timedelta, timezone, tzinfo
+from functools import lru_cache
 from zoneinfo import ZoneInfo
 
 from prefect._vendor.croniter import CroniterError, croniter
@@ -62,6 +63,10 @@ def _zone_name(zone: tzinfo) -> str:
     return get_localzone_name()
 
 
+# Validation costs ~10ms per schedule; health checks re-expand the same declarations.
+_schedule = lru_cache(maxsize=None)(CronSchedule)
+
+
 def scheduled_dates(
     cron: str,
     start: date,
@@ -80,7 +85,7 @@ def scheduled_dates(
     earliest = datetime.combine(start - timedelta(days=1), datetime.min.time(), zone)
 
     try:
-        schedule = CronSchedule(cron=expression, timezone=_zone_name(zone))
+        schedule = _schedule(cron=expression, timezone=_zone_name(zone))
         occurrences = schedule._get_dates_generator(start=earliest, end=schedule_now)
         dates = {
             occurrence.date()
