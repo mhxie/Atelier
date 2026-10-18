@@ -15,7 +15,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import atomic_write, knowledge_levels, raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
+from _paths import SYNC_ROOTS, atomic_write, knowledge_levels, raw_store, tier, tier_segments, vault_root, wiki_dirs  # type: ignore[import-not-found]  # noqa: E402
 from _reflect import TitleIndex, backup_limit, nonnative, notes as reflect_notes, title_issue, title_key, walk  # type: ignore[import-not-found]  # noqa: E402
 
 OV = vault_root()
@@ -50,7 +50,8 @@ _FENCE_RE = re.compile(r"^ {0,3}(```|~~~)")
 _STORE_FOLDERS = {"raw", "secure"}
 _ARCHIVE = tier_segments()["archive"]
 _ROOT_LINKS = {"cache", _ARCHIVE}
-_SYNC_ROOTS = ("/Library/CloudStorage/", "/Library/Mobile Documents/")
+# A Markdown link destination, angle-bracketed (may hold spaces) or bare.
+_LINK_DEST_RE = re.compile(r"\]\((?:<([^>\n]+)>|([^)\s]+))")
 
 
 @dataclass
@@ -359,7 +360,7 @@ def check_layout(root: Path, store: Path | None) -> list[Finding]:
     out: list[Finding] = []
     if not (root / ".git").exists():
         out.append(Finding("layout", root.as_posix(), "not a Git work tree; Reflect syncs the vault through Git"))
-    elif any(part in root.resolve().as_posix() + "/" for part in _SYNC_ROOTS):
+    elif any(part in root.resolve().as_posix() + "/" for part in SYNC_ROOTS):
         out.append(Finding("layout", _rel(root / ".git"), ".git inside a file-sync folder"))
     if store is None:
         return out
@@ -384,6 +385,36 @@ def check_layout(root: Path, store: Path | None) -> list[Finding]:
     for rel in _store_folders(store):
         if not (root / rel).is_symlink() and not (root / rel).exists():
             out.append(Finding("layout", _rel(root / rel), "raw_store folder has no link here; run with --fix-links"))
+    return out
+
+
+def check_absolute_links(root: Path, store: Path | None) -> list[Finding]:
+    """Notes linking by absolute path into the vault, raw_store, or a sync folder.
+
+    Each has a relative route through the vault's links. The absolute form breaks
+    on other devices and, for raw_store, carries the sync account into Git.
+    """
+    roots = [p for p in (root, root.resolve(), store, store.resolve() if store else None) if p is not None]
+    out: list[Finding] = []
+    for current, dirnames, files in os.walk(root):
+        # Never read inside secure/, even a real folder that check_layout would flag.
+        dirnames[:] = [d for d in dirnames if not _is_hidden(d) and d != "secure"]
+        for name in files:
+            if not name.endswith(".md"):
+                continue
+            path = Path(current) / name
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if "](" not in text:
+                continue
+            count = 0
+            for match in _LINK_DEST_RE.finditer(text):
+                dest = unquote(match.group(1) or match.group(2)).removeprefix("file://")
+                if dest.startswith("/") and (any(sync in dest for sync in SYNC_ROOTS)
+                                             or any(Path(dest).is_relative_to(r) for r in roots)):
+                    count += 1
+            if count:
+                out.append(Finding("layout", _rel(path), f"{count} absolute link(s) into the vault or raw_store; "
+                                                         "link relatively through the vault's links"))
     return out
 
 
@@ -561,7 +592,8 @@ def run_audit() -> Report:
     report.archive_overlap = check_archive_overlap(OV, domains)
     report.root_orphans, report.empty_md, report.empty_md_archive_count = check_root_orphans(OV)
     report.suspicious_dirs = check_suspicious_dirs(OV)
-    report.layout = check_layout(OV, raw_store())
+    store = raw_store()
+    report.layout = check_layout(OV, store) + check_absolute_links(OV, store)
     try:
         levels_match = json.loads(_knowledge_levels_path(OV).read_text()) == knowledge_levels(OV)
     except (OSError, ValueError):

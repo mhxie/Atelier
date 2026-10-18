@@ -24,9 +24,13 @@ def reset() -> None:
     _registry.cache_clear()
 
 
+# File-sync client roots. The vault is a Git work tree outside them; only raw_store lives inside.
+SYNC_ROOTS = ("/Library/CloudStorage/", "/Library/Mobile Documents/")
+
+
 @lru_cache(maxsize=1)
 def vault_root() -> Path:
-    """Return absolute $OV; an unset value fails instead of creating a relative vault."""
+    """Return absolute $OV; an unset or file-synced value fails instead of writing a stale vault."""
     ov = os.environ.get("OV")
     if not ov:
         prog = Path(sys.argv[0]).name if sys.argv else "<script>"
@@ -35,7 +39,11 @@ def vault_root() -> Path:
             f"Set it to your vault root before running {prog} "
             f'(e.g., `export OV="$HOME/zk"`).'
         )
-    return Path(ov).expanduser().resolve()
+    root = Path(ov).expanduser().resolve()
+    if any(sync in root.as_posix() + "/" for sync in SYNC_ROOTS):
+        raise PathsError(f"ERROR: $OV={root} is inside a file-sync folder; it is likely stale. "
+                         "The vault is a Git work tree outside sync folders.")
+    return root
 
 
 def _atelier_root() -> Path:
@@ -163,6 +171,19 @@ def raw_store() -> Path | None:
     if value is not None and not (isinstance(value, str) and value.startswith("/")):
         raise PathsError("ERROR: raw_store must be an absolute path in harness/paths.local.toml.")
     return None if value is None else _resolve_segment(value)
+
+
+def inside_vault(path: Path, vault: Path) -> bool:
+    """Is `path` in the vault, counting raw_store content reached through its links?
+
+    Resolving a linked path lands in raw_store, so a bare `is_relative_to(vault)`
+    misreads vault content as outside. Raises PathsError on a malformed raw_store.
+    """
+    resolved = path.resolve()
+    if resolved.is_relative_to(vault.resolve()):
+        return True
+    store = raw_store()
+    return store is not None and resolved.is_relative_to(store.resolve())
 
 
 def atomic_write(

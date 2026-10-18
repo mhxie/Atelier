@@ -104,6 +104,28 @@ class LayoutTest(unittest.TestCase):
         (self.vault / "a" / "archive").mkdir()
         self.assertEqual(self.flagged(self.store), ["a/archive", "c/raw", "d/raw"])
 
+    def test_absolute_links_into_vault_store_or_sync_folder_are_flagged(self) -> None:
+        (self.vault / "a" / "note.md").write_text(
+            "# Note\n"
+            f"[scan](<{self.store}/a/raw/scan one.pdf>) [self]({self.vault}/c/x.md) "
+            "[synced](</Users/x/Library/CloudStorage/Drive/raw-store/y.pdf>) "
+            "[code](/opt/other-repo/tool.py) [relative](<raw/scan one.pdf>)\n"
+        )
+        (self.vault / "a" / "clean.md").write_text("# Clean\n[relative](raw/ok.pdf)\n")
+        findings = za.check_absolute_links(self.vault, self.store)
+        self.assertEqual([(Path(f.where).name, f.detail.split()[0]) for f in findings], [("note.md", "3")])
+
+    def test_vault_root_refuses_an_ov_inside_a_file_sync_folder(self) -> None:
+        import _paths
+
+        synced = self.base / "Library" / "CloudStorage" / "zk"
+        synced.mkdir(parents=True)
+        self.addCleanup(_paths.vault_root.cache_clear)
+        with mock.patch.dict(os.environ, {"OV": str(synced)}):
+            _paths.vault_root.cache_clear()
+            with self.assertRaisesRegex(_paths.PathsError, "file-sync"):
+                _paths.vault_root()
+
 
 class ArchiveLinkTest(unittest.TestCase):
     def test_reflect_notes_enter_the_archive_link_but_no_other(self) -> None:
@@ -212,6 +234,14 @@ class TitleFormatTest(unittest.TestCase):
             self.assertEqual(title, "Amdahl’s Law")
             self.assertEqual(aliases, ("µs", "It's fine"))
             self.assertIsNone(title_issue(path.read_text(), title))
+
+    def test_blank_line_after_the_reflect_separator_hides_the_title(self) -> None:
+        from _reflect import title_issue
+
+        for clean in ("---\nk: v\n---\n# T\n", "---\nk: v\n---\n\n# T\n", "# T\n"):
+            self.assertIsNone(title_issue(clean, "T"))
+        for gap in ("---\nk: v\n---\n\n\n# T\n", "\n# T\n"):
+            self.assertEqual(title_issue(gap, "T"), "blank line before opening H1")
 
     def test_reports_missing_late_and_conflicting_titles_without_reading_private_notes(self) -> None:
         tmp = tempfile.TemporaryDirectory()

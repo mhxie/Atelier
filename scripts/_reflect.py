@@ -103,11 +103,14 @@ def title_issue(text: str, title: str | None) -> str | None:
         end = next((i + 1 for i, line in enumerate(lines[1:], 1) if line.rstrip() == "---"), 0)
         fields = dict(line.split(":", 1) for line in lines[1:end-1] if re.match(r"^(title|lang):", line)) if end else {}
         localized = _scalar(fields.get("title", "")) == title and bool(re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", _scalar(fields.get("lang", ""))))
-        lines = lines[end:]
+        # Reflect's closing fence consumes one separator line; any further blank shows above the title.
+        lines = lines[end + 1:] if end and end < len(lines) and not lines[end].strip() else lines[end:]
     first = next((line for line in lines if line.strip()), "")
     heading = _H1_RE.fullmatch(first)
     if heading is None:
         return "missing opening H1"
+    if not lines[0].strip():
+        return "blank line before opening H1"
     if title and not localized and title not in {"|", ">", "|-", ">-", "|+", ">+"} and title != heading.group(1):
         return "authored title differs from opening H1"
     return None
