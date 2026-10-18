@@ -24,7 +24,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import tomllib
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
@@ -39,6 +38,10 @@ ROOT = Path(__file__).resolve().parents[1]
 # through to the apply branch.
 EXECUTABLE_VERDICTS = ("apply", "dismiss")
 JUDGE_MAX_TOKENS = 600
+GATE_DEFAULTS: dict[str, int | float] = {
+    "min_confidence": 0.8, "min_precedents": 3, "min_accuracy": 0.9,
+    "min_judged": 5, "min_similarity": 2.0, "max_unconfirmed": 10,
+}
 STOPWORDS = {"the", "a", "an", "of", "to", "in", "and", "or", "for", "on", "is", "it", "this", "that", "with", "by", "at"}
 JUDGE_SYSTEM = (
     "You apply one person's own past decisions to a new item of the same kind. "
@@ -158,7 +161,7 @@ def _similarity_at_least(value: Any, floor: float) -> bool:
     return math.isfinite(value) and value >= floor
 
 
-def gate(bundle: dict[str, Any], judgment: dict[str, Any], *, min_confidence: float, min_precedents: int, min_accuracy: float, min_judged: int, min_similarity: float = 2.0, max_unconfirmed: int = 10) -> dict[str, Any]:
+def gate(bundle: dict[str, Any], judgment: dict[str, Any], *, min_confidence: float = GATE_DEFAULTS["min_confidence"], min_precedents: int = GATE_DEFAULTS["min_precedents"], min_accuracy: float = GATE_DEFAULTS["min_accuracy"], min_judged: int = GATE_DEFAULTS["min_judged"], min_similarity: float = GATE_DEFAULTS["min_similarity"], max_unconfirmed: int = GATE_DEFAULTS["max_unconfirmed"]) -> dict[str, Any]:
     verdict = str(judgment.get("verdict", "human")).strip()
     try:
         confidence = float(judgment.get("confidence", 0))
@@ -284,12 +287,6 @@ def cmd_judge(args: argparse.Namespace) -> int:
     return 0
 
 
-def _queue_entries(queue: Path) -> list[dict[str, Any]]:
-    if not queue.is_file():
-        return []
-    return tomllib.loads(queue.read_text(encoding="utf-8")).get("pending", [])
-
-
 def cmd_autoevo(args: argparse.Namespace) -> int:
     """Judge every pending queue entry that has no default yet."""
     import autoevo_pending
@@ -302,7 +299,7 @@ def cmd_autoevo(args: argparse.Namespace) -> int:
         print(json.dumps({"error": "no judge chosen: pass --bundle-dir (native judge), --judgment-dir, or --model", "judged": [], "defaults_set": []}))
         return 2
     judged, defaults, bundles = [], [], []
-    for entry in _queue_entries(queue):
+    for entry in autoevo_pending.load(queue).get("pending", []):
         if entry.get("status") != "pending" or entry.get("default_action"):
             continue
         cls = f"autoevo/{entry.get('category')}"
@@ -368,18 +365,8 @@ def cmd_autoevo(args: argparse.Namespace) -> int:
 
 
 def _add_gate_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--min-confidence", type=float, default=0.8)
-    p.add_argument("--min-precedents", type=int, default=3)
-    p.add_argument("--min-accuracy", type=float, default=0.9)
-    p.add_argument("--min-judged", type=int, default=5)
-    # 2.0 is the tier term in similarity() (+2.0 same tier, +3.0 * token Jaccard,
-    # +1.0 within 180 days), so a cited row below it does not share the item's
-    # tier and is not a precedent. `nearest_precedents` already excludes those;
-    # this is the gate's own check, for callers that build a bundle another way.
-    p.add_argument("--min-similarity", type=float, default=2.0)
-    # Silent budget: how many defaults this class may set without the user
-    # deciding anything, anywhere. 0 makes the judge a sorter.
-    p.add_argument("--max-unconfirmed", type=int, default=10)
+    for name, default in GATE_DEFAULTS.items():
+        p.add_argument(f"--{name.replace('_', '-')}", type=type(default), default=default)
 
 
 def build_parser() -> argparse.ArgumentParser:

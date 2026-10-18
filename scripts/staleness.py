@@ -80,21 +80,12 @@ def _days_since_modified(path: Path, today: date) -> int:
     return max(0, (today - mod_date).days)
 
 
-def _count_references(stem: str, title_line: str | None, corpus_files: list[Path]) -> int:
-    """Count how many files in the corpus reference this note by stem or title.
-
-    Uses simple substring matching. Good enough for v1; semantic.py can
-    replace this in v2.
-    """
-    count = 0
+def _count_references(stem: str, title_line: str | None, corpus: dict[Path, str]) -> int:
     needles = [stem]
     if title_line:
         needles.append(title_line)
-    for f in corpus_files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
+    count = 0
+    for text in corpus.values():
         for needle in needles:
             if needle in text:
                 count += 1
@@ -182,26 +173,26 @@ def scan(
             if p.name != "index.md":
                 wiki_stems.add(p.stem)
 
+    corpus_text: dict[Path, str] = {}
+    for f in corpus:
+        try:
+            corpus_text[f] = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            pass
+
     candidates = promotion_candidates(today)
     results: list[NoteScore] = []
     for d in dirs:
         if not d.exists():
             continue
-        # Fission-aware: L2 tiers bucket into subdirectories (reflections by
-        # year-month, agent-findings topically); a flat glob went blind here
-        # for the third time on 2026-08-23.
         for path in sorted(d.rglob("*.md")):
             days = _days_since_modified(path, today)
             title = _extract_title(path)
-
-            # Exclude the note's own file from the corpus to avoid self-reference.
-            ref_corpus = [f for f in corpus if f.resolve() != path.resolve()]
+            resolved = path.resolve()
+            ref_corpus = {k: v for k, v in corpus_text.items() if k.resolve() != resolved}
             refs = _count_references(path.stem, title, ref_corpus)
-
             staleness = _compute_staleness(days, refs)
-
             has_wiki = path.stem in wiki_stems
-
             ns = NoteScore(
                 path=path,
                 days_since_modified=days,

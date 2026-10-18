@@ -7,23 +7,11 @@ import argparse
 import fcntl
 import hashlib
 import json
-import os
-import tempfile
-import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from _paths import tier
-
-
-_LOCAL_LOCKS: dict[Path, threading.Lock] = {}
-_LOCAL_LOCKS_GUARD = threading.Lock()
-
-
-def _local_lock(path: Path) -> threading.Lock:
-    with _LOCAL_LOCKS_GUARD:
-        return _LOCAL_LOCKS.setdefault(path, threading.Lock())
+from _paths import atomic_write, tier
 
 
 def _section_bounds(text: str, heading: str) -> tuple[int, int, int] | None:
@@ -67,40 +55,17 @@ def section_sha256(text: str, heading: str) -> str | None:
 @contextmanager
 def _advisory_lock(lock_path: Path) -> Iterator[None]:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with _local_lock(lock_path):
-        with lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def lock_file_for(canonical_trip_note: Path) -> Path:
     key = hashlib.sha256(str(canonical_trip_note).encode("utf-8")).hexdigest()
     return tier("cache").resolve() / "trip-reference-locks" / f"{key}.lock"
-
-
-def _replace_durably(path: Path, content: str) -> None:
-    mode = path.stat().st_mode & 0o777
-    fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        os.fchmod(fd, mode)
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        directory_fd = os.open(path.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except Exception:
-        if temporary.exists():
-            temporary.unlink()
-        raise
 
 
 def _insert_at_anchor(section: str, anchor: str, position: str, reference: str, ending: str) -> str | None:
@@ -152,7 +117,7 @@ def insert_trip_reference(
             updated_section = _insert_at_anchor(section, anchor, position, reference, ending)
             if updated_section is None:
                 return {"status": "anchor_missing"}
-            _replace_durably(resolved, f"{text[:start]}{updated_section}{text[end:]}")
+            atomic_write(resolved, f"{text[:start]}{updated_section}{text[end:]}", newline="")
             return {"status": "inserted"}
     except Exception as error:  # CLI contract: report failures as structured data.
         return {"status": "error", "reason": str(error)}

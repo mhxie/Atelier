@@ -784,8 +784,11 @@ def _audit_eligibility_catalog(path: Path, vault: Path) -> list[Finding]:
 
 def _plain_restaurant(value: str) -> str:
     value = value.replace("**", "")
-    match = re.fullmatch(r"\[([^\]]+)\]\(.+\)", value)
-    return match.group(1) if match else value
+    md = re.fullmatch(r"\[([^\]]+)\]\(.+\)", value)
+    if md:
+        return md.group(1)
+    wl = re.fullmatch(r"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]", value)
+    return wl.group(1) if wl else value
 
 
 def audit(vault: Path) -> dict[str, Any]:

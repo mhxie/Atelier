@@ -189,25 +189,6 @@ class ProcessSpec:
     timeout_seconds: int
     retry_safe: bool
 
-    def payload(self) -> dict[str, Any]:
-        value = asdict(self)
-        value["schedule"]["cron"] = list(self.schedule.cron)
-        value["argv"] = list(self.argv)
-        return value
-
-    @classmethod
-    def from_payload(cls, value: dict[str, Any]) -> "ProcessSpec":
-        schedule = dict(value["schedule"])
-        schedule["cron"] = tuple(schedule["cron"])
-        return cls(
-            schedule=ScheduleSpec(**schedule),
-            argv=tuple(value["argv"]),
-            cwd=value["cwd"],
-            environment=dict(value["environment"]),
-            timeout_seconds=value["timeout_seconds"],
-            retry_safe=value["retry_safe"],
-        )
-
 
 def _load_toml(path: Path) -> dict[str, Any]:
     try:
@@ -1124,7 +1105,7 @@ def execute_model(
             prefix = ["caffeinate", "-i", "-s"]
         prompt = adapter_prompt(spec, root=root)
         path = receipt_path(vault, spec.schedule.name, cycle)
-        pending_receipt = {
+        identity = {
             "contract_version": receipts.VERSION,
             "routine": spec.schedule.name,
             "cycle_id": cycle,
@@ -1133,10 +1114,9 @@ def execute_model(
             "profile_fingerprint": spec.profile_values["profile_fingerprint"],
             "runtime": runtime,
             "started_at": started_at,
-            "result_summary": "model attempt started; domain outcome is not yet verified",
-            "verification": "pending",
         }
-        write_receipt(path, pending_receipt)
+        write_receipt(path, {**identity, "result_summary": "model attempt started; domain outcome is not yet verified",
+                             "verification": "pending"})
         seconds = spec.profile_values["timeout_seconds"]
         if runtime == "claude":
             # The prompt goes on stdin so no variadic option can consume it.
@@ -1151,14 +1131,7 @@ def execute_model(
             raise ExecutionError(f"{runtime} exited {result.returncode}{detail}")
         outcome = _model_result(result_file, spec, vault=vault, started_at=started_at)
     receipt = {
-        "contract_version": receipts.VERSION,
-        "routine": spec.schedule.name,
-        "cycle_id": cycle,
-        "prefect_flow_run_id": flow_run_id,
-        "profile": spec.profile,
-        "profile_fingerprint": spec.profile_values["profile_fingerprint"],
-        "runtime": runtime,
-        "started_at": started_at,
+        **identity,
         "completed_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "duration_seconds": int(time.time() - started_epoch),
         "outcome": outcome["outcome"],
@@ -1191,4 +1164,5 @@ def execute_process_job(
     if result.stdout:
         print(result.stdout.rstrip(), flush=True)
     if result.returncode:
-        raise ExecutionError(f"process job exited {result.returncode}")
+        detail = f": {screened_log(result.stdout)[-300:]}" if result.stdout.strip() else ""
+        raise ExecutionError(f"process job exited {result.returncode}{detail}")

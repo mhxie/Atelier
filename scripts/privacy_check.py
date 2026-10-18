@@ -357,43 +357,36 @@ def range_sources(rev_range: str, repo_root: Path | None = None) -> list[tuple[s
 
 
 def scan(terms: list[str], sources: list[tuple[str, str, str]]) -> list[dict]:
-    """Case-insensitive scan with word boundaries for ASCII terms."""
+    """Case-insensitive scan with word boundaries for ASCII terms.
+
+    First+last trigram prefilter skips most substring searches per source.
+    """
     hits: list[dict] = []
-    normalized_terms = [
-        (
-            term,
-            term.casefold(),
-            re.compile(
-                rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])",
-                re.IGNORECASE,
-            )
-            if term.isascii()
-            else None,
-        )
-        for term in terms
-    ]
+    normalized_terms = [(term, term.casefold()) for term in terms]
     for relative, source, content in sources:
         folded_content = content.casefold()
+        trigrams = {folded_content[i:i + 3] for i in range(len(folded_content) - 2)}
         lines: list[str] | None = None
         folded_lines: list[str] | None = None
-        for term, folded_term, pattern in normalized_terms:
+        for term, folded_term in normalized_terms:
+            if len(folded_term) >= 3 and not (folded_term[:3] in trigrams and folded_term[-3:] in trigrams):
+                continue
             if folded_term not in folded_content:
                 continue
             if lines is None:
                 lines = content.splitlines()
                 folded_lines = [line.casefold() for line in lines]
             assert folded_lines is not None
+            pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(term)}(?![A-Za-z0-9_])", re.IGNORECASE) if term.isascii() else None
             for i, (line, folded_line) in enumerate(zip(lines, folded_lines), 1):
                 matched = pattern.search(line) is not None if pattern else folded_term in folded_line
                 if matched:
-                    hits.append({
-                        "file": relative,
-                        "line": i,
-                        "private_title": term,
-                        "source": source,
-                    })
+                    hits.append({"file": relative, "line": i, "private_title": term, "source": source})
                     break
     return hits
+
+
+_WORD_RUN_RE = re.compile(r"[A-Za-z0-9_]+", re.IGNORECASE)
 
 
 def scan_slugs(
@@ -401,34 +394,36 @@ def scan_slugs(
 ) -> list[dict]:
     """Scan files for single-word private slugs.
 
-    Case-insensitive, ASCII-word-boundary aware so a slug "foo"
-    matches "Foo" and "foo's" but not "foobar" or "tofoo". Private slugs
-    are typically employer names or codenames that need this stricter
-    boundary check; the multi-word `scan` uses substring match because
-    multi-word phrases rarely appear inside other words.
+    Word-run prefilter: for all-ASCII sources, only slugs whose word runs
+    are present in the source are tested.
     """
     if not slugs:
         return []
-    pattern = re.compile(
-        r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(s) for s in sorted(slugs))
-        + r")(?![A-Za-z0-9_])",
-        re.IGNORECASE,
-    )
+    every = frozenset(slugs)
+    runs = {s: frozenset(r.lower() for r in _WORD_RUN_RE.findall(s)) for s in every}
+    narrow = all(s.isascii() and runs[s] for s in every)
+    patterns: dict[frozenset[str], re.Pattern[str]] = {}
     hits: list[dict] = []
     for relative, source, content in sources:
+        active, found = every, _WORD_RUN_RE.findall(content)
+        if narrow and all(map(str.isascii, found)):
+            present = set(map(str.lower, found))
+            active = frozenset(s for s in every if runs[s] <= present)
+            if not active:
+                continue
+        if active not in patterns:
+            patterns[active] = re.compile(
+                r"(?<![A-Za-z0-9_])(" + "|".join(re.escape(s) for s in sorted(active))
+                + r")(?![A-Za-z0-9_])", re.IGNORECASE,
+            )
         seen_in_file: set[str] = set()
         for i, line in enumerate(content.splitlines(), 1):
-            for m in pattern.finditer(line):
+            for m in patterns[active].finditer(line):
                 slug = m.group(1).lower()
                 if slug in seen_in_file:
                     continue
                 seen_in_file.add(slug)
-                hits.append({
-                    "file": relative,
-                    "line": i,
-                    "private_title": slug,
-                    "source": source,
-                })
+                hits.append({"file": relative, "line": i, "private_title": slug, "source": source})
     return hits
 
 
