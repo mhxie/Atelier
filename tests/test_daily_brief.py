@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -184,6 +185,10 @@ class PureFunctionTests(unittest.TestCase):
         self.assertNotIn("area:", cleaned)
         self.assertNotIn("](", cleaned)
         self.assertIn("表单公证", cleaned)
+        # The due link repeats the countdown; an alias is the user's own reading of the link.
+        cleaned = db.clean_todo_text("跟进示例 — [[example-plan|示例方案]]  [[2099-02-01]] 见 [[2099-01-20]]",
+                                     "2099-02-01")
+        self.assertEqual(cleaned, "跟进示例 — 示例方案 见 2099-01-20")
 
     def test_format_reminder_accepts_strings_and_records(self):
         self.assertEqual(db._format_reminder("Artist Two 9/3 开票"), "Artist Two 9/3 开票")
@@ -424,6 +429,29 @@ class BriefIntegrationTests(VaultTests):
         brief = self._brief(vault=vault)
         self._group(brief, "todo")
         self.assertNotIn("anime", [group["kind"] for group in brief["groups"]])
+        self.assertTrue(any("reminder cache unusable" in w for w in brief["warnings"]))
+
+    def test_tracking_cache_behind_raw_store_link_is_read_and_its_absence_is_reported(self):
+        vault = build_vault(self.root)
+        store = self.root / "raw-store"
+        store.mkdir()
+        (vault / "cache").rename(store / "cache")
+        (vault / "cache").symlink_to(store / "cache")
+        today = datetime.fromisoformat(TODAY).date()
+        with mock.patch("_paths.raw_store", return_value=store):
+            self.assertEqual(db.tracking_cache_path(vault), (store / "cache/reminders.json").resolve())
+            warnings: list[str] = []
+            self.assertIn("anime", [group.kind for group in db.load_tracking(vault, today, warnings)])
+            self.assertEqual(warnings, [])
+            # An unmounted raw store leaves the link dangling: report it, never drop reminders silently.
+            (store / "cache").rename(store / "unmounted")
+            self.assertEqual(db.load_tracking(vault, today, warnings), [])
+            self.assertIn("is the raw store mounted", warnings[0])
+            (store / "unmounted").rename(store / "cache")
+        with mock.patch("_paths.raw_store", return_value=None):
+            warnings = []
+            self.assertEqual(db.load_tracking(vault, today, warnings), [])
+            self.assertIn("outside the vault", warnings[0])
 
     def test_recurring_completion_normalizes_dates_and_survives_readback(self):
         vault = build_vault(self.root)

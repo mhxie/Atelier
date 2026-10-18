@@ -514,26 +514,11 @@ def mark_done(
 
 
 def _unresolved_sources(ov: Path, index: Index) -> list[tuple[str, str]]:
-    """Rows whose `source` file does not exist, or whose line number runs
-    past the end of it. Provenance that does not resolve is indistinguishable
-    from an invented row."""
     missing: list[tuple[str, str]] = []
     for row in index.deadlines:
-        match = _SOURCE_RE.match(row.source)
-        if not match:
-            continue
-        path = ov / match.group("path")
-        if not path.is_file():
-            missing.append((row.slug, row.source))
-            continue
-        try:
-            with path.open(encoding="utf-8", errors="replace") as handle:
-                line_count = sum(1 for _ in handle)
-        except OSError:
-            missing.append((row.slug, row.source))
-            continue
-        if int(match.group("line")) > line_count:
-            missing.append((row.slug, f"{row.source} (line past end of file, {line_count} lines)"))
+        reason = _source_resolves(ov, row.source)
+        if reason is not None:
+            missing.append((row.slug, f"{row.source}: {reason}"))
     return missing
 
 

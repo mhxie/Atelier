@@ -290,7 +290,7 @@ class CliTests(DeadlineTestCase):
         toml_path.write_text(bumped, encoding="utf-8")
         proc = self._run("lint")
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("line past end of file", proc.stderr)
+        self.assertIn("past end of", proc.stderr)
 
     def test_lint_is_quiet_when_the_index_is_absent(self):
         (self.vault / "_meta" / "deadlines.toml").unlink()

@@ -24,7 +24,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import deadlines as dl  # noqa: E402
-from _paths import PathsError, effective_date, tier, vault_root  # noqa: E402
+from _paths import PathsError, effective_date, inside_vault, tier, vault_root  # noqa: E402
 
 from routine_collect import TODO_REMINDER_LIMIT, load_todo_reminders  # noqa: E402
 
@@ -128,7 +128,7 @@ def _truncate(text: str, limit: int = ITEM_TEXT_CHARS) -> str:
     return cut.rstrip(" ·,;:-") + "…"
 
 
-def clean_todo_text(text: str) -> str:
+def clean_todo_text(text: str, due: str | None = None) -> str:
     """Strip inline metadata and markdown so a TODO reads as one plain line.
 
     `todos.py` keeps the raw checkbox content in `Todo.text`, tokens included,
@@ -144,6 +144,8 @@ def clean_todo_text(text: str) -> str:
             text = regex.sub("", text)
     except ImportError:  # pragma: no cover - import guard
         pass
+    text = re.sub(rf"\[\[{re.escape(due)}(?:\|[^\]\n]*)?\]\]", "", text) if due else text  # the countdown shows it
+    text = re.sub(r"\[\[[^\]|\n]+\|([^\]\n]+)\]\]", r"\1", text)  # the user's alias reads better than the title
     try:
         import routine_collect
 
@@ -453,10 +455,11 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
         warnings.append(f"todo reminder state ignored: {exc}")
         reminders = {}
 
+    def rel(todo: Any) -> str:
+        return str(Path(todo.source).relative_to(_ov)) if Path(todo.source).is_relative_to(_ov) else todo.source
+
     def reminder_id(todo: Any) -> str:
-        source = Path(todo.source)
-        identity = [str(source.relative_to(_ov) if source.is_relative_to(_ov) else source),
-                    " ".join(todo.text.split()), todo.due]
+        identity = [rel(todo), " ".join(todo.text.split()), todo.due]
         return hashlib.sha256(json.dumps(identity, ensure_ascii=False).encode()).hexdigest()
 
     dated: list[tuple[int, Any]] = []
@@ -479,14 +482,9 @@ def load_todos(_ov: Path, today: date, warnings: list[str]) -> list[Group]:
     dated.sort(key=lambda pair: (pair[0], pair[1].text))
 
     def item(days: int, todo: Any) -> Item:
-        return Item(
-            text=_truncate(f"{_days_phrase(days)} · {clean_todo_text(todo.text)}"),
-            due=todo.due,
-            reminder_id=reminder_id(todo),
-            days_left=days,
-            source=f"{todo.short_source()}:{todo.line}",
-            label=_truncate(clean_todo_text(todo.text)),
-        )
+        label = clean_todo_text(todo.text, todo.due)
+        return Item(text=_truncate(f"{_days_phrase(days)} · {label}"), due=todo.due, reminder_id=reminder_id(todo),
+                    days_left=days, source=f"{rel(todo)}:{todo.line}", label=_truncate(label))
 
     # Same split as the deadlines: the day has arrived versus this week.
     now = [item(days, todo) for days, todo in dated if days <= 1]
@@ -634,24 +632,32 @@ def load_review(ov: Path, today: date, warnings: list[str]) -> list[Group]:
 
 
 def tracking_cache_path(ov: Path) -> Path | None:
-    """Resolve the optional reminder cache from private vault config."""
+    """Resolve the optional reminder cache from private vault config.
+
+    None means not configured. A configured cache that cannot be used raises
+    ValueError, so the brief reports it instead of silently dropping reminders.
+    """
     config = ov / SOURCES_CONFIG
     if not config.is_file():
         return None
     try:
         raw = tomllib.loads(config.read_text(encoding="utf-8"))
-    except (tomllib.TOMLDecodeError, OSError):
+    except (tomllib.TOMLDecodeError, OSError) as exc:
+        raise ValueError(f"{config.name} unreadable: {exc}") from exc
+    if "tracking" not in raw:
         return None
-    tracking = raw.get("tracking")
+    tracking = raw["tracking"]
     relative = tracking.get("cache") if isinstance(tracking, dict) else None
     if not isinstance(relative, str) or not relative.strip():
-        return None
+        raise ValueError(f"{config.name} [tracking] has no cache path")
     candidate = (ov / relative.strip()).resolve()
-    # Refuse a configured path that escapes the vault.
+    # Refuse a configured path that escapes the vault, links into raw_store included.
     try:
-        candidate.relative_to(ov.resolve())
-    except ValueError:
-        return None
+        inside = inside_vault(candidate, ov)
+    except PathsError as exc:
+        raise ValueError(str(exc)) from exc
+    if not inside:
+        raise ValueError(f"{relative.strip()} is outside the vault")
     return candidate
 
 
@@ -741,8 +747,16 @@ def load_tracking(ov: Path, today: date, warnings: list[str]) -> list[Group]:
     Read-only and offline: whichever feature owns the cache refreshes it on its
     own schedule. A stale cache is reported, never silently shown as today's.
     """
-    cache_path = tracking_cache_path(ov)
-    if cache_path is None or not cache_path.is_file():
+    try:
+        cache_path = tracking_cache_path(ov)
+    except ValueError as exc:
+        warnings.append(f"reminder cache unusable: {exc}; episode and ticket reminders skipped")
+        return []
+    if cache_path is None:
+        return []
+    if not cache_path.is_file():
+        warnings.append(f"reminder cache missing ({cache_path.name}); is the raw store mounted? "
+                        "episode and ticket reminders skipped")
         return []
     label = cache_path.name
     try:

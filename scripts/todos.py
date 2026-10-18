@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -126,38 +125,13 @@ def filename_date(path: Path) -> date | None:
 def line_age_days(path: Path, line_no: int) -> int:
     """Days since the item was created.
 
-    Reflections are write-once; we derive age from the YYYY-MM-DD filename prefix,
-    which is the canonical creation date and beats file mtime (Google Drive sync
-    invalidates mtime). Git blame is also unreliable here: zk/ is a Drive symlink
-    not tracked by the atelier repo. GTD files are continuously edited, so we
-    approximate their line-age with file mtime.
+    Reflections are write-once; age comes from the YYYY-MM-DD filename prefix.
+    GTD files use mtime as a fallback.
     """
     if "reflections" in path.parts:
         d = filename_date(path)
         if d is not None:
             return max(0, (date.today() - d).days)
-    try:
-        out = subprocess.run(
-            [
-                "git",
-                "blame",
-                "--line-porcelain",
-                "-L",
-                f"{line_no},{line_no}",
-                "--",
-                str(path),
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        timeout=10,
-    ).stdout
-        for ln in out.splitlines():
-            if ln.startswith("author-time "):
-                ts = int(ln.split()[1])
-                return max(0, (datetime.now() - datetime.fromtimestamp(ts)).days)
-    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
-        pass
     try:
         mtime = path.stat().st_mtime
         return max(0, (datetime.now() - datetime.fromtimestamp(mtime)).days)
@@ -232,7 +206,9 @@ def scan_reflection_next_actions(path: Path) -> list[Todo]:
         text_part = content.strip()
         if not text_part:
             continue
-        # Reflection bullets have no checkbox; DONE/KILLED are their closure markers.
+        cb = CHECKBOX_RE.match(line)
+        if cb and cb.group(1).lower() == "x":
+            continue
         if (
             text_part.startswith("DONE ")
             or text_part.startswith("DONE:")

@@ -29,6 +29,9 @@ timezone = "America/Los_Angeles"
 
 [[followup]]
 media_id = 99
+
+[[watching]]
+media_id = 30
 """,
         encoding="utf-8",
     )
@@ -85,7 +88,13 @@ class FakeAniList:
                             "airingAt": airing,
                             "mediaId": 10,
                             "media": {"title": {"userPreferred": "Current Show"}},
-                        }
+                        },
+                        {
+                            "episode": 2,
+                            "airingAt": airing,
+                            "mediaId": 30,
+                            "media": {"title": {"userPreferred": "Watched Show"}},
+                        },
                     ]
                 }
             }
@@ -113,12 +122,12 @@ class TrackingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def test_exact_same_day_schedule_for_current_entries(self):
+    def test_same_day_schedule_follows_local_watching_list_not_anilist_current(self):
         fake = FakeAniList()
         section = rt._anime_updates(self.vault, NOW, fake)
         self.assertEqual(len(section["library"]), 2)
-        self.assertEqual(section["updates"], ["Current Show Ep.4 07:30 PST 已更新"])
-        self.assertEqual(fake.schedule_variables["ids"], [10])
+        self.assertEqual(section["updates"], ["Watched Show Ep.2 07:30 PST 已更新"])
+        self.assertEqual(fake.schedule_variables["ids"], [30])
 
     def test_empty_schedule_does_not_infer_last_week(self):
         fake = FakeAniList()

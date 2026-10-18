@@ -2,7 +2,8 @@
 """Refresh the derived reminder cache consumed by ``daily_brief.py``.
 
 This is deterministic scheduled work, not a model routine.  AniList supplies
-the user's library, exact same-day airing schedules, and explicitly configured
+the user's library, exact same-day airing schedules for the locally configured
+``[[watching]]`` list (never AniList ``CURRENT``), and explicitly configured
 follow-up metadata.  Concert reminders are derived from private vault policy
 and the discovery cache.  The command preserves every top-level cache key it
 does not own and writes atomically so readers never observe a partial refresh.
@@ -18,6 +19,7 @@ import tomllib
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Callable
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -97,7 +99,13 @@ def _load_config(ov: Path) -> dict[str, Any]:
     return value
 
 
-def _library(config: dict[str, Any], query_fn: QueryFn) -> tuple[list[dict[str, Any]], list[int]]:
+def _media_ids(config: dict[str, Any], table: str) -> list[int]:
+    rows = config.get(table, [])
+    ids = [row.get("media_id") for row in rows if isinstance(row, dict)]
+    return sorted({media_id for media_id in ids if isinstance(media_id, int)})
+
+
+def _library(config: dict[str, Any], query_fn: QueryFn) -> list[dict[str, Any]]:
     anime = config.get("anime")
     if not isinstance(anime, dict):
         raise ValueError("anilist.toml has no [anime] table")
@@ -130,7 +138,6 @@ def _library(config: dict[str, Any], query_fn: QueryFn) -> tuple[list[dict[str, 
         raise ValueError("AniList library response has no lists")
 
     library: list[dict[str, Any]] = []
-    current_ids: list[int] = []
     for group in lists:
         entries = group.get("entries") if isinstance(group, dict) else None
         if not isinstance(entries, list):
@@ -143,28 +150,25 @@ def _library(config: dict[str, Any], query_fn: QueryFn) -> tuple[list[dict[str, 
             title = _title(media.get("title")) if isinstance(media, dict) else None
             if not isinstance(media_id, int) or title is None:
                 continue
-            status = entry.get("status")
             library.append(
                 {
                     "id": media_id,
                     "title": title,
-                    "status": status,
+                    "status": entry.get("status"),
                     "progress": entry.get("progress"),
                 }
             )
-            if status == "CURRENT":
-                current_ids.append(media_id)
 
     library.sort(key=lambda item: (str(item.get("status")), str(item.get("title"))))
-    return library, sorted(set(current_ids))
+    return library
 
 
 def _same_day_airings(
-    current_ids: list[int],
+    watching_ids: list[int],
     local_now: datetime,
     query_fn: QueryFn,
 ) -> list[str]:
-    if not current_ids:
+    if not watching_ids:
         return []
     start = datetime.combine(local_now.date(), datetime.min.time(), local_now.tzinfo)
     end = datetime.combine(local_now.date(), datetime.max.time(), local_now.tzinfo)
@@ -187,7 +191,7 @@ def _same_day_airings(
         }
         """,
         {
-            "ids": current_ids,
+            "ids": watching_ids,
             "start": int(start.timestamp()) - 1,
             "end": int(end.timestamp()) + 1,
         },
@@ -198,9 +202,9 @@ def _same_day_airings(
         raise ValueError("AniList airing response has no schedules")
 
     updates: list[tuple[int, str]] = []
-    current_set = set(current_ids)
+    watching_set = set(watching_ids)
     for row in rows:
-        if not isinstance(row, dict) or row.get("mediaId") not in current_set:
+        if not isinstance(row, dict) or row.get("mediaId") not in watching_set:
             continue
         episode = row.get("episode")
         airing_at = row.get("airingAt")
@@ -232,13 +236,13 @@ def _anime_updates(
     zone_name = anime.get("timezone") if isinstance(anime, dict) else None
     if isinstance(zone_name, str) and zone_name.strip():
         local_now = local_now.astimezone(ZoneInfo(zone_name.strip()))
-    library, current_ids = _library(config, query_fn)
+    library = _library(config, query_fn)
     return {
         "date": local_now.date().isoformat(),
         "last_success_at": local_now.isoformat(),
         "failed_at": None,
         "error": None,
-        "updates": _same_day_airings(current_ids, local_now, query_fn),
+        "updates": _same_day_airings(_media_ids(config, "watching"), local_now, query_fn),
         "library": library,
     }
 
@@ -261,10 +265,7 @@ def _followup_updates(
     previous: object,
     query_fn: QueryFn = _anilist_query,
 ) -> dict[str, Any]:
-    config = _load_config(ov)
-    rows = config.get("followup", [])
-    ids = [row.get("media_id") for row in rows if isinstance(row, dict)]
-    ids = sorted({media_id for media_id in ids if isinstance(media_id, int)})
+    ids = _media_ids(_load_config(ov), "followup")
     today = local_now.date().isoformat()
     if not ids:
         return {
@@ -483,6 +484,7 @@ def refresh(
         successes.append("anime")
     except (
         HTTPError,
+        HTTPException,
         URLError,
         KeyError,
         OSError,
@@ -501,6 +503,7 @@ def refresh(
         successes.append("followups")
     except (
         HTTPError,
+        HTTPException,
         URLError,
         KeyError,
         OSError,
