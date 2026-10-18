@@ -18,7 +18,7 @@ This map is not a second per-script specification.
 | Knowledge maintenance | `decay_scan.py`, `autoevo_run.py`; queue, preflight, and verification helpers preserve separate safety boundaries |
 | Daily brief and optional life-area applications | `routine_digest.py`, `digest_note.py`, `daily_brief.py`, `dining_audit.py`, `dine_rank.py`, `interests.py` |
 | Public-repo privacy | `privacy_check.py`, `privacy_index.py`, `hooks/pre-push`; approval contract below |
-| Verification | `../tests/` owns unittest scenarios; `harness_smoke.py` runs lint, discovery, and Ruff |
+| Verification | `../tests/` owns unittest scenarios; `harness_smoke.py` runs lint, parallel per-module unittest, and Ruff; `hooks/pre-push` lints the tip of each pushed ref |
 
 Supporting files stay with their owning subsystem. A script need not become a
 registered command or agent. Domain applications are not universal harness

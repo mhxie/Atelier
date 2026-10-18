@@ -64,9 +64,11 @@ The JSON report and exit codes are unchanged. Structural errors use
 malformed config uses `registry-read`; validator/setup failures use
 `registry-validator`. Fix these before cross-file checks can run.
 
-Smoke runs harness lint, unittest discovery (including runtime mappings and
-hooks), and offline Ruff when available, without reading the private vault.
-Inspect skipped checks: missing Node dependencies or Ruff reduce coverage.
+Smoke runs harness lint, every unittest module discovery would load (including
+runtime mappings and hooks) in parallel processes, and offline Ruff when
+available, without reading the private vault.
+Its final line names skipped tests or Ruff; missing Node dependencies or Ruff reduce coverage.
+Lint re-runs under the project `.venv` when present, so a bare `python3` keeps full coverage.
 It does not verify live model calls, connectors, scheduled deployment, or
 publication privacy. Those require the selected workflow's own checks; see the
 [publication gate](../scripts/README.md#public-repo-privacy-gate) for that boundary.

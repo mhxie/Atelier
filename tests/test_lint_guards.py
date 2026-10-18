@@ -242,6 +242,16 @@ class HarnessLintCliContractTest(unittest.TestCase):
                     [{"severity", "code", "where", "message"} for _ in findings],
                 )
 
+    def test_bare_python3_runs_the_same_checks_as_the_project_venv(self) -> None:
+        # The documented `python3` entry used to downgrade venv-only checks to a WARN and exit 0.
+        venv = REPO_ROOT / ".venv" / "bin" / "python"
+        if not venv.is_file():
+            self.skipTest("project .venv missing; run `uv sync --locked`")
+        runs = [subprocess.run([python, "scripts/harness_lint.py", "--json"], cwd=REPO_ROOT,
+                               capture_output=True, text=True, timeout=120)
+                for python in (os.path.realpath(venv), str(venv))]  # base interpreter first
+        self.assertEqual(*(json.loads(run.stdout)["findings"] for run in runs))
+
     def test_unknown_argument_uses_argparse_exit_two(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
             h.main(["--unknown"])

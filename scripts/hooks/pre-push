@@ -3,11 +3,23 @@
 # to leave this machine, not just the working tree. Install once per clone:
 #   git config core.hooksPath scripts/hooks
 # The semantic gate (privacy-reviewer over the same range) is not a shell
-# concern; `/push` runs both and then pushes.
+# concern; `/push` runs both and then pushes. Harness lint runs on each pushed
+# ref's tip in a scratch worktree, because a dirty tree can mask a committed breach.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 zero="0000000000000000000000000000000000000000"
 status=0
+lint_commit() {
+  local scratch lint=0
+  scratch=$(mktemp -d)
+  git worktree add --quiet --detach "$scratch/tree" "$1"
+  if [ -d .venv ]; then ln -s "$PWD/.venv" "$scratch/tree/.venv"; fi
+  python3 "$scratch/tree/scripts/harness_lint.py" >&2 || lint=$?
+  rm -f "$scratch/tree/.venv"
+  git worktree remove --force "$scratch/tree"
+  rm -rf "$scratch"
+  return "$lint"
+}
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -z "${local_sha:-}" ] && continue
   [ "$local_sha" = "$zero" ] && continue   # deleting a remote ref
@@ -18,6 +30,10 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
   if ! uv run scripts/privacy_check.py --range "$base..$local_sha"; then
     echo "pre-push: privacy gate failed for $local_ref ($base..$local_sha); nothing was pushed" >&2
+    status=1
+  fi
+  if ! lint_commit "$local_sha"; then
+    echo "pre-push: harness lint failed for $local_ref ($local_sha); nothing was pushed" >&2
     status=1
   fi
 done

@@ -1504,4 +1504,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    python = ROOT / ".venv" / "bin" / "python"
+    # Checks that import project dependencies degrade to WARN under a bare `python3`; exec once.
+    if python.is_file() and sys.executable != str(python) and Path(sys.prefix).resolve() != python.parents[1].resolve():
+        os.execv(python, [str(python), *sys.argv])
     sys.exit(main())
