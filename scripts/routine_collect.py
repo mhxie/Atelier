@@ -85,21 +85,8 @@ _ANY_HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 
 # Section titles that carry the analytical payload, preferred for the excerpt.
 _PAYLOAD_HEADINGS = (
-    "why this matters",
-    "why now",
-    "assessment",
-    "implication",
-    "implications",
-    "so what",
-    "takeaway",
-    "takeaways",
-    "summary",
-    "verdict",
-    "decision",
-    "conclusion",
-    "结论",
-    "判断",
-    "影响",
+    "why this matters", "why now", "assessment", "implication", "implications", "so what", "takeaway",
+    "takeaways", "summary", "verdict", "decision", "conclusion", "结论", "判断", "影响",
 )
 
 _ANY_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*<?[^)]*>?\s*\)")
@@ -107,18 +94,12 @@ _ANY_MD_LINK = re.compile(r"\[([^\]]+)\]\(\s*<?[^)]*>?\s*\)")
 # Headings that name bookkeeping rather than the finding, so they make a poor
 # document headline even though the section body is often the best excerpt.
 _GENERIC_HEADINGS = {
-    "tl;dr",
-    "tldr",
-    "collection status",
-    "collection notes",
-    "coverage",
-    "facts",
-    "status",
-    "notes",
-    "summary",
-    "overview",
-    "scope",
+    "tl;dr", "tldr", "collection status", "collection notes", "coverage", "facts", "status", "notes",
+    "summary", "overview", "scope",
 }
+
+# Leading H2s that report how a routine ran, which a digest embed skips to reach the finding.
+_BOOKKEEPING_H2 = re.compile(r"(?i)coverage|collection|scope|method|effort|status|audit|覆盖|缺失|方法")
 
 UNIT_EXCERPT_CHARS = 320
 
@@ -749,6 +730,42 @@ def extract_excerpt(body: str, limit: int) -> str:
         cut = cut[: boundary + 1]
     return cut.rstrip() + " …"
 
+def content_section(body: str) -> str:
+    """The first H2 past leading bookkeeping H2s, or '' when the note opens on its finding."""
+    titles = [match[1] for match in re.finditer(r"^## +(.+?)\s*$", body, re.M)]
+    lead = next((i for i, title in enumerate(titles) if not _BOOKKEEPING_H2.search(title)), 0)
+    return titles[lead] if lead and not re.search(r"[\[\]|#^`]", titles[lead]) else ""
+
+# The reader section the archived-prompt adapter asks every report to open with, and its no-update text.
+READER_SECTION, NO_UPDATE = "日报", "无更新"
+
+def _section(routine: Routine, body: str) -> dict[str, Any]:
+    """The reader section, else the registry's section, else the first content H2. `empty` means no update:
+    a reader section holding only the no-update text, or the registry's text inside its section."""
+    sections = dict(_split_sections(body))
+    name = READER_SECTION if READER_SECTION in sections else routine.section
+    if name not in sections:  # a report written before the reader-section standard
+        return {"section": content_section(body), "breach": f"缺少 {READER_SECTION} 节"}
+    found = sections[name]
+    empty = found.strip() == NO_UPDATE if name == READER_SECTION else bool(routine.empty) and routine.empty in found
+    return {"section": name, "declared": True, "empty": empty, "breach": "" if empty else shape_breach(found)}
+
+def shape_breach(section: str) -> str:
+    """How a shown section exceeds the digest standard of two levels with at most four entries each, or ''.
+    An unindented item or an H3+ is a top entry; an item indented under one, or under an H3, is its child."""
+    tops, children, deep, heading = 0, [], False, False
+    for line in section.splitlines():
+        if re.match(r"#{3,6} ", line) or (not heading and re.match(r"(?:[-*+]|\d+[.)]) ", line)):
+            tops, heading = tops + 1, heading or line.startswith("#")
+            children.append(0)
+        elif children and (item := re.match(r"( *)(?:[-*+]|\d+[.)]) ", line)):
+            level = heading + (len(item[1]) >= 2)
+            deep |= level >= 2
+            children[-1] += level == 1
+    bits = [f"顶层 {tops} 项" if tops > 4 else "", f"子项 {max(children)} 项" if children and max(children) > 4 else "",
+            "超过两层" if deep else ""]
+    return "展示节超出两层×四项：" + "，".join(bit for bit in bits if bit) if any(bits) else ""
+
 def strip_inline_markup(text: str) -> str:
     """Flatten markdown emphasis and links into plain prose.
 
@@ -814,6 +831,10 @@ class Source:
     primary_urls: list[str] = field(default_factory=list)
     units: list[dict[str, Any]] = field(default_factory=list)
     carried: bool = False
+    section: str = ""
+    declared: bool = False  # the registry names the section, so it is written for the reader
+    empty: bool = False
+    breach: str = ""  # how the shown section exceeds two levels of four entries
 
 def collect_context_sources(
     ov: Path, routines: list[Routine], end: date,
@@ -998,13 +1019,8 @@ def collect(
         "selection": "unacked" if unacked else "window",
         "generated": datetime.now().astimezone().isoformat(timespec="seconds"),
         "window": {"since": start.isoformat(), "until": end.isoformat(), "days": span},
-        "counts": {
-            "routines": len({s.routine for s in sources}),
-            "files": len(sources),
-            "updates": len(updates),
-            "bytes": sum(s.bytes for s in sources),
-            "lanes": len(lanes),
-        },
+        "counts": {"routines": len({s.routine for s in sources}), "files": len(sources), "updates": len(updates),
+                   "bytes": sum(s.bytes for s in sources), "lanes": len(lanes)},
         "truncated": truncated,
         "health": collect_health(ov, routines, acks, start, end),
         "skipped_routines": skipped,
@@ -1105,20 +1121,11 @@ def _build_source(
     # on top of them would just repeat the first unit.
     file_excerpt = "" if units else extract_excerpt(body, excerpt_chars)
     return Source(
-        routine=routine.name,
-        label=routine.label,
-        lane=routine.lane,
-        max_lines=routine.max_lines,
-        path=_vault_relative(ov, path),
-        name=path.name,
-        date=when.isoformat(),
-        date_source=when_source,
-        bytes=len(text.encode("utf-8")),
-        headline=extract_headline(meta, body, units),
-        meta={k: v for k, v in meta.items() if k in keep},
-        excerpt=file_excerpt,
-        items=extract_items(body, max_items),
-        primary_urls=urls[:10],
+        routine=routine.name, label=routine.label, lane=routine.lane, max_lines=routine.max_lines,
+        path=_vault_relative(ov, path), name=path.name, date=when.isoformat(), date_source=when_source,
+        bytes=len(text.encode("utf-8")), headline=extract_headline(meta, body, units),
+        meta={k: v for k, v in meta.items() if k in keep}, excerpt=file_excerpt,
+        items=extract_items(body, max_items), primary_urls=urls[:10], **_section(routine, body),
         units=[_unit_dict(unit_meta, unit_body) for unit_meta, unit_body in units],
     )
 
@@ -1152,24 +1159,13 @@ def _group_lanes(sources: list[Source]) -> list[dict[str, Any]]:
     ]
 
 def _source_dict(source: Source) -> dict[str, Any]:
-    data = {
-        "routine": source.routine,
-        "label": source.label,
-        "max_lines": source.max_lines,
-        "path": source.path,
-        "name": source.name,
-        "date": source.date,
-        "bytes": source.bytes,
-        "headline": source.headline,
-        "anchor": source_anchor(source.path),
-    }
+    data = {key: getattr(source, key) for key in ("routine", "label", "max_lines", "path", "name", "date", "bytes", "headline")}
+    data["anchor"] = source_anchor(source.path)
     if source.date_source != "filename":
         data["date_source"] = source.date_source
-    for key in ("meta", "excerpt", "units", "items", "primary_urls"):
+    for key in ("meta", "excerpt", "units", "items", "primary_urls", "section", "declared", "empty", "breach", "carried"):
         if value := getattr(source, key):
             data[key] = value
-    if source.carried:
-        data["carried"] = True
     return data
 
 def _load_object(path: Path | None, label: str, expected: int) -> dict[str, Any]:

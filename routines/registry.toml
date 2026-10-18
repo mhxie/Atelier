@@ -33,7 +33,7 @@ retry_delay_seconds = 60
 [[routine]]
 name = "daily-digest"
 runner = "process"
-cron = ["20 6 * * *"]
+cron = ["0 8 * * *"]
 timezone = "local"
 argv = ["{python}", "scripts/routine_digest.py", "morning", "--refresh-quota", "--no-weather"]
 timeout_seconds = 600

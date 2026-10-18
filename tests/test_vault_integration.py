@@ -147,7 +147,7 @@ def check_daily_digest_routine() -> None:
     jobs = tomllib.loads((ROOT / "routines/registry.toml").read_text(encoding="utf-8"))["routine"]
     digest = next(row for row in jobs if row["name"] == "daily-digest")
     expect(
-        digest["cron"] == ["20 6 * * *"]
+        digest["cron"] == ["0 8 * * *"]
         and digest["timezone"] == "local"
         and digest["argv"] == ["{python}", "scripts/routine_digest.py", "morning", "--refresh-quota", "--no-weather"]
         and digest["retry_safe"] is True

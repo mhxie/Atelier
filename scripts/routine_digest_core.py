@@ -66,6 +66,8 @@ class Routine:
     execution: str = "remote"
     max_lines: int = DEFAULT_ROUTINE_LINES
     context: str | None = None
+    section: str = ""  # the H2 a digest embeds: the run's human-facing delta
+    empty: str = ""  # text that, inside that section, means the run found nothing new
 
 def load_routines(ov: Path) -> list[Routine]:
     """Parse the private routine registry into Routine rows.
@@ -108,20 +110,13 @@ def load_routines(ov: Path) -> list[Routine]:
             max_lines = max(1, int(raw_lines))
         except (TypeError, ValueError):
             max_lines = DEFAULT_ROUTINE_LINES
-        routines.append(
-            Routine(
-                name=name,
-                label=str(row.get("label") or name),
-                output_dir=str(output_dir),
-                file_pattern=str(row.get("file_pattern") or "*.md"),
-                lane=str(lane),
-                include=bool(include),
-                cron=str(row.get("cron") or ""),
-                execution=str(row.get("execution") or "remote"),
-                max_lines=max_lines,
-                context=context,
-            )
-        )
+        routines.append(Routine(
+            name=name, label=str(row.get("label") or name), output_dir=str(output_dir),
+            file_pattern=str(row.get("file_pattern") or "*.md"), lane=str(lane), include=bool(include),
+            cron=str(row.get("cron") or ""), execution=str(row.get("execution") or "remote"),
+            max_lines=max_lines, context=context,
+            section=str(digest_cfg.get("section") or ""), empty=str(digest_cfg.get("empty") or ""),
+        ))
     return routines
 
 def default_lane(output_dir: str) -> str:

@@ -36,6 +36,7 @@ from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPRESENTATIVE_FIXTURE = REPO_ROOT / "tests/fixtures/digest/representative.json"
+FOLD = "\n\n---\n\n"  # the first rule after the title; the colophon has the second
 
 import _paths  # noqa: E402
 import digest_note as dn  # noqa: E402
@@ -405,6 +406,40 @@ class ExtractionTests(unittest.TestCase):
 
 
 class ParsingContractTests(unittest.TestCase):
+    def test_a_declared_section_wins_and_its_empty_text_marks_no_update(self):
+        body = "# T\n\n## Coverage\n\nx\n\n## Delta\n\nNothing new today\n\n## Watch list\n\n- a\n"
+        def routine(section, empty=""):
+            return core.Routine("r", "r", "o", "*.md", "Lane", True, section=section, empty=empty)
+        self.assertEqual(rc._section(routine("Delta", "Nothing new today"), body),
+                         {"section": "Delta", "declared": True, "empty": True, "breach": ""})
+        self.assertEqual(rc._section(routine("Watch list", "Nothing new today"), body),
+                         {"section": "Watch list", "declared": True, "empty": False, "breach": ""})
+        self.assertEqual(rc._section(routine("Missing", "x"), body), {"section": "Delta", "breach": "缺少 日报 节"})
+        # Without a registry section, the reader section every report opens with is the one embedded.
+        reader = "# T\n\n## 日报\n\n- 新增一条\n\n## Coverage\n\nx\n"
+        self.assertEqual(rc._section(routine(""), reader), {"section": "日报", "declared": True, "empty": False, "breach": ""})
+        self.assertEqual(rc._section(routine(""), reader.replace("- 新增一条", "无更新")),
+                         {"section": "日报", "declared": True, "empty": True, "breach": ""})
+        # The reader section outranks a registry section, which stays the fallback for reports without one.
+        self.assertEqual(rc._section(routine("Coverage", "x"), reader), {"section": "日报", "declared": True, "empty": False, "breach": ""})
+
+    def test_a_shown_section_holds_two_levels_of_four(self):
+        fits = "1. [a](u)\n   一句摘要。\n2. b\n   - c\n   - d\n### 分组\n- e\n- f\n"
+        self.assertEqual(rc.shape_breach(fits), "")
+        self.assertEqual(rc.shape_breach("\n".join(f"- {i}" for i in range(6))), "展示节超出两层×四项：顶层 6 项")
+        self.assertEqual(rc.shape_breach("- a\n" + "\n".join(f"  - {i}" for i in range(5))), "展示节超出两层×四项：子项 5 项")
+        self.assertEqual(rc.shape_breach("### h\n- a\n  - too deep\n"), "展示节超出两层×四项：超过两层")
+        manifest = {"schema": 1, "mode": "daily", "window": {"since": "2099-01-30", "until": "2099-01-30"}, "lanes": [
+            {"lane": "Research", "files": 1, "sources": [{"path": "r.md", "label": "sweep", "breach": "展示节超出两层×四项：顶层 6 项"}]}]}
+        self.assertIn("\n- sweep 展示节超出两层×四项：顶层 6 项\n", dn.render(manifest))
+
+    def test_content_section_skips_leading_bookkeeping_h2s(self):
+        self.assertEqual(rc.content_section("# T\n\n## Coverage\n\nx\n\n## 方法\n\n## Candidate signals\n\n## Gaps\n"),
+                         "Candidate signals")
+        self.assertEqual(rc.content_section("# T\n\n## Summary\n\n## 覆盖范围\n"), "")  # opens on its finding
+        self.assertEqual(rc.content_section("# T\n\n## 覆盖范围与缺失输入\n\n## [[Linked]] list\n"), "")
+        self.assertEqual(rc.content_section("# T\n\n## Coverage\n"), "")
+
     """Pins the markdown contract the digest depends on.
 
     `routine_collect` parses ledgers and reports by hand. Any replacement
@@ -596,7 +631,7 @@ class CollectTests(VaultCase):
             {"title": "精选", "lane": "Finance", "facts": ["事实"], "why": "关联"},
         ]}}
         document = dn.render(manifest, overview)
-        index = document.split("## 来源索引", 1)[1]
+        index = document.split("## 例程原文", 1)[1]
         self.assertIn("降级 · 0/5", index)
         self.assertNotIn("输入缺口：完整正文不可用。", document)
         source["meta"]["status"] = "complete"
@@ -677,6 +712,17 @@ class CollectTests(VaultCase):
         cursor = json.loads(state.read_text(encoding="utf-8"))["daily"]["status-ledger"]
         self.assertEqual(cursor, newer["updates"][-1]["id"])
         self.assertEqual(rc.collect(self.vault, mode="daily", until="2099-02-01")["updates"], [])
+
+    def test_out_preview_refuses_vault_folder_linked_into_raw_store(self):
+        store = Path(self.tmp.name) / "raw-store"
+        (store / "linked").mkdir(parents=True)
+        (self.vault / "linked").symlink_to(store / "linked")
+        manifest = rc.collect(self.vault, mode="daily", until="2099-01-31")
+        preview = self.vault / "linked" / "preview.md"
+        with patch("_paths.raw_store", return_value=store), \
+                self.assertRaisesRegex(SystemExit, "stay outside"):
+            rd.write(self.vault, dn.render(manifest), manifest, out=preview)
+        self.assertFalse((store / "linked" / "preview.md").exists())
 
     def test_same_day_recollect_replays_the_days_updates(self):
         ledger = self.vault / "personal/status-tracker.md"
@@ -1068,19 +1114,19 @@ class ContextSourceTests(VaultCase):
         entry = f"`{ref['path']}`"
 
         def index_entries(document: str) -> list[str]:
-            index = document.split("## 来源索引", 1)[1].split("\n---\n", 1)[0]
-            return [line for line in index.splitlines() if line.startswith("- ") and entry in line]
+            index = document.split("## 例程原文", 1)[1].split("\n---\n", 1)[0]
+            return [line for line in index.splitlines() if line.startswith("- ") and "background＜/script>" in line]
 
         document = dn.render(manifest, overview)
         assert_native(document)
         background = document.split("**背景来源**\n\n", 1)[1].split("\n\n", 1)[0]
-        self.assertEqual(background, f"- **＜script>background＜/script>** · {entry} · 2099-01-20")
+        self.assertEqual(background, "- **＜script>background＜/script>** · 2099-01-20")
         self.assertIn(f"- A cited background fact · {entry}", document)
         self.assertNotIn("unmatched", document)
         for live in ("<script", "<img"):
             self.assertNotIn(live, document)
         self.assertEqual(len(index_entries(document)), 1)
-        self.assertGreater(document.index("missing source"), document.index("以上 "))
+        self.assertGreater(document.index("missing source"), document.index(FOLD))
         manifest["context_sources"]["duplicate"] = dict(ref)
         self.assertEqual(len(index_entries(dn.render(manifest, overview))), 1)
         manifest["lanes"] = [{"lane": "Research", "files": 1, "sources": [dict(ref)]}]
@@ -1099,15 +1145,15 @@ class RenderTests(VaultCase):
         for manifest in (self.manifest, daily, backlog):
             self.assertIn(f"\n\n# {dn.digest_title(manifest)}\n\n", dn.render(manifest))
 
-    def test_carried_source_is_labelled_in_the_index(self):
+    def test_a_carried_source_is_not_flagged(self):
         manifest = rc.collect(self.vault, mode="daily", until="2099-01-31")
-        self.assertIn(" · 补录 · ", dn.render(manifest).split("## 来源索引", 1)[1])
-        self.assertNotIn("补录", dn.render(self.manifest))
+        self.assertTrue(any(source.get("carried") for _, source in core.iter_sources(manifest)))
+        self.assertNotIn("补录", dn.render(manifest))
 
     def test_gaps_render_in_the_colophon_never_as_a_section(self):
         overview = {"schema": 1, "headline": "h", "sections": [], "gaps": ["Readwise CLI unavailable"]}
         document = dn.render(self.manifest, overview)
-        fold = document.index("以上 ")
+        fold = document.index(FOLD)
         self.assertGreater(document.index("- Readwise CLI unavailable"), fold)
         self.assertGreater(document.index("**输入缺口**"), fold)
         self.assertFalse([title for title in h2s(document) if "输入缺口" in title])
@@ -1127,7 +1173,7 @@ class RenderTests(VaultCase):
         self.assertIn("- Hotel credit 明天 · `example-tracker:107`", document)
         self.assertIn("\n\n! deadline index stale 12d\n\n", document)
         self.assertLess(document.index("今天/明天关窗"), document.index("## 情报"))
-        self.assertLess(document.index("## 情报"), document.index("## 来源索引"))
+        self.assertLess(document.index("## 情报"), document.index("## 例程原文"))
 
     def test_brief_item_prints_once_ahead_of_folded_debt(self):
         """Actions and folded reminders have Outline targets; each item appears once."""
@@ -1147,25 +1193,38 @@ class RenderTests(VaultCase):
         self.assertLess(document.index("a forfeitable thing"), document.index("review 债 2 项"))
         self.assertEqual(document.count("! deadline index missing"), 1)
 
-    def test_optional_inputs_keep_source_navigation_and_exclusion_disclosure(self):
+    def test_optional_inputs_keep_source_navigation_without_bookkeeping(self):
         document = dn.render(self.manifest)
         self.assertNotIn("## 今日", document)
-        self.assertIn("\n\n" + dn.NO_OVERVIEW + "\n\n", document)
-        self.assertIn("## 来源索引", document)
+        self.assertIn("## 例程原文", document)
         self.assertIn("**daily feed digest**", document)
-        self.assertIn("[First item title](https://example.com/one)", document)
-        self.assertIn("`inbox/feed/2099-01-30-feed.md`", document)
-        self.assertIn("Excluded from this digest", document)
-        self.assertIn("maintenance output", document)
+        self.assertIn("](https://example.com/one)", document)
+        self.assertNotIn("`inbox/feed/2099-01-30-feed.md`", document)
+        self.assertNotIn("Excluded from this digest", document)
+        self.assertNotIn("maintenance output", document)
 
     def test_configured_updates_render_before_the_overview(self):
         overview = {"schema": 1, "sections": [{"title": "情报", "bullets": [{"text": "x"}]}]}
         document = dn.render(self.manifest, overview)
         self.assertIn("## 状态更新 · 2", document)
-        self.assertIn("- **Status ledger** · 2099-01-30 · `personal/status-tracker.md`", document)
+        self.assertIn("- **Status ledger** · 2099-01-30\n", document)
+        self.assertNotIn("`personal/status-tracker.md`", document)
         self.assertIn("  - Cutoff: 2098-06-01", document)
         self.assertIn("  - Sources: [Primary](https://example.com/status)", document)
         self.assertLess(document.index("## 状态更新"), document.index("## 情报"))
+
+    def test_the_brief_keeps_actions_and_drops_their_bookkeeping(self):
+        brief = {"schema": 1, "date": "2099-01-30", "groups": [
+            {"tier": 2, "kind": "todo_now", "heading": "TODO 1 件",
+             "items": [{"label": "跟进事项 — 方案 — 用户 2099-01-28 改为后天跟进", "days_left": 0}]},
+            {"tier": 3, "kind": "merged", "items": [],
+             "heading": "review 债 2 项: weekly · wiki_attention · 健康观测: 体重上次 2099-01-01 (29d 前) (metrics.md)"}],
+            "warnings": ["14 lines over the 12-line cap; forfeitable items are never folded", "deadline index missing"]}
+        document = dn.render(self.manifest, None, brief)
+        self.assertIn("\n- ==今天== · 跟进事项\n", document)
+        self.assertIn("\n- review 债 2 项 · 健康观测: 体重上次 2099-01-01 (29d 前)\n", document)
+        self.assertNotIn("-line cap", document)
+        self.assertIn("\n! deadline index missing\n", document)
 
     def test_folded_brief_group_renders_heading_only(self):
         brief = self._brief(tier=3, kind="recurring", heading="recurring: 9 条逾期 (recurring.py list)", folded=True)
@@ -1283,11 +1342,11 @@ class RepresentativeDigestTests(unittest.TestCase):
             "## 前沿实验室",
             "## routine 摘要",
             "## 新文章",
-            "以上 ",
+            FOLD,
             "## 信号精选",
-            "## 来源索引",
+            "## 例程原文",
             "**输入缺口**",
-            "KB 源文本",
+            "生成于",
         )
         for visible in (
             "synthetic context warning",
@@ -1302,7 +1361,6 @@ class RepresentativeDigestTests(unittest.TestCase):
             "第一条可复核事实。",
             "第二条可复核事实。",
             "示例模型发布了可复核的更新。",
-            "补录",
             "Synthetic optional source was unavailable.",
             "[来源 ↗](https://example.com/research)",
         ):
@@ -1337,9 +1395,9 @@ class RepresentativeDigestTests(unittest.TestCase):
             "## 信号",
             "## 前沿实验室",
             "## routine 摘要",
-            "以上 ",
+            FOLD,
             "## 信号精选",
-            "## 来源索引",
+            "## 例程原文",
         )
 
     def test_the_colophon_leaves_implementation_paths_out_of_the_note(self):
@@ -1617,50 +1675,16 @@ class FoldTests(VaultCase):
         self.overview = {"schema": 1, "headline": "一句话", "sections": [
             {"title": "信号", "bullets": [{"text": "cross-source movement"}]}]}
 
-    def test_scan_and_depth_share_one_priced_note(self):
+    def test_a_bare_rule_folds_the_scan_from_the_depth(self):
         document = dn.render(self.manifest, self.overview)
-        fold = document.index("以上 ")
-        self.assertRegex(document, r"\n---\n\n以上 \d+ 分钟读完 · 以下 \d+ 分钟，按需\n")
+        fold = document.index(FOLD)
+        self.assertNotIn("分钟", document)
         self.assertLess(document.index("## 信号"), fold)
-        for heading in ("## 科技动态", "## 来源索引"):
+        for heading in ("## 科技动态", "## 例程原文"):
             with self.subTest(heading=heading):
                 self.assertGreater(document.index(heading), fold)
-        self.assertRegex(document[document.index("## 科技动态"):].split("\n", 1)[0], r" · \d+ 分钟$")
         # Depth is curated picks and the feed's own items; a routine body never renders.
         self.assertNotIn("a tighter path raises discount rates", document)
-
-    def test_the_fold_prices_the_scan_above_it_and_the_depth_below_it(self):
-        manifest, overview, brief, context = representative_digest_inputs("daily")
-        overview["headline"] = "字" * 1980
-        document = dn.render(manifest, overview, brief, context)
-        fold = re.search(r"\n\n---\n\n以上 (\d+) 分钟读完 · 以下 (\d+) 分钟，按需\n\n", document)
-        scan = document[document.index("\n# ") + 1:fold.start()].split("\n", 1)[1]
-        prices = (dn.reading_minutes(scan), dn.reading_minutes(document[fold.end():]))
-        self.assertEqual((int(fold[1]), int(fold[2])), prices)
-        self.assertEqual(len(set(prices + (dn.reading_minutes(scan + "\n" + document[fold.end():]),))), 3)
-
-
-class ReadingCostTests(unittest.TestCase):
-    def test_empty_text_costs_nothing(self):
-        self.assertEqual(dn.reading_minutes(""), 0)
-        self.assertEqual(dn.reading_minutes("---\n\n## · **`x`**\n\n- [](https://example.com/a/b)"), 0)
-
-    def test_any_real_text_costs_at_least_a_minute(self):
-        """Rounding to zero would read as "free", which no section is."""
-        self.assertEqual(dn.reading_minutes("**短**"), 1)
-
-    def test_markup_is_not_counted_as_prose(self):
-        # 822 characters price at 2.49 minutes, so three counted tokens of syntax would round to 3.
-        bare = dn.reading_minutes("字" * 822)
-        marked = dn.reading_minutes(
-            f"## {'字' * 411}\n\n- **{'字' * 411}** · `one two three` · "
-            "[](https://a.example/x) [](https://b.example/y) [](https://c.example/z)"
-        )
-        self.assertEqual((bare, marked), (2, 2))
-
-    def test_cjk_and_latin_are_priced_separately(self):
-        self.assertGreater(dn.reading_minutes("字" * 1000), 1)
-        self.assertGreaterEqual(dn.reading_minutes(" ".join(["word"] * 700)), 3)
 
 
 class ArticleSectionTests(VaultCase):
@@ -1685,7 +1709,7 @@ class ArticleSectionTests(VaultCase):
         self.assertNotIn("13 mins min", document)
         self.assertIn("  - 为何读：服务 multimodal 方向", document)
         self.assertIn("  - 这篇讲的是把长视频按 GOP 分块存储并加帧级索引。", document)
-        self.assertLess(document.index("A Paper"), document.index("以上 "))
+        self.assertLess(document.index("A Paper"), document.index(FOLD))
 
     def test_article_durations_keep_units_and_do_not_total_unknown_values(self):
         for value, label, minutes in (
@@ -1884,8 +1908,8 @@ class AttentionBudgetTests(VaultCase):
     def test_briefs_sit_above_the_fold_and_bodies_below(self):
         overview = {"schema": 1, "routines": [{"path": self.path, "summary": "一行摘要"}]}
         document = dn.render(self.manifest, overview, None)
-        self.assertLess(document.index("## routine 摘要"), document.index("以上 "))
-        self.assertGreater(document.index("## 科技动态"), document.index("以上 "))
+        self.assertLess(document.index("## routine 摘要"), document.index(FOLD))
+        self.assertGreater(document.index("## 科技动态"), document.index(FOLD))
 
 
 class SharedDirectoryTests(VaultCase):
@@ -1949,17 +1973,16 @@ class MastheadAndContextTests(unittest.TestCase):
     @staticmethod
     def _strip(document: str) -> str:
         """The signal strip: the masthead paragraph of live cells, or ''."""
-        scan = document.split("\n---\n\n以上 ", 1)[0]
+        scan = document.split(FOLD, 1)[0]
         return next((block for block in scan.split("\n\n")
                      if re.match(r"(?:==|\*\*)?(?:关窗|主线|体重|决策|失败尝试|Prefect) ", block)), "")
 
-    def test_weather_sits_in_the_masthead_and_provenance_in_the_colophon(self):
+    def test_weather_sits_in_the_masthead_and_freshness_in_the_colophon(self):
         document = dn.render(self.manifest, None, None, self.context)
         self.assertIn("\n\n**Lisbon** 13–25°C · 少云 · 降水 2% · 9:00 18° · 18:00 21°\n\n", document)
-        self.assertLess(document.index("Lisbon"), document.index("## 来源索引"))
-        self.assertLess(document.index("## 来源索引"), document.index("KB 源文本"))
-        self.assertLess(document.index("## 来源索引"), document.index("生成于 06:22"))
-        self.assertGreater(document.index("天气 Open-Meteo"), document.index("## 来源索引"))
+        self.assertLess(document.index("Lisbon"), document.index("## 例程原文"))
+        self.assertLess(document.index("## 例程原文"), document.index("生成于 06:22"))
+        self.assertNotIn("Open-Meteo", document)
 
     def test_quota_table_marks_the_remaining_share_by_level(self):
         def rows(context: dict) -> list[str]:
@@ -2002,11 +2025,13 @@ class MastheadAndContextTests(unittest.TestCase):
         self.assertNotIn("快照", block)
         self.assertEqual(document.count("额度快照 0.5h前"), 1)
 
-    def test_context_is_optional_and_warnings_are_visible(self):
+    def test_context_is_optional_and_its_warnings_are_input_gaps(self):
         plain = dn.render(self.manifest)
         self.assertNotIn("| 额度 |", plain)
         warned = dn.render(self.manifest, None, None, {"quota": [], "warnings": ["claude quota: no snapshot"]})
-        self.assertIn("\n\n! claude quota: no snapshot\n\n", warned)
+        self.assertNotIn("! claude quota", warned)
+        self.assertIn("**输入缺口**\n\n- claude quota: no snapshot\n\n", warned)
+        self.assertGreater(warned.index("claude quota"), warned.index(FOLD))
 
     def test_signal_counts_are_not_duplicated_in_the_masthead(self):
         """The action headings and due columns already carry these counts."""
@@ -2040,7 +2065,7 @@ class MastheadAndContextTests(unittest.TestCase):
         failed_manifest["health"]["failed"] = 3
         failed = dn.render(failed_manifest)
         self.assertEqual(self._strip(failed), "")
-        self.assertEqual(failed.count("历史失败 3 次"), 1)
+        self.assertNotIn("历史失败", failed)
 
         for age in (3, 4):
             with self.subTest(weight_age_days=age):
@@ -2064,7 +2089,7 @@ class MastheadAndContextTests(unittest.TestCase):
         self.assertEqual(document.count("体重"), 1)
         self.assertNotIn("体重记录：", document)
 
-    def test_fleet_bookkeeping_moves_to_the_colophon(self):
+    def test_fleet_bookkeeping_stays_out_of_the_note(self):
         brief = {
             "schema": 1,
             "date": "2099-01-30",
@@ -2076,9 +2101,8 @@ class MastheadAndContextTests(unittest.TestCase):
         }
         document = dn.render(self.manifest, {"schema": 1}, brief)
         self.assertEqual(self._strip(document), "")
-        for bit in ("routine 4/19 有产出", "2 完成", "149 待 review"):
-            self.assertIn(bit, document)
-            self.assertGreater(document.index(bit), document.index("## 来源索引"))
+        for bit in ("有产出", "完成", "待 review", "KB 源文本"):
+            self.assertNotIn(bit, document)
         self.assertEqual(document.count("recurring: 9 条逾期, 4 条刚到期"), 1)
 
     def test_ledger_due_column_encodes_urgency(self):
@@ -2125,7 +2149,7 @@ class MastheadAndContextTests(unittest.TestCase):
         brief = {"signals": {"closing": 1, "closing_now": 0}}
         document = dn.render(self.manifest, None, brief)
         self.assertEqual(self._strip(document), "")
-        self.assertIn("Prefect 状态不可用", document)
+        self.assertNotIn("Prefect 状态不可用", document)
         # Without fleet health there is no strip, however live the brief's cells are.
         self.manifest["health"] = {}
         self.assertEqual(self._strip(dn.render(self.manifest, None, {"signals": {"focus_days": 3}})), "")
@@ -2137,14 +2161,14 @@ class MastheadAndContextTests(unittest.TestCase):
         self.manifest["health"]["state_unavailable"] = True
         review = {"tier": 3, "kind": "review", "heading": "review 债 5 项", "items": [{"text": "a"}, {"text": "b"}]}
         brief = {"schema": 1, "date": "2099-01-30", "warnings": [], "groups": [review]}
-        fleet = "4 KB 源文本 · 1 条状态更新 · 生成于 06:22 · routine 4/19 有产出 · 2 完成 · Prefect 状态不可用 · 149 待 review"
+        fleet = "生成于 06:22"
         tag = dn.note_tag(self.manifest)
         self.assertEqual(colophon(dn.render(self.manifest, None, brief, {"weather": {"place": ""}})),
                          fleet + " · " + tag)
         brief["groups"] = [{**review, "items": []}]
         self.assertEqual(colophon(dn.render(self.manifest, None, brief)), fleet + " · " + tag)
         self.manifest["health"] = {}
-        self.assertEqual(colophon(dn.render(self.manifest)), "4 KB 源文本 · 1 条状态更新 · 生成于 06:22 · " + tag)
+        self.assertEqual(colophon(dn.render(self.manifest)), fleet + " · " + tag)
 
     def test_each_note_carries_one_tag_for_reflect(self):
         """Daily and backlog notes end with #日报, weekly roll-ups with #周报; field text never adds one."""
@@ -2170,13 +2194,13 @@ class MastheadAndContextTests(unittest.TestCase):
         self.assertNotIn("°C", placeless)
         self.assertNotIn("天气 Open-Meteo", placeless)
 
-    def test_masthead_order_runs_weather_strip_quota_then_warnings_before_the_ledger(self):
+    def test_masthead_order_runs_weather_strip_then_quota_before_the_ledger(self):
         manifest, _overview, brief, context = representative_digest_inputs()
         document = dn.render(manifest, None, brief, context)
         self.assertEqual(self._strip(document), "")
         offsets = [document.index(needle) for needle in (
-            "\n**Lisbon** ", "\n## 模型额度", "\n| 额度 |", "\n! synthetic context warning\n",
-            "\n## 需要开始处理 1 件")]
+            "\n**Lisbon** ", "\n## 模型额度", "\n| 额度 |", "\n## 需要开始处理 1 件", FOLD,
+            "\n- synthetic context warning\n")]
         self.assertEqual(offsets, sorted(offsets))
 
 
@@ -2197,7 +2221,7 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
                 self.assertIn("**Example Lab**\n\n- 模型发布 · 1级来源 · Atlas early access shipped. · "
                               "[来源 ↗](https://example.com/atlas)", document)
                 self.assertIn("\n\nNo mission drift in the synthetic fixture.\n\n", document)
-                self.assertLess(document.index("前沿实验室"), document.index("以上 "))
+                self.assertLess(document.index("前沿实验室"), document.index(FOLD))
 
     def test_frontier_collapses_to_counts_on_later_days(self):
         document = dn.render(self.manifest, {"schema": 1, "frontier_labs": self._labs("2099-01-25")})
@@ -2224,19 +2248,18 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
             },
         }
         document = dn.render(self.manifest, overview)
-        self.assertIn("## 信号精选 · 1 / 5 · 1 分钟", document)
+        self.assertIn("## 信号精选 · 1 / 5", document)
         self.assertIn("- **HBM 层数增加压缩良率** · [来源 ↗](https://example.com/hbm)\n"
                       "  - 第一点。\n  - 第二点。\n  - 为何重要：支撑 **MU** 的定价。", document)
         self.assertNotIn("第三点不该出现。", document)
         # The depth layer carries no routine body; the source index below it
         # navigates by unit link, not by excerpt.
-        depth = document[document.index("以上 "):document.index("## 来源索引")]
+        depth = document[document.index(FOLD):document.index("## 例程原文")]
         self.assertNotIn("The rate corridor was held", depth)
         # The feed's own items follow, deterministically, from the manifest.
-        self.assertIn("## 科技动态 · 1 · 1 分钟\n\n- [Example Model](https://example.com/model)\n"
-                      "  - 示例模型发布了可复核的更新。", document)
+        self.assertIn("## 科技动态 · 1\n\n- [示例模型发布了可复核的更新。](https://example.com/model)\n", document)
         self.assertIn("## 信号精选 · 1 / 5", document)
-        self.assertGreater(document.index("信号精选"), document.index("以上 "))
+        self.assertGreater(document.index("信号精选"), document.index(FOLD))
 
     def _finance_only_pick(self, lane=None) -> dict:
         entry = {"title": "HBM 良率", "url": "https://example.com/hbm", "facts": ["一。"], "why": "为什么。"}
@@ -2269,16 +2292,15 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
             with self.subTest(curated=overview is not None):
                 document = dn.render(self.manifest, overview)
                 self.assertNotIn("信号精选", document)
-                self.assertIn("## 科技动态 · 1 · ", document)
-                self.assertIn("## 科技动态 · 1 · 1 分钟\n\n- [Example Model](https://example.com/model)", document)
-                depth = document[document.index("以上 "):document.index("## 来源索引")]
+                self.assertIn("## 科技动态 · 1\n\n- [示例模型发布了可复核的更新。](https://example.com/model)", document)
+                depth = document[document.index(FOLD):document.index("## 例程原文")]
                 self.assertNotIn("A compact systems result with a bounded source trail.", depth)
-                self.assertIn("`research/example/2099-01-30-note.md`", document)
+                self.assertIn("- **example research note**", document)
                 self.assertNotIn("\n  - [example result](https://example.com/research)\n", document)
 
     def _frontier(self, labs: dict) -> str:
         document = dn.render(self.manifest, {"schema": 1, "frontier_labs": labs})
-        return "## 前沿实验室" + document.split("## 前沿实验室", 1)[1].split("\n\n## ", 1)[0].split("\n\n---\n\n", 1)[0]
+        return "## 前沿实验室" + document.split("## 前沿实验室", 1)[1].split(FOLD, 1)[0].split("\n\n## ", 1)[0]
 
     def test_frontier_groups_labs_in_first_seen_order_and_needs_lab_and_text(self):
         signals = [{"lab": "B", "text": "b"}, {"lab": "A", "text": "a"}, {"lab": "", "text": "x"}, {"lab": "C"}]
@@ -2315,7 +2337,7 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
             {"title": "", "facts": ["untitled fact"]}, {"title": "Bare title", "lane": "Research"},
             {"title": "u", "lane": "Research", "facts": ["", " ", "a", "b", "c"]}]}}
         document = dn.render(self.manifest, overview)
-        self.assertIn("## 信号精选 · 1 · 1 分钟\n\n- **u**\n  - a\n  - b\n\n", document)
+        self.assertIn("## 信号精选 · 1\n\n- **u**\n  - a\n  - b\n\n", document)
         for dropped in ("untitled fact", "Bare title"):
             self.assertNotIn(dropped, document)
 
@@ -2323,8 +2345,7 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
         self.manifest["lanes"][0]["sources"][0]["items"] = [
             {"title": "", "note": "无标题条目。"}, {"title": "T", "url": "https://example.com/t", "note": "中文。"}]
         document = dn.render(self.manifest)
-        self.assertIn("## 科技动态 · 1 · 1 分钟\n\n- [T](https://example.com/t)\n  - 中文。\n\n",
-                      document)
+        self.assertIn("## 科技动态 · 1\n\n- [中文。](https://example.com/t)\n\n", document)
         self.assertNotIn("无标题条目", document)
         quiet = {**self.manifest, "lanes": [lane for lane in self.manifest["lanes"] if lane["lane"] != "Tech feed"]}
         self.assertNotIn("情报详读", dn.render(quiet))
@@ -2357,22 +2378,19 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
                 "own": {"path": "research/sweeps/2099-01-28.md", "label": "older sweep", "date": "2099-01-28",
                         "anchor": "src-own"}},
         }
-        index = dn.render(manifest).split("## 来源索引\n\n", 1)[1].split("\n\n---\n\n", 1)[0]
+        index = dn.render(manifest).split("## 例程原文\n\n", 1)[1].split("\n\n---\n\n", 1)[0]
         self.assertEqual(index.split("\n\n"), [
-            "**Research · 3**",
-            "- **list report** · `research/a/2099-01-30-list.md`\n"
-            "- **link report** · `research/b/2099-01-30-links.md`\n"
-            "- **long report** · `research/c/undated.md` · (date from mtime)",
-            "**Tech feed · 1**",
-            "- **feed** · `inbox/feed/2099-01-30-feed.md`",
+            "**Research**",
+            "- **list report**\n- **link report**\n- **long report**",
+            "**Tech feed**",
+            "- **feed**",
             # The sweep that shares an anchor with a fresh source is already listed above.
             "**背景来源**",
-            "- **older sweep** · `research/sweeps/2099-01-28.md` · 2099-01-28",
+            "- **older sweep** · 2099-01-28",
             "Selection was truncated by --max-files; narrow the window.",
-            dn.NO_OVERVIEW,
         ])
         empty = dn.render({**manifest, "lanes": [], "context_sources": {}, "truncated": False})
-        self.assertIn("## 来源索引\n\nNo routine output in this window.\n\n", empty)
+        self.assertIn("## 例程原文\n\nNo routine output in this window.\n\n", empty)
 
     def test_input_gaps_keep_their_order_and_name_every_failed_status(self):
         manifest = {
@@ -2397,8 +2415,8 @@ class FrontierAndCuratedDepthTests(unittest.TestCase):
             # The untitled item still owes a Chinese note.
             "- 科技动态 2 条中 2 条有摘要，1 条为中文；资讯例程需按「链接下一行缩进、中文、一句话」写摘要",
         ])
-        self.assertIn("- **partial run** · `research/a.md` · 部分覆盖", document)
-        self.assertIn("- **failed run** · `research/b.md` · 错误 · 0/3", document)
+        self.assertIn("- **partial run**\n", document)  # partial coverage is routine, a failure is a finding
+        self.assertIn("- **failed run** · 错误 · 0/3", document)
         self.assertNotIn("no channel answered", document)
 
 
@@ -2563,7 +2581,7 @@ class WriteTimeGuardTests(VaultCase):
         self.assertIn(f"## {dn.DECISION_SECTION} · 0\n\n## {dn.SIGNAL_SECTION} · 1", document)
         self.assertNotIn("  - 定案：", document)
         self.assertIn(f"\n- {notes[0]}\n", document.split("**输入缺口**", 1)[1])
-        self.assertLess(document.index("是否把验证预算"), document.index("以上 "))
+        self.assertLess(document.index("是否把验证预算"), document.index(FOLD))
 
     def test_demotion_into_an_existing_signal_section_leaves_the_caller_untouched(self):
         overview = self._decision()
@@ -2727,7 +2745,7 @@ class WriteTimeGuardTests(VaultCase):
         self.assertIn("科技动态 4 条中 1 条有摘要，0 条为中文", gap)
         document = dn.render(self.manifest, {"schema": 1})
         self.assertIn("科技动态 4 条中 1 条有摘要", document)
-        self.assertGreater(document.index("科技动态 4 条中"), document.index("以上 "))
+        self.assertGreater(document.index("科技动态 4 条中"), document.index(FOLD))
         # Any item without a Chinese note is reported; the spec promises one
         # per item, and a tolerance would hide the partial failure.
         for item, note in zip(items, ("中文一。", "English two.", "English three.", "English four.")):
@@ -2752,7 +2770,7 @@ class WriteTimeGuardTests(VaultCase):
             },
         }
         document = dn.render(self.manifest, overview)
-        feed = document.split("## 科技动态 · 2 · 1 分钟\n\n", 1)[1].split("\n\n", 1)[0]
+        feed = document.split("## 科技动态 · 2\n\n", 1)[1].split("\n\n", 1)[0]
         self.assertEqual(feed.splitlines(), ["- [One](https://example.com/one)", "- [Two](https://example.com/two)"])
         gaps = document.split("**输入缺口**\n\n", 1)[1].split("\n\n", 1)[0]
         self.assertIn("2 条中 0 条有摘要", gaps)
@@ -2932,12 +2950,81 @@ class NoteFormatTests(unittest.TestCase):
             document = dn.render(manifest, overview, brief, titles=titles)
             assert_native(document, titles)
         self.assertIn("\n- cited · [[A Unique Result]] · `finance/a/policy.md` · `invented.md` (unmatched)\n", document)
-        # A brief trace is navigation, never a backlink into the tracker.
-        self.assertIn("\n- 2d · Follow up · `unique:3`\n", document)
-        index = document.split("## 来源索引", 1)[1]
-        # A headline equal to the link title is not printed twice.
-        self.assertIn("\n- **unique** · [[A Unique Result]]\n", index)
-        self.assertIn("\n- **policy** · `finance/a/policy.md`\n", index)
+        # A linkable trace leaves the row for the section's one hover-preview line.
+        self.assertIn("\n- 2d · Follow up\n\n来源 [[A Unique Result]]\n\n", document)
+        index = document.split("## 例程原文", 1)[1]
+        # A day's linkable source embeds as its own paragraph, the one shape Reflect previews in place.
+        self.assertIn("\n\n![[A Unique Result]]\n\n", index)
+        self.assertNotIn("**unique**", index)
+        self.assertIn("\n- **policy**\n", index)
+
+    def test_a_days_sources_embed_while_the_feed_and_weekly_rows_link(self):
+        """Reflect previews `![[X]]` in place only as its own paragraph; partial and carried runs go unflagged."""
+        notes = {"research/sweep.md": "# Lab Sweep\n", "inbox/feed/2099-01-30-feed.md": "# Feed Digest\n"}
+        lanes = [
+            {"lane": "Research", "files": 1, "sources": [
+                {"path": "research/sweep.md", "label": "sweep", "date": "2099-01-29", "carried": True,
+                 "meta": {"status": "partial", "channels_reached": "3/5"}}]},
+            {"lane": "Tech feed", "files": 1, "sources": [
+                {"path": "inbox/feed/2099-01-30-feed.md", "label": "feed", "date": "2099-01-30",
+                 "items": [{"title": "T", "note": "中文。"}]}]},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            for rel, text in notes.items():
+                (vault / rel).parent.mkdir(parents=True, exist_ok=True)
+                (vault / rel).write_text(text, encoding="utf-8")
+            titles = TitleIndex(vault)
+            for since, mode in (("2099-01-30", "daily"), ("2099-01-24", "weekly")):
+                manifest = {"schema": 1, "mode": mode, "window": {"since": since, "until": "2099-01-30"},
+                            "generated": "2099-01-30T06:20:00", "lanes": lanes}
+                document = dn.render(manifest, titles=titles)
+                assert_native(document, titles)
+                index = document.split("## 例程原文\n\n", 1)[1]
+                with self.subTest(mode=mode):
+                    # The feed's items render as 科技动态, whose 来源 line links it once.
+                    self.assertIn("\n- **中文。**\n\n来源 [[Feed Digest]]\n\n", document)
+                    self.assertNotIn("Feed Digest", index)
+                    if mode == "daily":
+                        self.assertIn("**Research**\n\n![[Lab Sweep]]\n\n", index)
+                        clean = {**lanes[1], "sources": [{**lanes[1]["sources"][0], "section": "Items", "declared": True}]}
+                        self.assertIn("## 科技动态\n\n![[Feed Digest#Items]]\n\n", dn.render(
+                            {**manifest, "lanes": [lanes[0], clean]}, titles=titles))  # a reader-ready feed embeds
+                        bare = {**clean, "sources": [{**clean["sources"][0], "items": []}]}
+                        self.assertEqual(dn.render({**manifest, "lanes": [lanes[0], bare]}, titles=titles)
+                                         .count("![[Feed Digest#Items]]"), 1)  # embedded once, never also indexed
+                        silent = {**clean, "sources": [{**clean["sources"][0], "empty": True}]}
+                        self.assertNotIn("科技动态", dn.render({**manifest, "lanes": [lanes[0], silent]}, titles=titles))
+                        broken = {**lanes[0], "sources": [{**lanes[0]["sources"][0], "meta": {"status": "failed"}}]}
+                        self.assertIn("**Research**\n\n失败\n\n![[Lab Sweep]]\n\n",
+                                      dn.render({**manifest, "lanes": [broken]}, titles=titles))
+                        quiet = {**lanes[0], "sources": [{**lanes[0]["sources"][0], "empty": True}]}
+                        self.assertNotIn("Research", dn.render({**manifest, "lanes": [quiet]}, titles=titles))
+                        aimed = {**lanes[0], "sources": [{**lanes[0]["sources"][0], "section": "Candidate signals"}]}
+                        self.assertIn("\n\n![[Lab Sweep#Candidate signals]]\n\n",
+                                      dn.render({**manifest, "lanes": [aimed]}, titles=titles))
+                        unsafe = {**lanes[0], "sources": [{**lanes[0]["sources"][0], "section": "1. Findings"}]}
+                        self.assertIn("\n\n![[Lab Sweep]]\n\n", dn.render({**manifest, "lanes": [unsafe]}, titles=titles))
+                        update = {"label": "U", "date": "2099-01-30", "path": "research/sweep.md", "values": {}}
+                        card = {"text": "q", "between": ["a", "b"], "settles": "s", "sources": ["research/sweep.md"]}
+                        decided = dn.render({**manifest, "updates": [update]}, {"schema": 1, "sections": [
+                            {"title": "需要的决策", "bullets": [card]}]}, titles=titles)
+                        self.assertIn("\n- **U** · 2099-01-30 · [[Lab Sweep]]\n", decided)
+                        self.assertIn("\n  - 定案：s · [[Lab Sweep]]\n", decided)
+                        read = {"title": "A", "abstract": "摘要", "minutes": "5", "sources": ["research/sweep.md"]}
+                        self.assertIn("  - 摘要\n\n来源 [[Lab Sweep]]\n\n", dn.render(
+                            manifest, {"schema": 1, "articles": [read]}, titles=titles))
+                        pick = {"title": "P", "why": "w", "sources": ["research/sweep.md", "research/gone.md"]}
+                        self.assertIn("  - 为何重要：w\n\n来源 [[Lab Sweep]]\n\n", dn.render(
+                            manifest, {"schema": 1, "deep_read": {"entries": [pick]}}, titles=titles))
+                        labs = {"sweep_date": "2099-01-30", "signals": [{"lab": "L", "text": "t"}]}
+                        scan = dn.render({**manifest, "context_sources": {"frontier_labs": {
+                            "path": "research/sweep.md"}}}, {"schema": 1, "frontier_labs": labs},
+                            titles=titles).split(FOLD, 1)[0]
+                        self.assertTrue(scan.endswith("**L**\n\n- t\n\n来源 [[Lab Sweep]]"), scan[-80:])
+                    else:
+                        self.assertNotIn("![[", document)
+                        self.assertIn("- **sweep** · [[Lab Sweep]] · 2099-01-29\n", index)
 
     def test_titles_reflect_would_read_as_paths_are_cited_by_path(self):
         # Path-shaped titles with an extension or a dot segment resolve to no note in Reflect.
@@ -2978,8 +3065,6 @@ class NoteFormatTests(unittest.TestCase):
         scheduled, curated = dn.render(manifest, None, brief), dn.render(manifest, overview, brief)
         self.assertTrue(scheduled.startswith("---\ncurated: false\n---\n\n# Atelier Daily: 2099-01-30\n"))
         self.assertTrue(curated.startswith("---\ncurated: true\n---\n\n# Atelier Daily: 2099-01-30\n"))
-        self.assertIn(dn.NO_OVERVIEW, scheduled)
-        self.assertNotIn(dn.NO_OVERVIEW, curated)
         # An overview file holding only `{}` still means the model pass ran.
         self.assertTrue(dn.render(manifest, {}, brief).startswith("---\ncurated: true\n---\n"))
 
@@ -3370,10 +3455,12 @@ class CompareAndSwapTests(NoteCase):
             with self.subTest(note=self.note(manifest).name):
                 code, err = self.write(dn.render(manifest, {"schema": 1}), manifest)
                 self.assertEqual(code, 0, err)
-        # An earlier daily note is history once a later one exists, and keeps its record.
+        # Once a later note exists, an earlier one rebuilds only when it has no status updates to lose.
+        replayed = {**earlier, "updates": [{"label": "L", "date": "2099-01-30", "path": "x.md", "values": {}}]}
         with self.assertRaisesRegex(SystemExit, "predates the 2099-01-31 note"):
-            self.write(dn.render(earlier, {"schema": 1}), earlier)
+            self.write(dn.render(replayed, {"schema": 1}), replayed)
         self.assertIn(self.note(earlier).relative_to(self.vault).as_posix(), json.loads(self.state())["notes"])
+        self.assertEqual(self.write(dn.render(earlier, {"schema": 1}), earlier)[0], 0)
         late = self.daily("2099-02-20")
         self.assertEqual(self.write(dn.render(late), late)[0], 0)
         self.assertEqual(set(json.loads(self.state())["notes"]), {"inbox/digest/2099-02/2099-02-20-daily-digest.md"})

@@ -34,7 +34,9 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _paths import PathsError, atomic_write, date_in_text, fmt, retry_transient, vault_root  # noqa: E402
+from _paths import (  # noqa: E402
+    PathsError, atomic_write, date_in_text, fmt, inside_vault, retry_transient, vault_root,
+)
 from _reflect import TitleIndex, nonnative  # noqa: E402
 from routine_collect import (  # noqa: E402
     DELIVERED_RETENTION_DAYS,
@@ -143,7 +145,7 @@ def write(
     size = f"{len(text.encode('utf-8')) / 1024:.0f} KB"
     if out is not None or dry_run:
         if out is not None:
-            if out.resolve().is_relative_to(ov.resolve()):
+            if inside_vault(out, ov):
                 raise SystemExit("--out previews stay outside $OV")
             atomic_write(out, text)
         print(f"{'previewed ' + str(out) if out else 'would write $OV/' + rel} ({size}; sha256 {_sha(text)})")
@@ -179,7 +181,7 @@ def write(
                     raise SystemExit(f"$OV/{rel} was written from a newer collection; recollect before writing")
                 latest = str(replay.get("day") or "") if isinstance(replay, dict) else ""
                 until = str(manifest["window"]["until"])[:10]
-                if manifest.get("mode") == "daily" and latest > until:
+                if manifest.get("mode") == "daily" and latest > until and (manifest.get("updates") or "\n## 状态更新" in old):
                     # Its status updates moved on with the cursor, so a rebuild would silently drop them.
                     raise SystemExit(f"$OV/{rel} predates the {latest} note; its status updates cannot be "
                                      "replayed, so it stays as written")

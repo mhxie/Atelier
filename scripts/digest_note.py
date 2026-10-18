@@ -19,7 +19,6 @@ from routine_digest_core import (  # noqa: E402
 
 DECISION_SECTION = "需要的决策"
 SIGNAL_SECTION = "信号"
-NO_OVERVIEW = "概览待整理。"
 _FACTS, _TRACE_STEM = 2, 22
 
 _CJK = re.compile(r"[㐀-鿿぀-ヿ]")
@@ -145,26 +144,6 @@ def _h2(title: str, *badges: str) -> str:
     return "## " + " · ".join([title or "…", *(badge for badge in badges if badge)])
 
 
-def _items(lines: list[str]) -> str:
-    return "\n".join(lines)
-
-
-_NOT_PROSE = re.compile(r"\]\([^)\s]*\)|`[^`\n]*`|\[\[|\]\]|[*_#>|=\[\]]|·|^\s*(?:[-+]|\d+[.)])\s", re.M)
-
-
-def reading_minutes(text: str) -> int:
-    """CJK at 330 per minute, words at 220; syntax, code spans, and URLs are not prose."""
-    text = _NOT_PROSE.sub(" ", text)
-    cjk = len(_CJK.findall(text))
-    latin = sum(1 for word in _CJK.sub(" ", text).split() if any(char.isalnum() for char in word))
-    return max(1, round(cjk / 330 + latin / 220)) if cjk or latin else 0
-
-
-def _cost(blocks: list[str]) -> str:
-    minutes = reading_minutes("\n".join(blocks))
-    return f"{minutes} 分钟" if minutes else ""
-
-
 def digest_title(manifest: dict[str, Any]) -> str:
     window = manifest.get("window") or {}
     since, until = window.get("since", "?"), window.get("until", "?")
@@ -254,7 +233,7 @@ def _masthead(context: dict, until: str) -> list[str]:
         headers = ["额度", *(header for header, _ in quota)]
         table = [headers, ["---"] * len(headers), ["剩余 / 重置", *(value for _, value in quota)]]
         blocks += [_h2("模型额度"), "\n".join("| " + " | ".join(cell.replace("|", "｜") for cell in cells) + " |" for cells in table)]
-    return blocks + [f"! {text}" for w in context.get("warnings") or [] if (text := plain(w))]
+    return blocks
 
 
 def _due(item: dict[str, Any], tier: Any) -> str:
@@ -269,7 +248,7 @@ def _due(item: dict[str, Any], tier: Any) -> str:
 
 
 def _trace(source: Any) -> str:
-    """`stem:line` chip; a trace is navigation, not a backlink."""
+    """`stem:line` chip for a source Reflect cannot open by title."""
     name = str(source or "").rsplit("/", 1)[-1]
     stem, _, line = name.rpartition(":")
     stem, line = (stem, line) if stem else (name, "")
@@ -278,18 +257,27 @@ def _trace(source: Any) -> str:
     return code(f"{stem}:{line}" if line else stem) if stem else ""
 
 
-def _brief(brief: dict[str, Any]) -> list[str]:
-    """Action groups are Outline targets; folded reminders share one target."""
+def _refs(paths: list[Any], titles: Any) -> list[str]:
+    """A section's one `来源` line of `[[Title]]`s, which Reflect previews on hover."""
+    links = dict.fromkeys(link for path in paths if (link := cite(path, titles)).startswith("[["))
+    return ["来源 " + " · ".join(links)] if links else []
+
+
+def _brief(brief: dict[str, Any], titles: Any = None) -> list[str]:
+    """Action groups are Outline targets; linkable sources leave the rows for one 来源 line."""
     groups = [group for group in brief.get("groups") or [] if isinstance(group, dict)]
     blocks, reminders = [], []
     if not groups:
         blocks = [_h2("今日"), "今天没有关窗项、到期 TODO 或 review 债。"]
     for group in groups:
-        rows = []
+        rows, paths = [], []
         for item in group.get("items") or []:
             if not isinstance(item, dict):
                 continue
-            parts = [_due(item, group.get("tier")), plain(item.get("label") or item.get("text")), _trace(item.get("source"))]
+            paths.append(path := re.sub(r":\d+$", "", str(item.get("source") or "")))
+            trace = "" if cite(path, titles).startswith("[[") else _trace(item.get("source"))
+            action = str(item.get("label") or item.get("text") or "").split(" — ", 1)[0]  # tails stay in the source
+            parts = [_due(item, group.get("tier")), plain(action), trace]
             if flag := plain(item.get("flag")):
                 parts.append(" ".join(bit for bit in (_mark(flag, "now"), _trace(item.get("flag_source"))) if bit))
             if not (parts := [part for part in parts if part]):
@@ -297,23 +285,25 @@ def _brief(brief: dict[str, Any]) -> list[str]:
             rows.append("- " + " · ".join(parts))
             rows += [f"  - {hint}"] if (hint := plain(item.get("hint"))) else []
         heading = plain(group.get("heading")) or "…"
-        heading = re.sub(r" \((?:todos|recurring|deadlines)\.py (?:list|due)(?: [^()]*)?\)(?=$| · )", "", heading)
+        heading = re.sub(r" \((?:todos|recurring|deadlines)\.py (?:list|due)(?: [^()]*)?\)(?=$| · )| \([\w-]+\.md\)"
+                         r"|(?<=项): [a-z_]+(?: · [a-z_]+)*", "", heading)
         if rows:
-            blocks += [_h2(heading), _items(rows)]
+            blocks += [_h2(heading), "\n".join(rows), *_refs(paths, titles)]
         else:
             reminders.append(f"- {heading}")
     age = _int((brief.get("signals") or {}).get("weight_age_days"), None)
     if age is not None and age >= 0 and not any(re.search(rf"体重[^()]*\({age}d 前\)", block)
                                                for block in [*blocks, *reminders]):
         reminders.append(f"- 体重记录：{age}d 前")
-    blocks += [_h2("其他提醒"), _items(reminders)] if reminders else []
-    return blocks + [f"! {text}" for w in brief.get("warnings") or [] if (text := plain(w))]
+    blocks += [_h2("其他提醒"), "\n".join(reminders)] if reminders else []
+    return blocks + [f"! {text}" for w in brief.get("warnings") or [] if (text := plain(w)) and "-line cap" not in text]
 
 
 def _updates(manifest: dict[str, Any], titles: Any) -> list[str]:
     rows = []
     for item in manifest.get("updates") or []:
-        head = [f"**{plain(item.get('label')) or '…'}**", plain(item.get("date")), cite(item.get("path"), titles)]
+        link = cite(item.get("path"), titles)
+        head = [f"**{plain(item.get('label')) or '…'}**", plain(item.get("date")), link if link.startswith("[[") else ""]
         rows.append("- " + " · ".join(bit for bit in head if bit))
         for key, value in (item.get("values") or {}).items():
             name = plain(key)  # `[x]: …` would define a link reference
@@ -321,7 +311,7 @@ def _updates(manifest: dict[str, Any], titles: Any) -> list[str]:
     warnings = [f"! {text}" for w in manifest.get("update_warnings") or [] if (text := plain(w))]
     if not rows and not warnings:
         return []
-    return [_h2("状态更新", str(len(manifest.get("updates") or []))), *([_items(rows)] if rows else []), *warnings]
+    return [_h2("状态更新", str(len(manifest.get("updates") or []))), *(["\n".join(rows)] if rows else []), *warnings]
 
 
 def _provenance(bullet: dict[str, Any], known: set[str], titles: Any) -> list[str]:
@@ -349,7 +339,7 @@ def _section(section: dict[str, Any], known: set[str], titles: Any) -> list[str]
                      "  - " + " · ".join([settle, *_provenance(bullet, known, titles)])]
         elif parts := [part for part in (md(bullet.get("text")), *_provenance(bullet, known, titles)) if part]:
             rows.append("- " + " · ".join(parts))
-    return blocks + ([_items(rows)] if rows else [])
+    return blocks + (["\n".join(rows)] if rows else [])
 
 
 def _frontier(labs: Any, until: str) -> list[str]:
@@ -373,7 +363,7 @@ def _frontier(labs: Any, until: str) -> list[str]:
             chip = [plain(row.get("category")), f"{plain(row['tier'])}级来源" if row.get("tier") else ""]
             link = _linked("来源 ↗", url(row.get("url"))) if url(row.get("url")) else ""
             lines.append("- " + " · ".join(bit for bit in (*chip, md(row["text"]), link) if bit))
-        blocks += [f"**{plain(lab) or '…'}**", _items(lines)]
+        blocks += [f"**{plain(lab) or '…'}**", "\n".join(lines)]
     return blocks + ([note] if note else [])
 
 
@@ -392,7 +382,7 @@ def _routine_briefs(entries: list[Any], manifest: dict[str, Any], titles: Any) -
         head = [f"**{plain(source.get('label') or Path(path).name) or '…'}**",
                 f"已截至 {cap} 行" if len(lines) > cap else "", cite(path, titles) if path else ""]
         rows += ["- " + " · ".join(bit for bit in head if bit), *(f"  - {line}" for line in lines[:cap])]
-    return [_h2("routine 摘要"), _items(rows)] if rows else []
+    return [_h2("routine 摘要"), "\n".join(rows)] if rows else []
 
 
 def _article_duration(value: Any) -> tuple[str, float | None]:
@@ -404,9 +394,9 @@ def _article_duration(value: Any) -> tuple[str, float | None]:
     return (label + " min" if re.fullmatch(r"\d+(?:\.\d+)?", label) else label), minutes
 
 
-def _articles(articles: list[Any]) -> list[str]:
+def _articles(articles: list[Any], titles: Any = None) -> list[str]:
     """Entries need a title and an abstract; the minutes badge only when every duration parsed."""
-    rows, durations = [], []
+    rows, durations, sources = [], [], []
     for article in articles:
         if not isinstance(article, dict):
             continue
@@ -419,17 +409,28 @@ def _articles(articles: list[Any]) -> list[str]:
         rows.append("- " + " · ".join(bit for bit in (head, plain(label), plain(article.get("source"))) if bit))
         rows += [f"  - 为何读：{why}"] if (why := md(article.get("why"))) else []
         rows.append(f"  - {abstract}")
+        sources += article.get("sources") or []  # a vault note that already discusses it
     if not durations:
         return []
     total = sum(durations) if None not in durations else 0
-    return [_h2("新文章", f"{len(durations)} 篇", f"{total:g} 分钟" if total else ""), _items(rows)]
+    return [_h2("新文章", f"{len(durations)} 篇", f"{total:g} 分钟" if total else ""), "\n".join(rows),
+            *_refs(sources, titles)]
 
 
 # ----- below the fold -----
 
 def _feed(manifest: dict[str, Any]) -> list[dict[str, Any]]:
-    return [item for lane, source in iter_sources(manifest) if lane == "Tech feed"
+    return [item for lane, source in iter_sources(manifest) if lane == "Tech feed" and not source.get("empty")
             for item in source.get("items") or [] if isinstance(item, dict)]
+
+
+def _feed_shown(manifest: dict[str, Any], titles: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """(feed notes 科技动态 embeds, feed notes it links): a reader-ready report embeds; else titled items link every note."""
+    fed = [s for lane, s in iter_sources(manifest) if lane == "Tech feed" and cite(s.get("path"), titles).startswith("[[")]
+    ready = [s for s in fed if s.get("declared") and not s.get("empty")]
+    if ready:
+        return ready, []
+    return [], fed if any(plain(item.get("title")) for item in _feed(manifest)) else []
 
 
 def feed_note_gap(manifest: dict[str, Any]) -> str | None:
@@ -437,12 +438,12 @@ def feed_note_gap(manifest: dict[str, Any]) -> str | None:
     items = _feed(manifest)
     noted = sum(1 for item in items if str(item.get("note") or "").strip())
     cjk = sum(1 for item in items if _CJK.search(str(item.get("note") or "")))
-    if not items or cjk == len(items):
-        return None
+    if not items or cjk == len(items) or any(s.get("declared") for lane, s in iter_sources(manifest) if lane == "Tech feed"):
+        return None  # an embedded reader section carries its own notes
     return f"科技动态 {len(items)} 条中 {noted} 条有摘要，{cjk} 条为中文；资讯例程需按「链接下一行缩进、中文、一句话」写摘要"
 
 
-def _deep_read(deep_read: Any, manifest: dict[str, Any]) -> list[str]:
+def _deep_read(deep_read: Any, manifest: dict[str, Any], titles: Any = None) -> list[str]:
     """Curated picks, then every titled tech-feed item from the manifest; never routine bodies."""
     deep = deep_read if isinstance(deep_read, dict) else {}
     entries = [e for e in deep.get("entries") or [] if isinstance(e, dict) and plain(e.get("title"))
@@ -454,30 +455,37 @@ def _deep_read(deep_read: Any, manifest: dict[str, Any]) -> list[str]:
         picks.append("- " + " · ".join(bit for bit in (f"**{plain(entry['title'])}**", link) if bit))
         facts = [text for fact in entry.get("facts") or [] if (text := md(fact))][:_FACTS]
         picks += [f"  - {fact}" for fact in facts] + ([f"  - 为何重要：{why}"] if (why := md(entry.get("why"))) else [])
-    feed = []
-    for item in _feed(manifest):
-        if title := plain(item.get("title")):
-            feed.append("- " + (_linked(title, url(item.get("url"))) if url(item.get("url")) else f"**{title}**"))
-            feed += [f"  - {note}"] if (note := plain(item.get("note"))) else []
-    titled = sum(line.startswith("- ") for line in feed)
-    body = ([_h2("信号精选", count, _cost(picks)), _items(picks)] if picks else []) + \
-           ([_h2("科技动态", str(titled), _cost(feed)), _items(feed)] if feed else [])
+    feed = ["- " + (_linked(text, url(item.get("url"))) if url(item.get("url")) else f"**{text}**")
+            for item in _feed(manifest) if plain(item.get("title")) and (text := plain(item.get("note")) or plain(item.get("title")))]
+    embedded, linked = _feed_shown(manifest, titles)
+    embeds = [f"!{cite(s.get('path'), titles)[:-2]}#{s['section']}]]" for s in embedded]
+    body = ([_h2("信号精选", count), "\n".join(picks), *_refs([p for e in entries for p in e.get("sources") or []], titles)]
+            if picks else []) + ([_h2("科技动态"), *embeds] if embeds else  # a reader-ready feed embeds as written
+                                 [_h2("科技动态", str(len(feed))), "\n".join(feed), *_refs([s.get("path") for s in linked], titles)]
+                                 if feed else [])
     gap = deep_read_lane_gap(deep_read, manifest)
     return [body[0], *([f"! {plain(gap)}"] if gap else []), *body[1:]] if body else []
 
 
-def _source(source: dict[str, Any], titles: Any, day: str = "") -> str:
-    linked = cite(source.get("path"), titles)
-    head = [f"**{plain(source.get('label')) or '…'}**", "补录" if source.get("carried") else "", linked]
-    if source.get("date") != day:
-        head.append(plain(source.get("date")))
-    if source.get("date_source") not in (None, "", "filename"):
-        head.append(f"(date from {plain(source['date_source'])})")
-    meta = source.get("meta") or {}
-    status = {"degraded": "降级", "partial": "部分覆盖", "failed": "失败", "blocked": "阻塞", "error": "错误"}
-    if flag := status.get(str(meta.get("status", "")).casefold()):
-        head += [flag, plain(meta.get("channels_reached"))]
-    return "- " + " · ".join(bit for bit in head if bit)
+def _sources(sources: list[Any], titles: Any, day: str) -> list[str]:
+    """A day's notes embed: Reflect previews `![[Title]]` in place only as its own paragraph."""
+    blocks, rows = [], []
+    for source in (source for source in sources if not source.get("empty")):  # no update, no noise
+        meta, linked = source.get("meta") or {}, cite(source.get("path"), titles)
+        linked = linked if linked.startswith("[[") else ""  # a path is for agents, not this reader
+        failed = {"degraded": "降级", "failed": "失败", "blocked": "阻塞", "error": "错误"}.get(
+            str(meta.get("status", "")).casefold())  # a failed run is a finding; partial and carried are not
+        flags = [bit for bit in (failed, plain(meta.get("channels_reached"))) if bit] if failed else []
+        if day and linked:
+            section = str(source.get("section") or "")  # a heading screening would alter matches nothing
+            shown = linked[:-2] + "#" + section + "]]" if section and plain(section) == section else linked
+            blocks += [*(["\n".join(rows)] if rows else []), *([" · ".join(flags)] if flags else []), "!" + shown]
+            rows = []
+        else:
+            head = [f"**{plain(source.get('label')) or '…'}**", linked, *flags,
+                    plain(source.get("date")) if source.get("date") != day else ""]
+            rows.append("- " + " · ".join(bit for bit in head if bit))
+    return blocks + (["\n".join(rows)] if rows else [])
 
 
 def _keys(source: dict[str, Any]) -> set[str]:
@@ -485,25 +493,27 @@ def _keys(source: dict[str, Any]) -> set[str]:
 
 
 def _index(manifest: dict[str, Any], titles: Any) -> list[str]:
+    """Daily notes embed their sources; a feed 科技动态 already links is not repeated."""
     fresh = [source for _, source in iter_sources(manifest)]
-    blocks = [_h2("来源索引")] + ([] if fresh else ["No routine output in this window."])
+    blocks = [_h2("例程原文")] + ([] if fresh else ["No routine output in this window."])
     window = manifest.get("window") or {}
     day = str(window.get("until", "")) if window.get("since") == window.get("until") else ""
     for lane in manifest.get("lanes") or []:
         name = str(lane.get("lane", ""))
-        sources = [_source(source, titles, day) for source in lane.get("sources") or []]
-        blocks += [f"**{plain(name) or '…'} · {_int(lane.get('files'))}**", *([_items(sources)] if sources else [])]
+        sources = lane.get("sources") or []
+        if name == "Tech feed":  # 科技动态 already embeds or links these
+            shown = {s.get("path") for group in _feed_shown(manifest, titles) for s in group}
+            sources = [s for s in sources if s.get("path") not in shown]
+        blocks += [f"**{plain(name) or '…'}**", *shown] if (shown := _sources(sources, titles, day)) else []
     seen = {key for source in fresh for key in _keys(source)}
     background = []
     for source in (manifest.get("context_sources") or {}).values():
         if isinstance(source, dict) and source.get("path") and not _keys(source) & seen:
-            background.append(_source(source, titles, day))
+            background.append(source)
             seen |= _keys(source)
-    blocks += ["**背景来源**", _items(background)] if background else []
+    blocks += ["**背景来源**", *_sources(background, titles, day)] if background else []
     if manifest.get("truncated"):
         blocks.append("Selection was truncated by --max-files; narrow the window.")
-    if skipped := [text for name in manifest.get("skipped_routines") or [] if (text := plain(name))]:
-        blocks.append(f"Excluded from this digest: {', '.join(skipped)}.")
     return blocks
 
 
@@ -512,29 +522,22 @@ def _gaps(manifest: dict[str, Any], overview: dict[str, Any], notes: list[str]) 
     lines = [str(gap) for gap in overview.get("gaps") or []] + notes
     lines += [str(warning) for warning in manifest.get("context_warnings") or []]
     lines += [gap] if (gap := feed_note_gap(manifest)) else []
+    day = len({(manifest.get("window") or {}).get(key) for key in ("since", "until")}) == 1  # only a day's note embeds
+    lines += [f"{s.get('label') or s.get('path')} {s['breach']}" for _, s in iter_sources(manifest) if day and s.get("breach")]
     rows = list(dict.fromkeys(f"- {text}" for line in lines if (text := plain(line))))
-    return ["**输入缺口**", _items(rows)] if rows else []
+    return ["**输入缺口**", "\n".join(rows)] if rows else []
 
 
 def _colophon(manifest: dict[str, Any], context: dict) -> list[str]:
-    counts, health = manifest.get("counts") or {}, manifest.get("health") or {}
-    bits = [f"{_int(counts.get('bytes')) // 1024} KB 源文本"]
-    bits += [f"{_int(counts['updates'])} 条状态更新"] if _int(counts.get("updates")) else []
+    bits = []
     if generated := str(manifest.get("generated") or ""):
         bits.append(f"生成于 {plain(generated[11:16] or generated)}")
-    if isinstance(context.get("weather"), dict) and context["weather"].get("place"):
-        bits.append("天气 Open-Meteo，地点取自当天日程")
     ages = dict.fromkeys((plain(q.get("name")), plain(q.get("snapshot_age_hours")).removesuffix(".0"))
                          for q in context.get("quota") or [] if isinstance(q, dict) and plain(q.get("name")))
     common = {age for _, age in ages}
     if any(common):
         bits.append("额度快照 " + (f"{next(iter(common))}h前" if len(common) == 1 else
                                "；".join(f"{name} {age}h前" for name, age in ages if age)))
-    if health:
-        bits += [f"routine {_int(health.get('reported'))}/{_int(health.get('declared'))} 有产出",
-                 f"{_int(health.get('completed'))} 完成",
-                 "Prefect 状态不可用" if health.get("state_unavailable") else f"历史失败 {_int(health.get('failed'))} 次",
-                 f"{_int(health.get('review_debt'))} 待 review"]
     return ["---", " · ".join([*bits, note_tag(manifest)])]
 
 
@@ -555,7 +558,7 @@ def render(
     until = str((manifest.get("window") or {}).get("until", ""))
     known = {s["path"] for _, s in iter_sources(manifest) if s.get("path")}
     known |= {s["path"] for s in (manifest.get("context_sources") or {}).values() if isinstance(s, dict) and s.get("path")}
-    scan = [*_masthead(context, until), *(_brief(brief) if brief else []),
+    scan = [*_masthead(context, until), *(_brief(brief, titles) if brief else []),
             *_updates(manifest, titles)]
     if headline := md(overview.get("headline")):
         scan.append(f"> {headline}")
@@ -564,12 +567,12 @@ def render(
             scan += _section(section, known, titles)
         else:
             notes.append(f"overview section #{number} malformed; skipped")
-    scan += _frontier(overview.get("frontier_labs"), until)
+    sweep = ((manifest.get("context_sources") or {}).get("frontier_labs") or {}).get("path")
+    scan += [*frontier, *_refs([sweep], titles)] if (frontier := _frontier(overview.get("frontier_labs"), until)) else []
     scan += _routine_briefs(overview.get("routines") or [], manifest, titles)
-    scan += _articles(overview.get("articles") or [])
-    depth = [*_deep_read(overview.get("deep_read"), manifest),
-             *_index(manifest, titles), *_gaps(manifest, overview, notes),
-             *([] if curated else [NO_OVERVIEW]), *_colophon(manifest, context)]
-    fold = ["---", f"以上 {reading_minutes(chr(10).join(scan))} 分钟读完 · 以下 {reading_minutes(chr(10).join(depth))} 分钟，按需"]
+    scan += _articles(overview.get("articles") or [], titles)
+    notes += [str(warning) for warning in context.get("warnings") or []]  # a missing input changes no plan
+    depth = [*_deep_read(overview.get("deep_read"), manifest, titles), *_index(manifest, titles),
+             *_gaps(manifest, overview, notes), *_colophon(manifest, context)]
     head = f"---\ncurated: {'true' if curated else 'false'}\n---"
-    return "\n\n".join([head, f"# {digest_title(manifest)}", *scan, *fold, *depth]) + "\n"
+    return "\n\n".join([head, f"# {digest_title(manifest)}", *scan, "---", *depth]) + "\n"

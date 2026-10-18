@@ -31,7 +31,7 @@ backlog notes share the month folder as `-weekly-digest.md` and
 `-backlog-digest.md`) and is the source of truth; Reflect indexes it and its Git
 sync carries it to the phone. Its last line carries `#日报` (weekly notes
 `#周报`), the one tag Reflect filters it by. The public `daily-digest` routine
-(`routine_digest.py morning`, 06:20 local) creates the model-free note
+(`routine_digest.py morning`, 08:00 local) creates the model-free note
 (`curated: false`) when the day has none and never replaces one. This procedure
 re-renders the whole same-day note with the judged sections after approval.
 
@@ -73,7 +73,7 @@ never installed or synced during a run.
 The scheduled note refreshes quota through the configured CodexBar sources
 (Codex OAuth, Claude CLI `/usage`, Antigravity `auto`). Antigravity retains named
 model windows; unknown usage is omitted, and snapshots without resets expire in 24h.
-Quota, action groups, selected signals, and tech feeds have H2 Outline targets. The two-row quota table gives each window one column; snapshot ages appear once in the colophon.
+Quota, action groups, selected signals, and tech feeds have H2 Outline targets. The two-row quota table shows only windows running low, one column each; snapshot ages appear once in the colophon. Brief rows keep the action before its first ` — `; the source note behind them is the section's `来源` line.
 This step only reads the cache, because a failed refresh empties it. For weather, set
 `PLACE` to the city of today's first located calendar event, not an address,
 and replace `--no-weather` with `--place "$PLACE"`; an empty place falls back to
@@ -129,7 +129,8 @@ Each entry goes into `overview.json` under `articles`, not into a prose section:
     "minutes": "13 mins",
     "source": "<author or domain>",
     "why": "一行,说明它服务哪条 direction",
-    "abstract": "3-5 行中文总结"
+    "abstract": "3-5 行中文总结",
+    "sources": ["<vault note that already discusses it; omit when none>"]
   }
 ]
 ```
@@ -198,7 +199,7 @@ the brief) go into a top-level `gaps` array, one short line each:
 "gaps": ["Readwise CLI unavailable in the sandbox; no 新文章 this run."]
 ```
 
-The source index carries coverage flags and report links once; detailed excerpts and primary links stay in the reports. Other gaps appear under 输入缺口, below the fold. Never write a
+例程原文 embeds each of a daily window's linkable reports as a standalone `![[Title]]`, which reflect-open previews in place, with a failed run's status on the line above; feed, weekly, and unlinkable sources stay rows, without paths. Other gaps, context warnings included, appear under 输入缺口, below the fold. Never write a
 section for them: a missing input changes nothing the reader does in the next
 twelve hours, and a section above the fold spends that attention on
 bookkeeping.
@@ -275,6 +276,7 @@ verbatim with its frontmatter, coverage tails, and effort reports. Write
       "title": "中文标题，一句说清信号",
       "lane": "Research",
       "url": "https://the-signal's-source_url",
+      "sources": ["<the manifest path it came from>"],
       "facts": ["最多两点，各一到两行，数字带来源。", "第二点。"],
       "why": "Why This Matters 的中文改写，一到三句。"
     }
@@ -296,26 +298,26 @@ Rules:
 - **Chinese**, two facts at most, each fact a fact: a number, a filing, a
   date. The renderer drops a third fact silently.
 - **No metadata.** Nothing from frontmatter, coverage, universe, limitations,
-  or effort sections. The source index still links the full file.
+  or effort sections. 例程原文 embeds the full file.
 - The tech feed's items render after your picks deterministically from the
   manifest; do not copy them into `deep_read`. Each item's one-line note is
   read from the feed routine's own file (the summary after the link, inline
-  or indented, in Chinese); `write` reports a feed whose notes are missing or
+  or indented, in Chinese) and becomes the item's link text; `write` reports a feed whose notes are missing or
   not Chinese under 输入缺口 rather than rendering bare headlines silently.
 - When the window has no signal units, omit `deep_read`; the depth then lists
-  the tech feed, and the source index links every file.
+  the tech feed, and 例程原文 embeds the reports.
 
 Content rules:
 
-- **Cross-source first.** A bullet restating one report adds nothing the source
-  index does not already carry.
+- **Cross-source first.** A bullet restating one report adds nothing its embed
+  does not already show.
 - **Every claim traceable.** Each bullet names at least one `sources` path.
   Never assert a number or event the manifest does not contain. Findings the
   routine itself marked unverified stay marked.
 - **Name the gaps.** Routines log their blocked sources and skipped channels. A
   week where a monitor collected nothing is a finding.
-- **Budget.** The whole note targets an eight-minute read and the source index
-  already spends most of it, so the written sections are the short part. Weekly
+- **Budget.** The embeds already carry the reports, so the written sections
+  are the short part. Weekly
   carries seven days and earns proportionally more.
 - **Language.** Match the user's. Chinese topics and Chinese-language sources get
   Chinese. No em dashes.
@@ -395,9 +397,12 @@ verdict.
 - The renderer owns the Reflect-native shape, `[[Title]]` citations, inert
   untrusted text, HTTP(S)-only links, and source labels. Do not reproduce or
   override those deterministic presentation rules in the overview.
-- Per-routine lanes and exclusions live in `<paths.private_routines>/registry.toml`
-  (`digest = { lane = "...", include = false }`), not here. A correction there
-  is a private-state write and requires user approval.
+- Per-routine lanes, exclusions, and reading sections live in `<paths.private_routines>/registry.toml`
+  (`digest = { lane = "...", include = false, section = "<delta H2>", empty = "<no-update text>" }`),
+  not here. A report's `## 日报` (the archived-prompt adapter's reader section) is what the note embeds,
+  and `无更新` there leaves the report out; `section` and `empty` cover reports without one. A shown
+  section deeper than two levels or wider than four entries per level still embeds and is named under 输入缺口.
+  A correction there is a private-state write and requires user approval.
 - Autoevo maintenance output is excluded by default and
   belongs to `/autoevo-review`.
 - The brief's line cap never folds forfeitable items. When it reports `over_cap`,
