@@ -353,7 +353,7 @@ class AdapterTests(unittest.TestCase):
 
     def test_failed_process_job_reports_its_screened_output(self) -> None:
         # The flow-state message is all the session cue sees; "exited 1" alone hid the reason.
-        program = "print('api_key = abcdef0123456789xyz'); print('0 checked; 1 gaps; blocked'); raise SystemExit(1)"
+        program = "print('api_key = fixture-only-not-a-secret'); print('0 checked; 1 gaps; blocked'); raise SystemExit(1)"
         spec = adapter.ProcessSpec(
             schedule=adapter.ScheduleSpec("probe", "process", "public", ("0 0 * * *",), "UTC"),
             argv=(sys.executable, "-c", program), cwd=str(ROOT), environment={}, timeout_seconds=30, retry_safe=False,
@@ -361,7 +361,7 @@ class AdapterTests(unittest.TestCase):
         with mock.patch.object(adapter, "resolve_process", return_value=spec), redirect_stdout(io.StringIO()), \
                 self.assertRaisesRegex(adapter.ExecutionError, r"(?s)process job exited 1: .*1 gaps; blocked") as caught:
             adapter.execute_process_job("probe", "public", environ={"ATELIER_SKIP_CAFFEINATE": "1", "PATH": os.environ["PATH"]})
-        self.assertNotIn("abcdef0123456789xyz", str(caught.exception))
+        self.assertNotIn("fixture-only-not-a-secret", str(caught.exception))
 
     def test_the_local_digest_profile_cannot_read_quota(self) -> None:
         # The model uses the cache; the process routine owns live quota collection.

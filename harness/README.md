@@ -69,6 +69,7 @@ runtime mappings and hooks) in parallel processes, and offline Ruff when
 available, without reading the private vault.
 Its final line names skipped tests or Ruff; missing Node dependencies or Ruff reduce coverage.
 Lint re-runs under the project `.venv` when present, so a bare `python3` keeps full coverage.
+`ATELIER_SMOKE_JOBS` sets how many test modules run at once; the default is four.
 It does not verify live model calls, connectors, scheduled deployment, or
 publication privacy. Those require the selected workflow's own checks; see the
 [publication gate](../scripts/README.md#public-repo-privacy-gate) for that boundary.
