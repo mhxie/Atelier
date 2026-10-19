@@ -128,9 +128,41 @@ class BoundaryTests(unittest.TestCase):
                 native.install(archive)
                 self.assertEqual(plistlib.loads(target.read_bytes())["ProgramArguments"][0], str(root.resolve() / ".venv/bin/python"))
                 self.assertEqual((binary.stat().st_mode & 0o777, target.stat().st_mode & 0o777), (0o700, 0o600))
+                self.assertEqual(plistlib.loads(target.read_bytes())["StandardErrorPath"],
+                                 str(home / "Library/Logs/Atelier/com.atelier.observability.err"))
+                self.assertTrue((home / "Library/Logs/Atelier").is_dir())
                 binary.write_bytes(b"different binary")
                 with self.assertRaisesRegex(ValueError, "different installed Collector"):
                     native.install(archive)
+                binary.write_bytes(content)
+                target.write_text("an older rendering of the template", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "bootout and remove it, then install again"):
+                    native.install(archive)
+
+    def test_serve_trims_its_own_oversized_logs_before_exec(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-serve-test-") as temporary:
+            home, state = Path(temporary) / "home", Path(temporary) / "state"
+            logs = home / "Library/Logs/Atelier"
+            logs.mkdir(parents=True)
+            state.mkdir()
+            (logs / "com.atelier.observability.err").write_bytes(b"e" * (9 * 2**20))
+            (logs / "com.atelier.observability.out").write_bytes(b"o" * 10)
+            version = mock.Mock(returncode=0, stdout=f"otelcol-contrib version {native.VERSION}\n")
+            previous = os.umask(0o022)
+            os.umask(previous)
+            try:
+                with (mock.patch.object(Path, "home", return_value=home),
+                      mock.patch.object(native, "state_dir", return_value=state),
+                      mock.patch.object(native.subprocess, "run", return_value=version),
+                      mock.patch.object(native.os, "execv", side_effect=SystemExit(0)) as execv):
+                    with self.assertRaises(SystemExit):
+                        native.serve()
+            finally:
+                os.umask(previous)
+            execv.assert_called_once()
+            self.assertEqual((logs / "com.atelier.observability.err").stat().st_size, 0)
+            self.assertEqual((logs / "com.atelier.observability.err.prev").stat().st_size, 2**20)
+            self.assertEqual((logs / "com.atelier.observability.out").stat().st_size, 10)
 
 
 class SummaryTests(unittest.TestCase):

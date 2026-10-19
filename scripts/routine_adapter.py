@@ -956,9 +956,8 @@ def _model_result(path: Path, spec: ModelSpec, *, vault: Path, started_at: str) 
         value["output_file"] = relative.as_posix()
         output = receipts.artifact_path(value["output_file"], vault=vault,
                                         output_dir=spec.output_dir, file_pattern=spec.file_pattern)
-        value["artifact_sha256"] = receipts.content_hash(
-            output, not_before=datetime.fromisoformat(started_at).timestamp() - 2.0
-        )
+        value["artifact_sha256"], value["body_sha256"] = receipts.content_hash(
+            output, not_before=datetime.fromisoformat(started_at).timestamp() - 2.0)
         value["verification_scope"] = receipts.VERIFICATION_SCOPE
     except (OSError, ValueError) as exc:
         raise ExecutionError(f"artifact attestation failed: {exc}") from exc
@@ -1009,9 +1008,10 @@ def prior_delivery(spec: ModelSpec, *, cycle: str, vault: Path) -> dict[str, Any
     if verification == "blocked":
         return None
     if verification != "passed":
-        raise ExecutionError(
-            f"existing domain receipt verification is {verification or 'absent'}; effects review is required"
-        )
+        raise ExecutionError(f"existing domain receipt verification is {verification or 'absent'}; "
+                             "effects review is required")
+    if receipt.get("artifact_drift") in {"rewritten", "edited"}:  # a frontmatter stamp is not worth a line
+        print(f"routine artifact {receipt['artifact_drift']} after delivery: {spec.schedule.name} {cycle}", flush=True)
     print(f"routine cycle already verified: {spec.schedule.name} {cycle}", flush=True)
     return receipt
 
@@ -1137,6 +1137,7 @@ def execute_model(
         "outcome": outcome["outcome"],
         "output_file": outcome["output_file"],
         "artifact_sha256": outcome["artifact_sha256"],
+        "body_sha256": outcome["body_sha256"],
         "verification_scope": outcome["verification_scope"],
         "result_summary": outcome["summary"][:500],
         "skipped_inputs": outcome["skipped_inputs"],

@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -25,14 +27,26 @@ import routine_adapter as adapter  # noqa: E402
 ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT_RETRIES = 2
 PREFLIGHT_RETRY_DELAY_SECONDS = [5, 30]
+NOTIFY_ENV = "ATELIER_ROUTINE_NOTIFY"  # only the launchd wrapper sets it; tests and ad-hoc runs stay silent
 
 
-@task(
-    name="validate routine boundary",
-    retries=PREFLIGHT_RETRIES,
-    retry_delay_seconds=PREFLIGHT_RETRY_DELAY_SECONDS,
-    persist_result=False,
-)
+def notify_failure(flow: Any, flow_run: Any, state: Any) -> None:
+    """Post one desktop notification per failed run; Deferred is a scheduling outcome, not a failure."""
+    try:
+        if os.environ.get(NOTIFY_ENV) != "1" or getattr(state, "name", "") == "Deferred":
+            return
+        parameters = getattr(flow_run, "parameters", None) or {}
+        routine = parameters.get("routine") or parameters.get("job") or getattr(flow_run, "name", "routine")
+        detail = adapter.screened_log(str(getattr(state, "message", "") or ""))[:160]
+        text = " ".join(f"{routine}: {detail}".split()).replace("\\", "\\\\").replace('"', '\\"')
+        subprocess.run(["osascript", "-e", f'display notification "{text}" with title "Atelier routine failed"'],
+                       check=False, capture_output=True, timeout=10)
+    except Exception:  # noqa: BLE001 - a notification must never change a run's outcome
+        pass
+
+
+@task(name="validate routine boundary", retries=PREFLIGHT_RETRIES,
+      retry_delay_seconds=PREFLIGHT_RETRY_DELAY_SECONDS, persist_result=False)
 def prepare_model_task(routine: str) -> dict[str, Any]:
     """Retry only the preparation that cannot produce routine effects."""
     return adapter.prepare_model(routine)
@@ -63,29 +77,25 @@ def scheduled_cycle(timezone: str, explicit: str | None = None) -> str:
     return when.astimezone(ZoneInfo(timezone)).date().isoformat()
 
 
-@flow(name="atelier-model-routine", retries=0, persist_result=False, log_prints=True)
+@flow(name="atelier-model-routine", retries=0, persist_result=False, log_prints=True, on_failure=[notify_failure])
 def model_routine_flow(routine: str, cycle: str | None = None) -> dict[str, Any] | Any:
     payload = prepare_model_task(routine)
     spec = adapter.ModelSpec.from_payload(payload)
     selected_cycle = scheduled_cycle(spec.schedule.timezone, cycle)
     try:
-        return model_attempt_task.with_options(
-            timeout_seconds=spec.profile_values["timeout_seconds"] + 60
-        )(payload, selected_cycle, _flow_run_id())
+        return model_attempt_task.with_options(timeout_seconds=spec.profile_values["timeout_seconds"] + 60)(
+            payload, selected_cycle, _flow_run_id())
     except adapter.DeferredRun as exc:
         # The next cron occurrence, not an in-process loop, owns reconsideration.
         return Failed(name="Deferred", message=str(exc))
 
 
-@flow(name="atelier-process-routine", retries=0, persist_result=False, log_prints=True)
+@flow(name="atelier-process-routine", retries=0, persist_result=False, log_prints=True, on_failure=[notify_failure])
 def process_routine_flow(job: str, source: str) -> None:
     spec = adapter.resolve_process(job, source)
     retries = spec.schedule.retries if spec.retry_safe else 0
-    process_attempt_task.with_options(
-        retries=retries,
-        retry_delay_seconds=spec.schedule.retry_delay_seconds,
-        timeout_seconds=spec.timeout_seconds + 30,
-    )(job, source)
+    process_attempt_task.with_options(retries=retries, retry_delay_seconds=spec.schedule.retry_delay_seconds,
+                                      timeout_seconds=spec.timeout_seconds + 30)(job, source)
 
 
 def deployments(*, root: Path = ROOT, environ: dict[str, str] | None = None) -> list[Any]:
@@ -93,36 +103,20 @@ def deployments(*, root: Path = ROOT, environ: dict[str, str] | None = None) -> 
     result = []
     concurrency = ConcurrencyLimitConfig(limit=1, collision_strategy="ENQUEUE")
     for spec in models:
-        schedules = [
-            Cron(expression, timezone=spec.schedule.timezone, parameters={"routine": spec.schedule.name})
-            for expression in spec.schedule.cron
-        ]
-        result.append(
-            model_routine_flow.to_deployment(
-                name=spec.schedule.name,
-                schedules=schedules,
-                parameters={"routine": spec.schedule.name},
-                concurrency_limit=concurrency,
-                tags=["atelier", "model-routine"],
-                description=f"Fixed headless-{adapter.model_runtime(spec)} local Atelier routine.",
-            )
-        )
+        parameters = {"routine": spec.schedule.name}
+        schedules = [Cron(expression, timezone=spec.schedule.timezone, parameters=parameters) for expression in spec.schedule.cron]
+        result.append(model_routine_flow.to_deployment(
+            name=spec.schedule.name, schedules=schedules, parameters=parameters, concurrency_limit=concurrency,
+            tags=["atelier", "model-routine"],
+            description=f"Fixed headless-{adapter.model_runtime(spec)} local Atelier routine.",
+        ))
     for spec in processes:
         parameters = {"job": spec.schedule.name, "source": spec.schedule.source}
-        schedules = [
-            Cron(expression, timezone=spec.schedule.timezone, parameters=parameters)
-            for expression in spec.schedule.cron
-        ]
-        result.append(
-            process_routine_flow.to_deployment(
-                name=spec.schedule.name,
-                schedules=schedules,
-                parameters=parameters,
-                concurrency_limit=concurrency,
-                tags=["atelier", "deterministic-routine"],
-                description="Deterministic local Atelier maintenance job.",
-            )
-        )
+        schedules = [Cron(expression, timezone=spec.schedule.timezone, parameters=parameters) for expression in spec.schedule.cron]
+        result.append(process_routine_flow.to_deployment(
+            name=spec.schedule.name, schedules=schedules, parameters=parameters, concurrency_limit=concurrency,
+            tags=["atelier", "deterministic-routine"], description="Deterministic local Atelier maintenance job.",
+        ))
     return result
 
 
@@ -132,9 +126,7 @@ def validation_payload(*, root: Path = ROOT, environ: dict[str, str] | None = No
         for expression in spec.schedule.cron:
             Cron(expression, timezone=spec.schedule.timezone)
     return {
-        "valid": True,
-        "engine": "prefect",
-        "global_concurrency": 1,
+        "valid": True, "engine": "prefect", "global_concurrency": 1,
         "models": [
             {
                 "name": spec.schedule.name,
@@ -178,20 +170,13 @@ def main(argv: list[str] | None = None) -> int:
             if args.action == "run":
                 if args.cycle:
                     adapter.validate_cycle_id(args.cycle)
-                flow_run = run_deployment(
-                    f"{model_routine_flow.name}/{args.routine}",
-                    parameters={"routine": args.routine, "cycle": args.cycle},
-                    as_subflow=False,
-                )
+                flow_run = run_deployment(f"{model_routine_flow.name}/{args.routine}", as_subflow=False,
+                                          parameters={"routine": args.routine, "cycle": args.cycle})
                 state = flow_run.state
                 if state is None:
                     raise adapter.ExecutionError("manual deployment run returned no Prefect state")
-                print(
-                    json.dumps(
-                        {"id": str(flow_run.id), "state": state.name, "type": state.type.value, "message": state.message},
-                        sort_keys=True,
-                    )
-                )
+                print(json.dumps({"id": str(flow_run.id), "state": state.name, "type": state.type.value,
+                                  "message": state.message}, sort_keys=True))
                 return 0 if state.is_completed() else 1
             configured = deployments()
             # One Runner-wide slot preserves the Mac's previous single-job resource

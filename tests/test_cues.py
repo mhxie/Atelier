@@ -10,7 +10,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -332,21 +332,25 @@ def _write_receipt(
     verification: str = "passed",
     recorded_routine: str | None = None,
     contract_version: int = 3,
+    completed_at: str | None = None,
+    scope: str = "artifact-body",
+    text: str = "fixture artifact\n",
 ) -> None:
     directory = root / "_meta" / "routine_receipts" / routine
     directory.mkdir(parents=True, exist_ok=True)
     output = root / "x" / f"{cycle}.md"
     output.parent.mkdir(exist_ok=True)
-    output.write_text("fixture artifact\n", encoding="utf-8")
-    binding = (
-        f'artifact_sha256 = "{hashlib.sha256(output.read_bytes()).hexdigest()}"\n'
-        'verification_scope = "artifact-bytes"\n'
-    ) if contract_version == 4 else ""
+    output.write_text(text, encoding="utf-8")
+    digest = hashlib.sha256(output.read_bytes()).hexdigest()
+    body = hashlib.sha256(cues.routine_receipts.body_bytes(output.read_bytes())).hexdigest()
+    binding = (f'artifact_sha256 = "{digest}"\nverification_scope = "{scope}"\n'
+               + (f'body_sha256 = "{body}"\n' if scope == "artifact-body" else "")) if contract_version == 4 else ""
+    completed = f'completed_at = "{completed_at}"\n' if completed_at else ""
     (directory / f"{cycle}.toml").write_text(
         f"contract_version = {contract_version}\n"
         f'routine = "{recorded_routine or routine}"\n'
         f'cycle_id = "{cycle}"\nverification = "{verification}"\n'
-        f'output_file = "x/{cycle}.md"\n{binding}',
+        f'output_file = "x/{cycle}.md"\n{binding}{completed}',
         encoding="utf-8",
     )
 
@@ -388,7 +392,7 @@ class LocalReceiptTests(unittest.TestCase):
 
     def test_invalid_latest_evidence_never_falls_back_to_an_older_success(self):
         _write_receipt(self.root, "sample", "2026-08-19", contract_version=4)
-        for problem in ("changed", "empty", "missing", "hash", "scope", "version", "corrupt", "declaration"):
+        for problem in ("empty", "missing", "hash", "scope", "version", "corrupt", "declaration"):
             with self.subTest(problem=problem):
                 _write_receipt(self.root, "sample", "2026-08-20", contract_version=4)
                 path = self.root / "_meta/routine_receipts/sample/2026-08-20.toml"
@@ -396,10 +400,7 @@ class LocalReceiptTests(unittest.TestCase):
                 declaration = self.DECLARATION
                 valid = cues._latest_local_receipt(self.root, "sample", declaration)
                 self.assertEqual(valid[1]["verification"], "passed")
-                if problem == "changed":
-                    original = output.read_bytes()
-                    output.write_bytes(b"!" + original[1:])
-                elif problem == "empty":
+                if problem == "empty":
                     output.write_bytes(b"")
                 elif problem == "missing":
                     output.unlink()
@@ -409,7 +410,7 @@ class LocalReceiptTests(unittest.TestCase):
                     text = path.read_text()
                     text = {
                         "hash": text.replace("artifact_sha256", "ignored_hash"),
-                        "scope": text.replace("artifact-bytes", "business-outcome"),
+                        "scope": text.replace("artifact-body", "business-outcome"),
                         "version": text.replace("contract_version = 4", "contract_version = 99"),
                         "corrupt": "not valid toml",
                     }[problem]
@@ -417,8 +418,77 @@ class LocalReceiptTests(unittest.TestCase):
                 found = cues._latest_local_receipt(self.root, "sample", declaration)
                 self.assertEqual(found[0], date(2026, 8, 20))
                 self.assertEqual(found[1]["verification"], "needs_review")
+                self.assertTrue(found[1]["reason"], problem)  # the cue carries why, never a bare label
+                if problem == "scope":
+                    self.assertIn("scope", found[1]["reason"])
                 with mock.patch.object(cues, "_routine_rows", return_value=([declaration], None)):
                     self.assertEqual(cues._recap_local_runs(self.root, date(2026, 8, 20)), [])
+
+    def test_missed_cue_names_the_verification_reason(self):
+        row = {**self.DECLARATION, "execution": "local", "runner": "model", "cron": "0 5 * * *", "timezone": "UTC"}
+        _write_receipt(self.root, "sample", "2026-08-21", contract_version=4)
+        (self.root / "_meta/routine_receipts/sample/2026-08-21.toml").write_text("not valid toml", encoding="utf-8")
+        now = datetime(2026, 8, 21, 12, tzinfo=ZoneInfo("UTC"))
+        with mock.patch.object(cues, "_routine_rows", return_value=([row], None)):
+            cue, debug = cues.check_local_routine_missed(self.root, date(2026, 8, 21), now=now)
+        self.assertIn("(receipt verification needs_review on 2026-08-21: ", cue.message)
+        self.assertNotIn("needs_review on 2026-08-21)", cue.message)
+        self.assertIn("verification=needs_review: ", debug)
+
+    def test_changed_artifact_bytes_are_drift_not_a_missing_delivery(self):
+        row = {**self.DECLARATION, "label": "Sample", "execution": "local", "runner": "model",
+               "adapter": "archived-prompt", "cron": "0 5 * * *", "timezone": "UTC"}
+        output = self.root / "x/2026-08-20.md"
+        _write_receipt(self.root, "sample", "2026-08-20", contract_version=4)
+        stamp = output.stat().st_mtime
+        delivered = datetime.fromtimestamp(stamp).astimezone().isoformat(timespec="seconds")
+        _write_receipt(self.root, "sample", "2026-08-20", contract_version=4, completed_at=delivered)
+        path = self.root / "_meta/routine_receipts/sample/2026-08-20.toml"
+        before = path.read_bytes()
+        output.write_bytes(b"!" + output.read_bytes()[1:])
+        os.utime(output, (stamp, stamp))  # the external writer restored the delivery mtime
+        found = cues._latest_local_receipt(self.root, "sample", row)
+        self.assertEqual((found[1]["verification"], found[1]["artifact_drift"]), ("passed", "rewritten"))
+        self.assertEqual(path.read_bytes(), before)
+        now = datetime(2026, 8, 20, 12, tzinfo=ZoneInfo("UTC"))
+        with mock.patch.object(cues, "_routine_rows", return_value=([row], None)):
+            self.assertIsNone(cues.check_local_routine_missed(self.root, date(2026, 8, 20), now=now)[0])
+            self.assertEqual(len(cues._recap_local_runs(self.root, date(2026, 8, 20))), 1)
+            cue, debug = cues.check_artifact_drift(self.root, date(2026, 8, 20))
+            self.assertEqual((cue.key, cue.severity, debug), ("artifact_drift", "soft", "rewritten=1; edited=0"))
+            self.assertIn("rewritten with mtime preserved: 1, edited later: 0): Sample (2026-08-20)", cue.message)
+            # A newer clean cycle must not hide an older drift (the window follows the artifact's change time).
+            _write_receipt(self.root, "sample", "2026-08-21", contract_version=4)
+            self.assertIn("Sample (2026-08-20)", cues.check_artifact_drift(self.root, date(2026, 8, 21))[0].message)
+            self.assertIsNone(cues.check_artifact_drift(self.root, date.today() + timedelta(days=30))[0])  # aged out
+            output.write_bytes(b"?" + output.read_bytes()[1:])
+            os.utime(output, (stamp + 600, stamp + 600))
+            older = cues._latest_local_receipt(self.root, "sample", row, through=date(2026, 8, 20))
+            self.assertEqual(older[1]["artifact_drift"], "edited")
+            self.assertEqual(cues.check_artifact_drift(self.root, date(2026, 8, 21))[1], "rewritten=0; edited=1")
+            # Reflect's stamp: frontmatter only, mtime preserved. Drift of kind "frontmatter", which no cue lists.
+            _write_receipt(self.root, "sample", "2026-08-20", contract_version=4, completed_at=delivered)
+            output.write_bytes(b"---\naiSummary: stamped\n---\n\n" + output.read_bytes())
+            os.utime(output, (stamp, stamp))
+            stamped = cues._latest_local_receipt(self.root, "sample", row, through=date(2026, 8, 20))
+            self.assertEqual(stamped[1]["artifact_drift"], "frontmatter")
+            self.assertEqual(cues.check_artifact_drift(self.root, date(2026, 8, 20)), (None, "no artifact drift within window"))
+            # The common shape: the routine wrote its own block, Reflect re-serialized it and added a key.
+            _write_receipt(self.root, "sample", "2026-08-20", contract_version=4, completed_at=delivered, text="---\na: 1\n---\n# T\n")
+            output.write_bytes(b"---\na: 1\naiSummary: s\n---\n\n# T\n")
+            os.utime(output, (stamp, stamp))
+            restamped = cues._latest_local_receipt(self.root, "sample", row, through=date(2026, 8, 20))
+            self.assertEqual(restamped[1]["artifact_drift"], "frontmatter")
+            output.write_bytes(b"---\na: 1\naiSummary: s\n---\n\n# T!\n")  # one body byte: a real change
+            os.utime(output, (stamp, stamp))
+            self.assertEqual(cues.check_artifact_drift(self.root, date(2026, 8, 20))[1], "rewritten=1; edited=0")
+            # A bytes-scope receipt still reads as drift for replay, but cannot be re-judged, so the cue skips it.
+            _write_receipt(self.root, "sample", "2026-08-20", contract_version=4, completed_at=delivered, scope="artifact-bytes")
+            output.write_bytes(b"!" + output.read_bytes()[1:])
+            os.utime(output, (stamp, stamp))
+            legacy = cues._latest_local_receipt(self.root, "sample", row, through=date(2026, 8, 20))
+            self.assertEqual(legacy[1]["artifact_drift"], "rewritten")
+            self.assertEqual(cues.check_artifact_drift(self.root, date(2026, 8, 20))[1], "no artifact drift within window")
 
     def test_autoevo_consumers_use_verified_json_and_do_not_hide_latest_failure(self):
         path = _autoevo_result(self.root, "2026-08-20")
@@ -690,6 +760,18 @@ class LocalRoutineMissedTests(unittest.TestCase):
             self.assertIsNone(cues.check_routine_hitrate(vault, now.date(), now=now)[0])
             cue, _ = cues.check_local_routine_missed(vault, now.date(), now=now)
             self.assertIsNotNone(cue)
+
+    def test_conditional_output_routines_skip_cadence_alerts_but_keep_run_state_checks(self):
+        with tempfile.TemporaryDirectory(prefix="atelier-cues-") as tmp:
+            vault = self._vault(tmp)
+            watch = vault / "_tools/routines/registry.toml"
+            now = datetime(2026, 8, 31, 22, 0).astimezone()
+            (vault / "x/2026-08-01.md").write_text("old finding", encoding="utf-8")
+            self.assertIsNotNone(cues.check_routine_staleness(vault, now.date())[0])
+            watch.write_text(self.WATCH + "\nconditional_output = true\n", encoding="utf-8")
+            self.assertIsNone(cues.check_routine_staleness(vault, now.date())[0])
+            self.assertIsNone(cues.check_routine_hitrate(vault, now.date(), now=now)[0])
+            self.assertIsNotNone(cues.check_local_routine_missed(vault, now.date(), now=now)[0])
 
 
 class VaultLayoutCueTest(unittest.TestCase):

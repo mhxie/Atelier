@@ -56,12 +56,12 @@ a routine:
 uv sync --frozen
 uv run --frozen python scripts/routine_prefect.py validate --json
 
-mkdir -p "$HOME/Library/LaunchAgents"
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/Atelier"
 ATELIER_ROOT="$(pwd -P)"
 for NAME in prefect-server prefect-routines; do
   SOURCE="scripts/launchd/com.atelier.$NAME.plist"
   TARGET="$HOME/Library/LaunchAgents/com.atelier.$NAME.plist"
-  sed "s|__ATELIER_ROOT__|$ATELIER_ROOT|g" "$SOURCE" > "$TARGET.candidate"
+  sed -e "s|__ATELIER_ROOT__|$ATELIER_ROOT|g" -e "s|__HOME__|$HOME|g" "$SOURCE" > "$TARGET.candidate"
   plutil -lint "$TARGET.candidate"
 done
 ```
@@ -151,18 +151,24 @@ PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen prefect flow-run ls 
 PREFECT_API_URL=http://127.0.0.1:4200/api   uv run --frozen python scripts/routine_status.py
 ```
 
-Aggregate service logs are machine-local:
+Service logs are machine-local and survive a reboot; each service trims its
+own log past 8 MiB at start, not while it stays up:
 
 ```text
-/tmp/com.atelier.prefect-server.out
-/tmp/com.atelier.prefect-server.err
-/tmp/com.atelier.prefect-routines.out
-/tmp/com.atelier.prefect-routines.err
+~/Library/Logs/Atelier/com.atelier.prefect-server.{out,err}
+~/Library/Logs/Atelier/com.atelier.prefect-routines.{out,err}
+~/Library/Logs/Atelier/com.atelier.observability.{out,err}
 ```
 
-Execution status and logs belong to Prefect. A compact receipt under
-`$OV/_meta/routine_receipts/<routine>/<cycle>.toml` attests only domain
-delivery and output verification; it is not a second run-state ledger.
+The runner posts a macOS notification per Failed run, never for Deferred;
+`ATELIER_ROUTINE_NOTIFY=0` in `harness/env.local.sh` silences it. Execution
+status and logs belong to Prefect. A compact receipt
+under `$OV/_meta/routine_receipts/<routine>/<cycle>.toml` attests only domain
+delivery and output verification; it is not a second run-state ledger. An
+artifact that changes after delivery still reads as delivered. Reflect's
+`aiSummary` frontmatter stamp, which keeps the mtime, is `frontmatter` drift that
+nothing lists; a body change carries a `rewritten` or `edited` note that the cue
+of that name lists, judged only for receipts written with `artifact-body` scope.
 
 The current M3/16 GB envelope is deliberately serial: every deployment queues
 collisions at one and the runner allows one active run across all deployments.

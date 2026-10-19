@@ -377,9 +377,10 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual((result["verification"], stored["output_file"]), ("passed", f"outputs/{CYCLE}.md"))
         self.assertEqual(stored["prefect_flow_run_id"], "flow-1")
         self.assertEqual(stored["contract_version"], 4)
-        self.assertEqual(stored["verification_scope"], "artifact-bytes")
+        self.assertEqual(stored["verification_scope"], "artifact-body")
         output = fixture.vault / stored["output_file"]
         self.assertEqual(stored["artifact_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
+        self.assertEqual(stored["body_sha256"], stored["artifact_sha256"])  # the fixture artifact has no frontmatter
         self.assertNotIn("status", stored)
 
     def test_noop_that_skipped_inputs_leaves_the_cycle_retryable(self) -> None:
@@ -490,16 +491,14 @@ class AdapterTests(unittest.TestCase):
         original = output.read_bytes()
         outside = Path(fixture.temporary.name) / "outside.md"
         outside.write_bytes(original)
-        for problem in ("changed", "empty", "missing", "escape", "declaration", "scope", "hash",
+        for problem in ("empty", "missing", "escape", "declaration", "scope", "hash",
                         "version", "identity", "corrupt", "dangling-receipt"):
             with self.subTest(problem=problem):
                 path.unlink(missing_ok=True)
                 output.unlink(missing_ok=True)
                 output.write_bytes(original)
                 receipt = dict(delivered)
-                if problem == "changed":
-                    output.write_bytes(b"!" + original[1:])
-                elif problem == "empty":
+                if problem == "empty":
                     output.write_bytes(b"")
                 elif problem == "missing":
                     output.unlink()
@@ -527,6 +526,35 @@ class AdapterTests(unittest.TestCase):
                     with self.assertRaisesRegex(adapter.ExecutionError, "effects review is required"):
                         fixture.execute(payload, flow_run_id="flow-replay")
                 launch.assert_not_called()
+
+    def test_drifted_artifact_counts_as_delivered_and_is_not_replayed(self) -> None:
+        """Bytes that move after attestation are drift, not a missing delivery; the model never reruns."""
+        fixture = Fixture()
+        self.addCleanup(fixture.close)
+        payload = adapter.prepare_model("sample", root=fixture.root, environ=fixture.env)
+        delivered = fixture.execute(payload, flow_run_id="flow-original")
+        path = adapter.receipt_path(fixture.vault, "sample", CYCLE)
+        output = fixture.vault / delivered["output_file"]
+        before, stamp, original = path.read_bytes(), output.stat().st_mtime, output.read_bytes()
+        output.write_bytes(b"---\naiSummary: stamped\n---\n\n" + original)
+        os.utime(output, (stamp, stamp))  # Reflect's stamp: frontmatter only, mtime preserved
+        with mock.patch.object(adapter, "execute_observed_model") as launch, redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(fixture.execute(payload, flow_run_id="flow-replay")["artifact_drift"], "frontmatter")
+        launch.assert_not_called()
+        self.assertNotIn("after delivery", out.getvalue())
+        output.write_bytes(b"!" + original[1:])
+        os.utime(output, (stamp, stamp))  # an external writer restored the delivery mtime
+        with mock.patch.object(adapter, "execute_observed_model") as launch, redirect_stdout(io.StringIO()) as out:
+            reused = fixture.execute(payload, flow_run_id="flow-replay")
+        launch.assert_not_called()
+        self.assertEqual((reused["verification"], reused["artifact_drift"]), ("passed", "rewritten"))
+        self.assertIn("routine artifact rewritten after delivery: sample", out.getvalue())
+        self.assertEqual(path.read_bytes(), before)
+        output.write_bytes(b"?" + output.read_bytes()[1:])
+        os.utime(output, (stamp + 600, stamp + 600))
+        with mock.patch.object(adapter, "execute_observed_model") as launch, redirect_stdout(io.StringIO()):
+            self.assertEqual(fixture.execute(payload, flow_run_id="flow-replay")["artifact_drift"], "edited")
+        launch.assert_not_called()
 
     def test_failed_envelope_preserves_bounded_screened_reason(self) -> None:
         fixture = Fixture()
@@ -562,7 +590,7 @@ class AdapterTests(unittest.TestCase):
         value = adapter._model_result(
             result, spec, vault=alias, started_at=datetime.now().astimezone().isoformat()
         )
-        self.assertEqual(value["verification_scope"], "artifact-bytes")
+        self.assertEqual(value["verification_scope"], "artifact-body")
         self.assertEqual(value["artifact_sha256"], hashlib.sha256(output.read_bytes()).hexdigest())
 
         content_hash = adapter.receipts.content_hash
@@ -587,14 +615,13 @@ class AdapterTests(unittest.TestCase):
         self.addCleanup(fixture.close)
         output = fixture.vault / "artifact.md"
         output.write_bytes(b"before")
-        digest = hashlib.file_digest
+        body_bytes = adapter.receipts.body_bytes
 
-        def change_after_read(handle, algorithm):
-            result = digest(handle, algorithm)
-            output.write_bytes(b"after")
-            return result
+        def change_after_read(data):
+            output.write_bytes(b"after")  # between the read and the post-read stat comparison
+            return body_bytes(data)
 
-        with mock.patch.object(adapter.receipts.hashlib, "file_digest", side_effect=change_after_read):
+        with mock.patch.object(adapter.receipts, "body_bytes", side_effect=change_after_read):
             with self.assertRaisesRegex(ValueError, "changed during verification"):
                 adapter.receipts.content_hash(output)
 
@@ -911,10 +938,13 @@ retry_safe = false
             self.assertTrue(plist["RunAtLoad"])
             self.assertTrue(plist["KeepAlive"])
             self.assertEqual(plist["ProgramArguments"][-1], mode)
+            for stream in ("StandardOutPath", "StandardErrorPath"):
+                self.assertTrue(plist[stream].startswith(f"__HOME__/Library/Logs/Atelier/com.atelier.{name}."), plist[stream])
         service = (ROOT / "scripts/routine_prefect_service.sh").read_text(encoding="utf-8")
         self.assertIn("prefect server start --host 127.0.0.1", service)
         self.assertIn('PREFECT_SERVER_ANALYTICS_ENABLED="${ATELIER_PREFECT_SERVER_ANALYTICS_ENABLED:-false}"', service)
         self.assertIn("scripts/routine_prefect.py serve", service)
+        self.assertIn('export ATELIER_ROUTINE_NOTIFY="${ATELIER_ROUTINE_NOTIFY:-1}"', service)
 
     def test_launchd_local_path_config_finds_clis_and_preserves_overrides(self) -> None:
         fixture = Fixture()
@@ -1000,6 +1030,30 @@ retry_safe = false
         with mock.patch.object(status, "recent_runs", return_value=[]) as recent, redirect_stdout(io.StringIO()):
             self.assertEqual(status.main(["--limit", str(status.MAX_LIMIT), "--json"]), 0)
         self.assertEqual(recent.call_args.kwargs["limit"], status.MAX_LIMIT)
+
+
+class NotificationTests(unittest.TestCase):
+    def test_failure_notification_is_opt_in_screened_and_never_raises(self) -> None:
+        state = SimpleNamespace(name="Failed", message="process job exited 1:\nsample-job PRIVATE_CANARY")
+        run = SimpleNamespace(parameters={"job": "sample-job", "source": "x"}, name="rational-earthworm")
+        with mock.patch.dict(os.environ, {}, clear=False), mock.patch.object(orchestration.subprocess, "run") as command:
+            os.environ.pop(orchestration.NOTIFY_ENV, None)
+            orchestration.notify_failure(None, run, state)
+            command.assert_not_called()
+        with (mock.patch.dict(os.environ, {orchestration.NOTIFY_ENV: "1"}),
+              mock.patch.object(orchestration.subprocess, "run") as command,
+              mock.patch.object(adapter, "screened_log", side_effect=lambda text: text.replace("PRIVATE_CANARY", "[screened]"))):
+            orchestration.notify_failure(None, run, SimpleNamespace(name="Deferred", message="session lock"))
+            command.assert_not_called()
+            orchestration.notify_failure(None, run, state)
+            script = command.call_args.args[0][2]
+            self.assertEqual(command.call_args.args[0][:2], ["osascript", "-e"])
+            self.assertIn('"sample-job: process job exited 1: sample-job [screened]"', script)
+            self.assertNotIn("PRIVATE_CANARY", script)
+            command.side_effect = OSError("no osascript")
+            orchestration.notify_failure(None, run, state)
+        for flow_object in (orchestration.model_routine_flow, orchestration.process_routine_flow):
+            self.assertIn(orchestration.notify_failure, flow_object.on_failure_hooks)
 
 
 class RoutineReportTests(unittest.TestCase):

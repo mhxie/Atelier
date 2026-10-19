@@ -418,10 +418,8 @@ def _latest_local_receipt(ov: Path, routine: str, declaration: dict | None = Non
                                                file_pattern=declaration.get("file_pattern", "*.md"))
         except routine_receipts.IdentityMismatch:
             continue
-        except (OSError, ValueError, autoevo_verify.VerificationError):
-            if is_autoevo:
-                return None
-            return receipt_date, {"verification": "needs_review"}, receipt_path
+        except (OSError, ValueError, autoevo_verify.VerificationError) as exc:
+            return None if is_autoevo else (receipt_date, {"verification": "needs_review", "reason": str(exc)}, receipt_path)
         return receipt_date, receipt, receipt_path
     return None
 
@@ -453,7 +451,7 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
 
     for r in routines:
         name = r.get("name", "?")
-        if r.get("adapter") == "autoevo":
+        if r.get("adapter") == "autoevo" or r.get("conditional_output"):
             continue  # Conditional notes; Prefect and receipt checks own execution health.
         label = r.get("label", r.get("name", "?"))
         output_dir = r.get("output_dir")
@@ -492,19 +490,13 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
         if latest_receipt is not None:
             receipt_date, receipt, _receipt_path = latest_receipt
             if receipt.get("verification") == "passed" and receipt_date > latest_date:
-                stale.append(
-                    f"{label} (verified receipt {receipt_date} newer than output {latest_date})"
-                )
-                debug_parts.append(
-                    f"{label}: verified receipt={receipt_date} > output={latest_date}"
-                )
+                stale.append(f"{label} (verified receipt {receipt_date} newer than output {latest_date})")
+                debug_parts.append(f"{label}: verified receipt={receipt_date} > output={latest_date}")
                 continue
 
         age = (today - latest_date).days
         if age > threshold:
-            stale.append(
-                f"{label} (last output {age}d ago, expected every {cadence_days}d)"
-            )
+            stale.append(f"{label} (last output {age}d ago, expected every {cadence_days}d)")
             debug_parts.append(f"{label}: age={age}d > threshold={threshold}d")
         else:
             debug_parts.append(f"{label}: age={age}d <= threshold={threshold}d; ok")
@@ -513,19 +505,10 @@ def check_routine_staleness(ov: Path, today: date) -> tuple[Cue | None, str]:
     if not stale:
         return None, debug
 
-    listing = _first_three(stale)
-
+    message = (f"{len(stale)} routine(s) with missing/stale output: {_first_three(stale)}. Check the active scheduler "
+               "in the private routine registry, then inspect its local Prefect state or cloud session and connector logs.")
     return (
-        Cue(
-            key="routine_staleness",
-            severity="hard",
-            command_path="_tools/routines/registry.toml",
-            message=(
-                f"{len(stale)} routine(s) with missing/stale output: {listing}. "
-                f"Check the active scheduler in the private routine registry, then inspect its "
-                f"local Prefect state or cloud session and connector logs."
-            ),
-        ),
+        Cue(key="routine_staleness", severity="hard", command_path="_tools/routines/registry.toml", message=message),
         f"stale={len(stale)}; {debug}",
     )
 
@@ -547,7 +530,7 @@ def check_routine_hitrate(
     debug_parts: list[str] = []
 
     for r in routines:
-        if r.get("adapter") == "autoevo":
+        if r.get("adapter") == "autoevo" or r.get("conditional_output"):
             continue  # Empty verified cycles intentionally have no Markdown output.
         label = r.get("label", r.get("name", "?"))
         output_dir = r.get("output_dir")
@@ -946,24 +929,54 @@ def check_local_routine_missed(
             missed.append(f"{label} (deferred on {cycle}: {blocker})")
             debug_parts.append(f"{label}: {cycle} blocked")
         else:
-            missed.append(f"{label} (receipt verification {verification or 'unknown'} on {cycle})")
-            debug_parts.append(f"{label}: {cycle} verification={verification}")
+            reason = f": {receipt['reason']}" if receipt.get("reason") else ""
+            missed.append(f"{label} (receipt verification {verification or 'unknown'} on {cycle}{reason})")
+            debug_parts.append(f"{label}: {cycle} verification={verification}{reason}")
     if not missed:
         return None, "; ".join(debug_parts)
-    listing = _first_three(missed)
-    return (
-        Cue(
-            key="local_routine_missed",
-            severity="soft",
-            command_path="scripts/launchd/README.md",
-            message=(
-                f"{len(missed)} local routine(s) lack a verified artifact: {listing}. "
-                "Inspect the authoritative Prefect flow state and screened logs before rerunning; "
-                "a model attempt is never retried automatically."
-            ),
-        ),
-        f"missed={len(missed)}; {'; '.join(debug_parts)}",
-    )
+    message = (f"{len(missed)} local routine(s) lack a verified artifact: {_first_three(missed)}. Inspect the "
+               "authoritative Prefect flow state and screened logs before rerunning; a model attempt is never retried automatically.")
+    return (Cue(key="local_routine_missed", severity="soft", command_path="scripts/launchd/README.md", message=message),
+            f"missed={len(missed)}; {'; '.join(debug_parts)}")
+
+
+DRIFT_WINDOW = timedelta(days=14)  # measured from the artifact's change time, so cadence neither hides nor ages out a drift
+
+
+def check_artifact_drift(ov: Path, today: date) -> tuple[Cue | None, str]:
+    """Surface delivered artifacts whose body changed after attestation; the delivery itself stands."""
+    rows, skip = _routine_rows(ov)
+    if skip:
+        return None, skip
+    drifted: dict[str, list[str]] = {"rewritten": [], "edited": []}
+    since = datetime.combine(today - DRIFT_WINDOW, datetime.min.time()).astimezone().timestamp()
+    for row in rows:
+        if row.get("execution") != "local" or row.get("runner") != "model" or row.get("adapter") == "autoevo":
+            continue
+        name = str(row.get("name", "?"))
+        for path in sorted((_meta_dir(ov) / "routine_receipts" / name).glob("*.toml")):  # every cycle, not only the latest
+            try:
+                with path.open("rb") as handle:
+                    fields = tomllib.load(handle)
+                # Only a body-scope receipt can tell Reflect's frontmatter stamp from a clobber; stat before the costlier read.
+                if (fields.get("verification_scope") != routine_receipts.VERIFICATION_SCOPE
+                        or (ov / str(fields.get("output_file") or "")).stat().st_ctime < since):
+                    continue
+                receipt = routine_receipts.read(path, routine=name, cycle=path.stem, vault=ov,
+                                                output_dir=row.get("output_dir"), file_pattern=row.get("file_pattern", "*.md"))
+            except (OSError, ValueError):
+                continue
+            kind = receipt.get("artifact_drift")
+            if kind in drifted:
+                drifted[kind].append(f"{row.get('label', name)} ({path.stem})")
+    rewritten, edited = len(drifted["rewritten"]), len(drifted["edited"])
+    if not rewritten + edited:
+        return None, "no artifact drift within window"
+    message = (f"{rewritten + edited} delivered artifact(s) whose body changed after attestation (rewritten with mtime preserved: "
+               f"{rewritten}, edited later: {edited}): {_first_three([*drifted['rewritten'], *drifted['edited']])}. "
+               "Receipts still attest delivery; identify the external writer before trusting artifact bytes.")
+    return (Cue(key="artifact_drift", severity="soft", command_path="scripts/routine_receipts.py", message=message),
+            f"rewritten={rewritten}; edited={edited}")
 
 
 def check_career_growth(ov: Path, today: date) -> tuple[Cue | None, str]:
@@ -1141,15 +1154,9 @@ def check_routine_failures(ov: Path, today: date) -> tuple[Cue | None, str]:
         return " ".join(message.split())[:160]
 
     listing = _first_three([f"{run['routine']} ({run['state_name']}: {detail(run)})" for run in failed])
-    return (
-        Cue(
-            key="routine_failures",
-            severity="soft",
-            command_path="scripts/launchd/README.md",
-            message=f"{len(failed)} local routine(s) have a latest failed Prefect run: {listing}. Review effects before manually rerunning a model attempt.",
-        ),
-        f"queried={len(runs)} latest={len(latest)} failed={len(failed)}",
-    )
+    message = f"{len(failed)} local routine(s) have a latest failed Prefect run: {listing}. Review effects before manually rerunning a model attempt."
+    return (Cue(key="routine_failures", severity="soft", command_path="scripts/launchd/README.md", message=message),
+            f"queried={len(runs)} latest={len(latest)} failed={len(failed)}")
 
 
 CHECKS = [
@@ -1167,6 +1174,7 @@ CHECKS = [
     ("wiki_attention", check_wiki_attention),
     ("autoevo_ran", check_autoevo_ran),
     ("local_routine_missed", check_local_routine_missed),
+    ("artifact_drift", check_artifact_drift),
     ("routine_failures", check_routine_failures),
     ("career_growth", check_career_growth),
 ]

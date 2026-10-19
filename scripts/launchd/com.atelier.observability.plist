@@ -19,8 +19,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/dev/null</string>
+    <string>__HOME__/Library/Logs/Atelier/com.atelier.observability.out</string>
     <key>StandardErrorPath</key>
-    <string>/dev/null</string>
+    <string>__HOME__/Library/Logs/Atelier/com.atelier.observability.err</string>
 </dict>
 </plist>

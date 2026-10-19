@@ -19,8 +19,8 @@
     <key>ProcessType</key>
     <string>Background</string>
     <key>StandardOutPath</key>
-    <string>/tmp/com.atelier.prefect-routines.out</string>
+    <string>__HOME__/Library/Logs/Atelier/com.atelier.prefect-routines.out</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/com.atelier.prefect-routines.err</string>
+    <string>__HOME__/Library/Logs/Atelier/com.atelier.prefect-routines.err</string>
 </dict>
 </plist>

@@ -60,6 +60,12 @@ python3 scripts/observability/native.py install --archive /path/to/otelcol-contr
 launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.atelier.observability.plist"
 ```
 
+A template change, such as new log paths, makes `install` refuse the plist
+already in place: `launchctl bootout` the agent, remove
+`~/Library/LaunchAgents/com.atelier.observability.plist`, run install again,
+then bootstrap. The agent's stdout and stderr land in `~/Library/Logs/Atelier/`;
+`serve` trims a log past 8 MiB at start, keeping a 1 MiB tail beside it.
+
 The service generates its configuration in memory from `collector.py`.
 It binds OTLP HTTP to `127.0.0.1:14318` and health to `127.0.0.1:14319`.
 There is no remote exporter, metrics listener, raw spool, or debug-log sink.

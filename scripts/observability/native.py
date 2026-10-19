@@ -190,6 +190,10 @@ def serve() -> int:
     directory = state_dir()
     os.umask(0o077)
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for log in (Path.home() / "Library/Logs/Atelier").glob("com.atelier.observability.*"):
+        if log.suffix in {".out", ".err"} and log.stat().st_size > 8 * 2**20:  # launchd holds the fd; trim in place
+            log.with_suffix(log.suffix + ".prev").write_bytes(log.read_bytes()[-2**20:])
+            log.write_bytes(b"")
     binary = directory / "otelcol-contrib"
     version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=5)
     if version.returncode or version.stdout.strip() != f"otelcol-contrib version {VERSION}":
@@ -209,9 +213,10 @@ def install(archive: Path) -> None:
     directory = state_dir()
     root = Path(__file__).resolve().parents[2]
     target = Path.home() / "Library/LaunchAgents/com.atelier.observability.plist"
-    plist = (root / "scripts/launchd/com.atelier.observability.plist").read_text().replace("__ATELIER_ROOT__", escape(str(root)))
+    plist = (root / "scripts/launchd/com.atelier.observability.plist").read_text().replace(
+        "__ATELIER_ROOT__", escape(str(root))).replace("__HOME__", escape(str(Path.home())))
     if target.is_symlink() or (target.exists() and target.read_text() != plist):
-        raise ValueError("Refusing to replace an existing different launch agent")
+        raise ValueError("Refusing to replace an existing different launch agent; bootout and remove it, then install again")
     if directory.is_symlink():
         raise ValueError("Observability state directory must not be a symlink")
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -234,6 +239,7 @@ def install(archive: Path) -> None:
                 candidate.chmod(0o700)
                 os.link(candidate, binary)  # Atomic publication without replacing a concurrent install.
     target.parent.mkdir(parents=True, exist_ok=True)
+    (Path.home() / "Library/Logs/Atelier").mkdir(parents=True, exist_ok=True)  # launchd will not create it
     if not target.exists():
         with tempfile.TemporaryDirectory(prefix=".install-", dir=target.parent) as temporary:
             candidate = Path(temporary) / target.name

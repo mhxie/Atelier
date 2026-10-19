@@ -30,6 +30,7 @@ file_pattern = "<glob>"              # e.g. "*.md", "*-weekly.md"
 label = "<short human label>"
 drive_write_enforced = true          # output reaches $OV (see Policy below)
 # needs_drive_write_update = true    # alternative: tracked delivery debt; clear within a sprint
+# conditional_output = true  # finding-only notes; cadence cues skip it
 ```
 
 Exactly one of `drive_write_enforced` or `needs_drive_write_update` MUST be `true` for the policy cue to stay silent. The two flags are mutually exclusive in intent: the first declares compliance, the second declares migration debt being tracked.
@@ -87,7 +88,7 @@ Routines execute on the cloud side; the harness only observes their written outp
 
 ### Per-routine prompt contract
 
-The harness cannot enforce these declarations; they are policy, not mechanism. A routine that violates them will not be detected by the atelier. The contract is honored by the routine author at prompt-write time, not by the harness at runtime.
+The harness cannot enforce these declarations; they are policy, not mechanism. The contract is honored by the routine author at prompt-write time, not by the harness at runtime.
 
 Every routine prompt MUST declare the following at the top of its instructions, before any data fetch or analysis step:
 
@@ -124,10 +125,8 @@ receipts that attest domain output.
 | Domain evidence | `$OV/_meta/routine_receipts/<routine>/<cycle>.toml` |
 | Execution status and logs | Prefect flow/task state, queried through `scripts/routine_status.py` |
 
-The receipt is not a second execution state machine. It says only that the
-declared artifact was fresh, non-empty, inside `$OV`, and matched the
-routine's output declaration. Failed, crashed, cancelled, queued, and running
-states live only in Prefect.
+The receipt is not a second execution state machine. Failed, crashed,
+cancelled, queued, and running states live only in Prefect.
 
 ### Model routine declaration
 
@@ -249,7 +248,8 @@ duration_seconds = 123
 outcome = "delivered"
 output_file = "<vault-relative artifact>"
 artifact_sha256 = "<sha256 of artifact bytes>"
-verification_scope = "artifact-bytes"
+body_sha256 = "<sha256 after the frontmatter block>"
+verification_scope = "artifact-body"
 result_summary = "<screened bounded summary>"
 skipped_inputs = []
 verification = "passed"
@@ -260,8 +260,10 @@ pending until effects review. The parent validates freshness, path, pattern,
 and nonempty content, then computes the hash; model hash claims are ignored.
 A valid `noop` with skipped inputs is `blocked` because work remains.
 
-`scripts/routine_receipts.py` validates receipts. V3 stays content-unbound and
-unchanged; only v4 binds bytes. Neither proves correctness or delivery.
+`scripts/routine_receipts.py` validates receipts. V3 stays content-unbound; v4
+binds bytes and, under `artifact-body` scope, judges drift on the body after
+the frontmatter block, so `artifact-bytes` receipts cannot be re-judged and
+stay out of the drift cue. Neither proves correctness or delivery.
 
 On replay, `passed` skips only while its artifact validates;
 `blocked` may proceed and other states refuse. Invalid latest evidence becomes
